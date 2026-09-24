@@ -59,6 +59,7 @@ class TestcaseRunner:
             status, error = "FAILED", f"{type(e).__name__}: {e}"
             raise
         finally:
+            # value 字段不落 trace（密码等输入值；设计文档 21 节）
             self.rec.record_step(run_id, idx, step.action, locator, status, error,
                                  int((time.time() - t0) * 1000))
 
