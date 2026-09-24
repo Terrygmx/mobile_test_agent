@@ -1,0 +1,52 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyMissingOrEmptyDocstringInspection" enabled="true" level="WEAK WARNING" enabled_by_default="true" />
+    <inspection_tool class="PyMissingTypeHintsInspection" enabled="true" level="WEAK WARNING" enabled_by_default="true" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="Faker" />
+          <option value="fasteners" />
+          <option value="Flask" />
+          <option value="httpx" />
+          <option value="loguru" />
+          <option value="openpyxl" />
+          <option value="pandas" />
+          <option value="Pillow" />
+          <option value="pycryptodome" />
+          <option value="PyMySQL" />
+          <option value="pytest" />
+          <option value="allure-pytest" />
+          <option value="pytest-html" />
+          <option value="pytest-benchmark" />
+          <option value="python_box" />
+          <option value="pytest-xdist" />
+          <option value="pyzbar" />
+          <option value="qrcode" />
+          <option value="Requests" />
+          <option value="requests_toolbelt" />
+          <option value="xlrd" />
+          <option value="oracledb" />
+          <option value="pyDes" />
+          <option value="paramiko" />
+          <option value="pygal" />
+          <option value="gmssl" />
+          <option value="pytest-dependency" />
+          <option value="PyYAML" />
+          <option value="cryptography" />
+          <option value="python-dateutil" />
+          <option value="pymongo" />
+          <option value="ibm_db" />
+          <option value="pytest-ordering" />
+          <option value="opencv_python" />
+          <option value="flake8" />
+          <option value="ddddocr" />
+          <option value="pytest-order" />
+          <option value="PyJWT" />
+          <option value="redis" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>

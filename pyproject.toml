@@ -1,0 +1,14 @@
+[project]
+name = "mobile-test-agent"
+version = "0.1.0"
+description = "Source-aware intelligent regression executor for iOS apps"
+requires-python = ">=3.11"
+dependencies = [
+    "Appium-Python-Client>=4.0",
+    "pydantic>=2.0",
+    "PyYAML>=6.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
