@@ -22,7 +22,7 @@ class LLMProvider:
         self.model = model or os.environ.get("LLM_MODEL", "gpt-4o-mini")
         self.api_key = api_key or os.environ.get("LLM_API_KEY", "")
 
-    def complete(self, prompt: str, timeout: int = 30) -> str:
+    def complete(self, prompt: str, timeout: int = 120) -> str:
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions",
             data=json.dumps({
