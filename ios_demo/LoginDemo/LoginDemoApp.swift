@@ -67,12 +67,13 @@ struct HomeView: View {
         VStack(spacing: 12) {
             Text("首页")
                 .font(.largeTitle)
+                .accessibilityIdentifier("home_page")
             Text("欢迎, \(username)")
                 .accessibilityIdentifier("welcome_label")
             Spacer()
         }
         .padding()
-        .accessibilityIdentifier("home_page")
+        // id 不挂在容器上（会折叠子元素），挂在标题 Text 上作为页面标志
     }
 }
 

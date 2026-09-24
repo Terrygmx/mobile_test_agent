@@ -1,0 +1,27 @@
+id: login_demo_001
+name: 登录 Demo（Phase 0 验收用例）
+
+precondition:
+  reset: REINSTALL
+  app_path: "~/Library/Developer/Xcode/DerivedData/LoginDemo-ctemhqejzgzbnqhigvxhleqcmbjj/Build/Products/Debug-iphonesimulator/LoginDemo.app"
+
+steps:
+  - action: launch_app
+
+  - action: input
+    target: username_field
+    value: "${TEST_USERNAME}"
+
+  - action: input
+    target: password_field
+    value: "${TEST_PASSWORD}"
+
+  - action: tap
+    target: login_button
+
+  - action: wait_exists
+    target: home_page
+    timeout: 10
+
+  - action: assert_exists
+    target: home_page
