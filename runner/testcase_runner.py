@@ -9,7 +9,7 @@ import re
 import time
 
 from environment.secrets import SecretProvider
-from executor.executor import ElementNotFound, Executor
+from executor.executor import ElementNotFound, Executor, Locator
 from session.app_session import AppSession
 from tracer.recorder import Recorder
 
@@ -68,18 +68,28 @@ class TestcaseRunner:
         self.app.launch()
 
     def _do_tap(self, step) -> None:
-        self.ex.tap([{"type": "accessibility_id", "value": step.target}])
+        self.ex.tap(self._locator_chain(step.target))
 
     def _do_input(self, step) -> None:
-        self.ex.input([{"type": "accessibility_id", "value": step.target}],
+        self.ex.input(self._locator_chain(step.target),
                       self._resolve(step.value))
+
+    def _locator_chain(self, target: str) -> Locator:
+        """Phase 1 改造：id 失效时降级为 ObjC 常见可达锚点。
+
+        真实 App 靠文案（label=中文标题）可达；name 属性同时承载
+        accessibility id 与 label，故 predicate `name == X` 天然兜底两者。
+        """
+        return [
+            {"type": "accessibility_id", "value": target},
+            {"type": "predicate", "value": f"name == '{target}'"},
+        ]
 
     def _wait_exists(self, target: str, timeout: int):
         deadline = time.time() + timeout
-        loc = [{"type": "accessibility_id", "value": target}]
         while time.time() < deadline:
             try:
-                return self.ex.find(loc)
+                return self.ex.find(self._locator_chain(target))
             except ElementNotFound:
                 time.sleep(0.5)
         raise TestFailure(f"timeout waiting for {target}")

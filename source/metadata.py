@@ -7,18 +7,29 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 # 与 source/main.swift（swift_scan）一起更新；Phase 0 锁定行为
 PARSER_VERSION = "0.1.0"
 SCAN_BINARY = "/tmp/swift_scan"  # 由 make scan 构建（见 Makefile）
+OBJC_SCAN = str(Path(__file__).parent / "objc_scan.py")
 
 
-def build_metadata(swift_file: str, out_path: str | Path) -> dict:
-    subprocess.run([SCAN_BINARY, swift_file], check=True, capture_output=True)
-    raw = json.loads(subprocess.run([SCAN_BINARY, swift_file],
-                                    check=True, capture_output=True, text=True).stdout)
+def _scan(source_file: str) -> dict:
+    """按文件类型分派扫描器：.swift → swift_scan 二进制；.m/.h → objc_scan。"""
+    if source_file.endswith((".m", ".h")):
+        out = subprocess.run([sys.executable, OBJC_SCAN, source_file],
+                             check=True, capture_output=True, text=True).stdout
+        return json.loads(out)
+    out = subprocess.run([SCAN_BINARY, source_file],
+                         check=True, capture_output=True, text=True).stdout
+    return json.loads(out)
+
+
+def build_metadata(source_file: str, out_path: str | Path) -> dict:
+    raw = _scan(source_file)
     commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
                             capture_output=True, text=True).stdout.strip()
     meta = {

@@ -32,13 +32,19 @@ class Executor:
         return self.ds.driver
 
     def find(self, locator: Locator):
-        """按策略顺序查找。每个 action 前先 ensure_alive（设计文档硬约束）。"""
+        """按策略顺序查找。每个 action 前先 ensure_alive（设计文档硬约束）。
+
+        Phase 1 改造：真实 App 是 ObjC/UIKit，元素无 accessibility id，
+        依赖 label（按钮文案）与 class+label 组合定位，故增加 class_chain 策略。
+        """
         self.ds.ensure_alive()
+        by_map = {
+            "accessibility_id": "accessibility id",
+            "predicate": "-ios predicate string",
+            "class_chain": "-ios class chain",
+        }
         for strat in locator:
-            by = {"accessibility_id": "accessibility id", "predicate": "-ios predicate string"}[
-                strat["type"]
-            ]
-            elements = self.driver.find_elements(by, strat["value"])
+            elements = self.driver.find_elements(by_map[strat["type"]], strat["value"])
             if len(elements) == 1:
                 return elements[0]
             if len(elements) > 1:
