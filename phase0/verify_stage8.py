@@ -39,7 +39,7 @@ class StubLLM(LLMProvider):
 
 GOOD = json.dumps({
     "target": {"type": "accessibility_id", "value": "signin_button"},
-    "scope": "LoginDemoApp", "reason": "语义等价改名",
+    "action": "tap", "scope": "LoginDemoApp", "reason": "语义等价改名",
     "confidence": 0.93, "risk_level": "LOW",
 })
 HIGH_RISK = GOOD.replace('"LOW"', '"HIGH"')
@@ -79,7 +79,7 @@ def main() -> int:
 
     print("[3] 恢复目标不唯一 → fail closed ...")
     ambiguous = json.dumps({"target": {"type": "accessibility_id", "value": "??"},
-                            "confidence": 0.9, "risk_level": "LOW"})
+                            "action": "tap", "confidence": 0.9, "risk_level": "LOW"})
     # 用宽 predicate 目标没法用 accessibility_id 表达——改用 stub 返回 username_field（唯一），
     # 唯一性分支已由 Stage 4 验证；此处验证 LLM_TARGET_NOT_FOUND：
     not_found = good_target.replace("username_field", "no_such_thing")
@@ -93,7 +93,7 @@ def main() -> int:
     run_id = rec.start_run("stage8_verify")
     r = recover("login_button_xyz", ElementNotFound("x"), ex, METADATA,
                 LLMBudget(max_calls_per_run=5), StubLLM(good_target, calls),
-                run_id=run_id, recorder=rec)
+                step_id=None, recorder=rec)
     assert r["status"] == "RECOVERED" and r["llm_target"] == "username_field", r
     rows = rec.conn.execute(
         "SELECT strategy, llm_target, accepted FROM recoveries WHERE accepted=1"

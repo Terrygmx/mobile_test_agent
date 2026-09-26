@@ -52,14 +52,15 @@ class Recorder:
     def record_step(self, run_id: str, step_index: int, action_type: str,
                     locator: dict | None = None, status: str = "SUCCESS",
                     error: str | None = None, latency_ms: int = 0,
-                    screenshot_path: str | None = None) -> int:
+                    screenshot_path: str | None = None,
+                    ui_tree_path: str | None = None) -> int:
         """locator 先脱敏再落盘（硬约束：Recorder 内无先写后脱敏路径）。"""
         cur = self.conn.execute(
             "INSERT INTO steps (run_id, step_index, action_type, locator, status,"
-            " error, latency_ms, screenshot_path) VALUES (?,?,?,?,?,?,?,?)",
+            " error, latency_ms, screenshot_path, ui_tree_path) VALUES (?,?,?,?,?,?,?,?,?)",
             (run_id, step_index, action_type,
              json.dumps(redact(locator)) if locator else None,
-             status, error, latency_ms, screenshot_path),
+             status, error, latency_ms, screenshot_path, ui_tree_path),
         )
         self.conn.commit()
         return cur.lastrowid

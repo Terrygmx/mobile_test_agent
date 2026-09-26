@@ -44,7 +44,11 @@ class Executor:
             "class_chain": "-ios class chain",
         }
         for strat in locator:
-            elements = self.driver.find_elements(by_map[strat["type"]], strat["value"])
+            by = by_map.get(strat["type"])  # review P1-6：未知策略报清晰错误
+            if by is None:
+                raise ValueError(f"unknown locator strategy {strat['type']!r}, "
+                                 f"supported={sorted(by_map)}")
+            elements = self.driver.find_elements(by, strat["value"])
             if len(elements) == 1:
                 return elements[0]
             if len(elements) > 1:

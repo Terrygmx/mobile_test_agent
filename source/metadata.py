@@ -30,8 +30,12 @@ def _scan(source_file: str) -> dict:
 
 def build_metadata(source_file: str, out_path: str | Path) -> dict:
     raw = _scan(source_file)
-    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
-                            capture_output=True, text=True).stdout.strip()
+    # review P2-5：git 调用加保护，非 git 目录不崩溃（与 recorder 一致）
+    try:
+        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                                capture_output=True, text=True).stdout.strip()
+    except Exception:
+        commit = "unknown"
     meta = {
         "app_version": "debug",
         "build": "local",

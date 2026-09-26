@@ -26,8 +26,11 @@ let sourceFile = Parser.parse(source: try String(contentsOfFile: inputPath, enco
 let visitor = AccessibilityIDVisitor(path: inputPath)
 visitor.walk(sourceFile)
 
+// review P0-3：元素按所属 struct 归组，screen 过滤在 reconcile 侧生效
+let screenName = visitor.currentScreen ?? inputPath.components(separatedBy: "/").last!.replacingOccurrences(of: ".swift", with: "")
+
 let output: [String: Any] = [
-    "screen": inputPath.components(separatedBy: "/").last!.replacingOccurrences(of: ".swift", with: ""),
+    "screen": screenName,
     "elements": visitor.elementsJSON
 ]
 
@@ -39,10 +42,21 @@ print(String(data: data, encoding: .utf8)!)
 final class AccessibilityIDVisitor: SyntaxVisitor {
     let path: String
     var elementsJSON: [[String: Any]] = []
+    // review P0-3：记录当前所属 struct（≈ screen 归属）
+    var currentScreen: String?
 
     init(path: String) {
         self.path = path
         super.init(viewMode: .sourceAccurate)
+    }
+
+    override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind {
+        currentScreen = node.name.text
+        return .visitChildren
+    }
+
+    override func visitPost(_ node: StructDeclSyntax) {
+        currentScreen = nil
     }
 
     override func visitPost(_ node: FunctionCallExprSyntax) {
@@ -67,15 +81,18 @@ final class AccessibilityIDVisitor: SyntaxVisitor {
                 "type": "unknown",
                 "accessibilityId": str.representedLiteralValue ?? "",
                 "resolution_type": "literal",
+                "screen": currentScreen ?? NSNull(),
                 "source": ["file": (path as NSString).lastPathComponent, "line": location.line],
             ])
         } else {
             // 非字面量：不猜（设计文档 7 节硬约束）
+            // review P2-7：unknown 的 id 带位置，避免多元素重复
             elementsJSON.append([
-                "id": "UNKNOWN",
+                "id": "UNKNOWN:\((path as NSString).lastPathComponent):\(location.line)",
                 "type": "unknown",
                 "accessibilityId": NSNull(),
                 "resolution_type": "unknown",
+                "screen": currentScreen ?? NSNull(),
                 "source": ["file": (path as NSString).lastPathComponent, "line": location.line],
             ])
         }

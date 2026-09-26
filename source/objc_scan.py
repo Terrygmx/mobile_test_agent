@@ -21,15 +21,18 @@ ASSIGN = re.compile(
     r'@(?P<value>"[^"]*"|\w+)'
 )
 
-# Xcode 折叠 UTF-16 转义后中文注释无影响；跳过注释行
-COMMENT = re.compile(r"^\s*//")
+# Xcode 折叠 UTF-16 转义后中文注释无影响；跳过行注释（review P2-8：块注释另行处理）
+LINE_COMMENT = re.compile(r"^\s*//")
+# /* ... */ 块注释整体剥离，防止其中的赋值语句误报
+BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
 
 
 def scan_file(path: str) -> list[dict]:
     elements = []
     with open(path, encoding="utf-8", errors="replace") as f:
         for lineno, line in enumerate(f, 1):
-            if COMMENT.match(line):
+            line = BLOCK_COMMENT.sub("", line)
+            if LINE_COMMENT.match(line):
                 continue
             m = ASSIGN.search(line)
             if not m:

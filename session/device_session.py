@@ -19,17 +19,22 @@ class InfraError(Exception):
 
 
 class DeviceSession:
-    def __init__(self, appium_url: str, capabilities: dict, infra_log: Path | None = None):
+    def __init__(self, appium_url: str, capabilities: dict, infra_log: Path | None = None,
+                 recorder=None, run_id: str | None = None):
         self.appium_url = appium_url
         self.caps = capabilities
         self.infra_log = infra_log or Path("out/infra_events.jsonl")
         self.driver: webdriver.Remote | None = None
+        # review P0-2：infra 事件收敛到 SQLite（JSONL 保留为 debug 副本）
+        self.recorder = recorder
+        self.run_id = run_id
 
-    # --- infra event 记录（Stage 5 迁入 SQLite） ---
     def _log_infra(self, event_type: str) -> None:
         self.infra_log.parent.mkdir(exist_ok=True)
         with open(self.infra_log, "a") as f:
             f.write(json.dumps({"event_type": event_type, "timestamp": time.time()}) + "\n")
+        if self.recorder is not None:
+            self.recorder.record_infra(self.run_id, event_type)
 
     # --- 核心生命周期 ---
     def connect(self) -> webdriver.Remote:

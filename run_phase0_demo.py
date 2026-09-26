@@ -15,7 +15,7 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # review P2-1：项目根，非上级
 
 from agent.recovery import recover
 from environment.secrets import EnvSecretProvider
@@ -32,9 +32,11 @@ from tracer.recorder import Recorder
 
 ROOT = Path(__file__).resolve().parent
 
-# Phase 0 测试口令（demo app：任意非空即可登录；正式环境走 Vault）
+# Phase 0 测试口令：默认值只提示来源，不内嵌明文（review C5/P2）
 os.environ.setdefault("TEST_USERNAME", "qa_agent")
-os.environ.setdefault("TEST_PASSWORD", "test_pass_123")
+if "TEST_PASSWORD" not in os.environ:
+    print("⚠ 未设置 TEST_PASSWORD，用 demo 默认（仅 Phase 0 演示用）")
+    os.environ.setdefault("TEST_PASSWORD", "demo-only-not-a-secret")
 
 
 def main() -> int:
@@ -92,10 +94,10 @@ def main() -> int:
         llm = LLMProvider()
 
     r = recover(expected, err, ex, meta, LLMBudget(max_calls_per_run=3), llm,
-                run_id=run_id, recorder=rec)
+                recorder=rec)
     print(f"    recovery: {json.dumps(r, ensure_ascii=False)}")
 
-    rec.end_run(run_id, "RECOVERED" if r["status"] == "RECOVERED" else r["status"])
+    rec.end_run(run_id, "PASS" if r["status"] == "RECOVERED" else "FAIL")  # review F8：status 枚举收敛到 PASS/FAIL/INFRA_FAILURE
     print(f"\n[3] run {run_id} 状态: {rec.conn.execute('SELECT status FROM runs WHERE run_id=?', (run_id,)).fetchone()[0]}")
 
     if r["status"] == "RECOVERED":
@@ -109,6 +111,7 @@ class StubLLM(LLMProvider):
     def complete(self, prompt, timeout=30):
         return json.dumps({
             "target": {"type": "accessibility_id", "value": "username_field"},
+            "action": "tap",
             "scope": "LoginDemoApp", "reason": "stub: 等价元素",
             "confidence": 0.9, "risk_level": "LOW",
         })

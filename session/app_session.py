@@ -10,7 +10,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from session.device_session import DeviceSession
+from session.device_session import DeviceSession, InfraError
 
 
 def _simctl(*args: str) -> None:
@@ -50,7 +50,10 @@ class AppSession:
         """卸载重装（模拟器）。Appium session 不受影响。"""
         d = self.ds.ensure_alive()
         d.remove_app(self.bundle_id)
-        _simctl("install", d.capabilities.get("udid", ""), app_path)
+        udid = d.capabilities.get("udid")  # review P1-3：缺失时报清晰错误，不传空串
+        if not udid:
+            raise InfraError("capabilities missing 'udid'; simctl install needs it")
+        _simctl("install", udid, app_path)
         d.activate_app(self.bundle_id)
 
     def reset_state(self, strategy: str, **kwargs) -> None:
