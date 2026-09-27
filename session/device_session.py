@@ -29,6 +29,11 @@ class DeviceSession:
         self.recorder = recorder
         self.run_id = run_id
 
+    def attach_recorder(self, recorder, run_id: str) -> None:
+        """review R2-4：run_id 在 start_run 之后才存在，允许连接后补挂。"""
+        self.recorder = recorder
+        self.run_id = run_id
+
     def _log_infra(self, event_type: str) -> None:
         self.infra_log.parent.mkdir(exist_ok=True)
         with open(self.infra_log, "a") as f:

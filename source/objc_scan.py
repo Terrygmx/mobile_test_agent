@@ -45,7 +45,8 @@ def scan_file(path: str) -> list[dict]:
                 value = None
                 resolution = "unknown"  # 变量/表达式，不硬猜（设计文档第 7 节）
             elements.append({
-                "id": value or "UNKNOWN",
+                # review R2-6：unknown 的 id 带位置，与 swift_scan 同步，避免多元素重复
+                "id": value or f"UNKNOWN:{path.rsplit('/', 1)[-1]}:{lineno}",
                 "type": "unknown",
                 "accessibilityId": value,
                 "resolution_type": resolution,

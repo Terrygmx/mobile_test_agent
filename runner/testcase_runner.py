@@ -43,6 +43,8 @@ class TestcaseRunner:
         self.secrets = secrets
         # review P0-1：{"metadata": ..., "budget": ..., "llm": ...}，可选
         self.recovery_ctx = recovery_context
+        # review R2-3：recovery 行 id（steps 落库后回填 step_id 用）
+        self._last_rec_row: int | None = None
 
     def _resolve(self, value: str | None) -> str | None:
         """'${VAR}' → secret。只在完整匹配时解析，防止部分替换泄漏。"""
@@ -74,35 +76,48 @@ class TestcaseRunner:
             getattr(self, f"_do_{step.action}")(step)
         except Exception as e:
             status, error = "FAILED", f"{type(e).__name__}: {e}"
-            # review P0-1：元素定位失败 → 自动 reconcile + recovery
+            # review P0-1/R2-1：元素定位失败 → 自动 reconcile + recovery；
+            # 恢复成功则不 raise，继续执行后续步骤（用例最终 PASS，设计目标 7）
             if (isinstance(e, (ElementNotFound, AmbiguousElement))
                     and step.target and self.recovery_ctx):
                 rec_result = self._try_recovery(step, e)
                 if rec_result and rec_result["status"] == "RECOVERED":
                     status, error = "RECOVERED", None
-            raise
+                else:
+                    raise
+            else:
+                raise
         finally:
             # value 字段不落 trace（密码等输入值，设计文档硬约束：写盘前脱敏）
             shot, tree = self._save_evidence(run_id, idx) if status != "SUCCESS" else (None, None)
             step_id = self.rec.record_step(run_id, idx, step.action, locator, status,
                                            error, int((time.time() - t0) * 1000),
                                            screenshot_path=shot, ui_tree_path=tree)
-            if status == "RECOVERED" and self.recovery_ctx and step_id:
-                # review P0-2：recoveries.step_id 回填真实 steps.id
+            # review R2-3：recover() 返回 rec_row_id（精确行），按行 id 回填
+            # step_id，替代全局 MAX(id)——并发/多 run 下不会改错行
+            if status == "RECOVERED" and self._last_rec_row:
                 self.rec.conn.execute(
-                    "UPDATE recoveries SET step_id=? WHERE id="
-                    "(SELECT MAX(id) FROM recoveries)", (step_id,))
+                    "UPDATE recoveries SET step_id=? WHERE id=?",
+                    (step_id, self._last_rec_row))
                 self.rec.conn.commit()
+                self._last_rec_row = None
 
     def _try_recovery(self, step, error):
-        """P0-1：把 Stage 8 的 recover 挂进自动流程。失败不掩盖原异常。"""
+        """P0-1：把 Stage 8 的 recover 挂进自动流程。失败不掩盖原异常。
+
+        review R2-3：recovery 行先落库（step_id=0），steps 行后落库，
+        拿到精确行 id 后在此回填——不依赖全局 MAX(id)。
+        """
         from agent.recovery import recover  # 局部导入避免循环依赖
 
         ctx = self.recovery_ctx
         try:
-            return recover(step.target, error, self.ex, ctx["metadata"],
-                           ctx["budget"], ctx["llm"], recorder=self.rec,
-                           step_action=step.action, step_value=self._resolve(step.value))
+            result = recover(step.target, error, self.ex, ctx["metadata"],
+                             ctx["budget"], ctx["llm"], recorder=self.rec,
+                             step_action=step.action, step_value=self._resolve(step.value))
+            # review R2-3：暂存精确 recoveries 行 id，steps 落库后回填
+            self._last_rec_row = result.get("rec_row_id")
+            return result
         except Exception:
             return None
 

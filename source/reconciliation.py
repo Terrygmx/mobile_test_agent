@@ -12,14 +12,27 @@ import xml.etree.ElementTree as ET
 
 def reconcile_local(expected_element_id: str, screen: str,
                     source_metadata: dict, runtime_page_source: str) -> dict:
-    """只在 locator 失败时调用；只对比当前 screen 的 metadata 子集（性能红线）。"""
-    all_elements = source_metadata.get("elements", [])
+    """只在 locator 失败时调用；只对比当前 screen 的 metadata 子集（性能红线）。
 
-    # 当前 screen 的元素子集；screen 未知（空）时退化为全量，不静默丢信息
-    if screen:
+    review R2-0：传入 screen 可能是顶层文件名（swift_scan 语义，不可作过滤键）。
+    过滤基准是元素级 screen 与 metadata 声明的 screens 集合：
+    1. 传入 screen ∈ declared（调用方给了真实 struct 名）→ 严格按当前 screen 过滤；
+    2. 传入 screen ∉ declared（顶层文件名）→ 退化为「元素 screen ∈ declared 全集」，
+       保证 DRIFT 仍判得出（此前此处过滤成空集 → 恒 UNKNOWN，回归 [5]）；
+    3. 元素无 screen 字段（旧 schema）→ 兜底纳入。
+    """
+    all_elements = source_metadata.get("elements", [])
+    declared = set(source_metadata.get("screens") or ([screen] if screen else []))
+
+    if screen and screen in declared:
         screen_elements = [
             e for e in all_elements
-            if e.get("screen") in (None, screen)  # 无归属的旧 metadata 元素也算在内
+            if e.get("screen") is None or e.get("screen") == screen
+        ]
+    elif declared:
+        screen_elements = [
+            e for e in all_elements
+            if e.get("screen") is None or e.get("screen") in declared
         ]
     else:
         screen_elements = all_elements

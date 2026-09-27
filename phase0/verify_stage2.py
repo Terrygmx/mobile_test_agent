@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from session.device_session import DeviceSession, InfraError
+from tracer.recorder import Recorder
 
 CAPS = {
     "platform_name": "iOS",
@@ -28,7 +29,9 @@ CAPS = {
 
 def main() -> int:
     infra_log = Path(tempfile.mkdtemp()) / "infra_events.jsonl"
-    ds = DeviceSession("http://127.0.0.1:4723", CAPS, infra_log=infra_log)
+    rec = Recorder(Path(tempfile.mkdtemp()) / "trace.db")  # review R2-4：infra 同时验 SQLite
+    ds = DeviceSession("http://127.0.0.1:4723", CAPS, infra_log=infra_log,
+                       recorder=rec, run_id="stage2_verify")
 
     print("[1] connect + health check ...")
     ds.connect()
@@ -54,6 +57,12 @@ def main() -> int:
     types = [e.split('"event_type": "')[1].split('"')[0] for e in events]
     assert "WDA_DEAD" in types and "WDA_RESTARTED" in types, types
     print(f"    events={types}")
+    # review R2-4：SQLite infra_events 表同步验证（设计目标 2 的验收方式）
+    rows = rec.conn.execute(
+        "SELECT event_type FROM infra_events WHERE run_id='stage2_verify'").fetchall()
+    sql_types = [r[0] for r in rows]
+    assert "WDA_DEAD" in sql_types and "WDA_RESTARTED" in sql_types, sql_types
+    print(f"    sqlite infra_events={sql_types}")
 
     # 恢复后真实操作可用（WDA 真的活着，不是假恢复）
     ds.ensure_alive().find_element("accessibility id", "login_button")

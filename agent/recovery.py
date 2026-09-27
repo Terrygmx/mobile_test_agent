@@ -49,9 +49,11 @@ def recover(expected_id: str, error: Exception, ex: Executor,
     def done(status: str, accepted: bool = False) -> dict:
         result["status"] = status
         if recorder is not None:
-            recorder.record_recovery(step_id or 0, "llm", result["llm_target"],
-                                     result["confidence"], result["risk_level"] or "NONE",
-                                     int((time.time() - t0) * 1000), accepted)
+            rid = recorder.record_recovery(step_id or 0, "llm", result["llm_target"],
+                                           result["confidence"], result["risk_level"] or "NONE",
+                                           int((time.time() - t0) * 1000), accepted)
+            # review R2-3：返回精确行 id，调用方无需用全局 MAX(id) 猜
+            result["rec_row_id"] = rid
         return result
 
     # 1. budget（fail closed）
@@ -95,10 +97,12 @@ def recover(expected_id: str, error: Exception, ex: Executor,
     if result["risk_level"] != "LOW":
         return done("LLM_RISK_NOT_LOW")
 
-    # 4.5 review P1-2：动作白名单——LLM 不得改动作类型；input 必须有值
+    # 4.5 review P1-2：动作白名单——LLM 不得改动作类型
     if result["action"] not in ALLOWED_ACTIONS.get(step_action, set()):
         return done("LLM_ACTION_MISMATCH")
-    if result["action"] == "input" and not (result.get("value") or step_value):
+    # review R2-2：input 恢复值必须优先用 SecretProvider 解析的原值；
+    # LLM 编造的输入内容（幻觉密码等）只在原步骤无值时兜底
+    if result["action"] == "input" and not step_value and not result.get("value"):
         return done("LLM_NO_VALUE")
 
     # 5. 唯一性校验 + 执行
@@ -110,8 +114,8 @@ def recover(expected_id: str, error: Exception, ex: Executor,
     except AmbiguousElement:
         return done("LLM_TARGET_AMBIGUOUS")
     if result["action"] == "input":
-        value = result.get("value") or step_value or ""
-        ex.input(loc, value)
+        # review R2-2：原值（secret 解析后）优先，LLM value 仅兜底
+        ex.input(loc, step_value or result.get("value") or "")
     else:
         ex.tap(loc)
     return done("RECOVERED", accepted=True)

@@ -12,6 +12,7 @@ struct Element: Codable {
     let type: String
     let accessibilityId: String?
     let resolutionType: String
+    let screen: String?
     let source: SourceLoc
 }
 
@@ -27,10 +28,13 @@ let visitor = AccessibilityIDVisitor(path: inputPath)
 visitor.walk(sourceFile)
 
 // review P0-3：元素按所属 struct 归组，screen 过滤在 reconcile 侧生效
-let screenName = visitor.currentScreen ?? inputPath.components(separatedBy: "/").last!.replacingOccurrences(of: ".swift", with: "")
+// review R2-0：顶层额外输出 screens 列表（顶层 screen=文件名，与元素级 struct 名
+// 本就不同；消费方用元素级 screen 或 screens 列表解析）
+let screenName = inputPath.components(separatedBy: "/").last!.replacingOccurrences(of: ".swift", with: "")
 
 let output: [String: Any] = [
     "screen": screenName,
+    "screens": visitor.screenNames,
     "elements": visitor.elementsJSON
 ]
 
@@ -44,6 +48,8 @@ final class AccessibilityIDVisitor: SyntaxVisitor {
     var elementsJSON: [[String: Any]] = []
     // review P0-3：记录当前所属 struct（≈ screen 归属）
     var currentScreen: String?
+    // review R2-0：收集全部 struct 名，供顶层 screens 输出
+    var screenNames: [String] = []
 
     init(path: String) {
         self.path = path
@@ -52,6 +58,9 @@ final class AccessibilityIDVisitor: SyntaxVisitor {
 
     override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind {
         currentScreen = node.name.text
+        if !screenNames.contains(node.name.text) {
+            screenNames.append(node.name.text)
+        }
         return .visitChildren
     }
 

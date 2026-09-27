@@ -32,6 +32,12 @@ class Recorder:
         Path(db_path).parent.mkdir(exist_ok=True)
         self.conn = sqlite3.connect(db_path)
         self.conn.executescript(SCHEMA)
+        # review R2-6：清理历史异常中断留下的 RUNNING 残留（进程重启时不可能仍在跑）
+        self.conn.execute(
+            "UPDATE runs SET status='FAIL', end_time=? WHERE status='RUNNING'",
+            (_now(),),
+        )
+        self.conn.commit()
 
     def start_run(self, test_case: str) -> str:
         run_id = str(uuid.uuid4())[:8]
@@ -67,12 +73,13 @@ class Recorder:
 
     def record_recovery(self, step_id: int, strategy: str, llm_target: str | None,
                         confidence: float, risk_level: str, latency_ms: int,
-                        accepted: bool) -> None:
-        self.conn.execute(
+                        accepted: bool) -> int:
+        cur = self.conn.execute(
             "INSERT INTO recoveries VALUES (NULL,?,?,?,?,?,?,?)",
             (step_id, strategy, llm_target, confidence, risk_level, latency_ms, accepted),
         )
         self.conn.commit()
+        return int(cur.lastrowid or 0)  # review R2-3：调用方按精确行 id 回填 step_id
 
     def record_infra(self, run_id: str, event_type: str) -> None:
         self.conn.execute(

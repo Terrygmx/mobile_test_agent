@@ -17,13 +17,15 @@ PROMPT_TEMPLATE = """你是 iOS UI 自动化测试的元素定位恢复专家。
 {{
   "target": {{"type": "accessibility_id", "value": "<运行时元素的 accessibility id>"}},
   "action": "<tap 或 input>",
-  "value": "<action 为 input 时的输入内容，否则省略>",
+  "input_value": null,
   "scope": "{screen}",
   "reason": "<一句话理由>",
   "confidence": <0.0-1.0>,
   "risk_level": "LOW" | "MEDIUM" | "HIGH"
 }}
 action 必须与失败步骤的原动作一致（原步骤是 input 则不允许改 tap）。
+input_value（输入内容）由系统从 SecretProvider 注入，不要返回明文——保持 null。
+（注意：target.value 是元素的定位 id；input_value 是输入内容，两者不同字段。）
 risk_level 规则：tap 普通按钮/输入框为 LOW；涉及删除/支付/提交为 HIGH。
-找不到等价元素时 value 填 null，confidence 0。
+找不到等价元素时 target.value 填 null，confidence 0。
 """
