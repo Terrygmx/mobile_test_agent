@@ -54,3 +54,14 @@
 - **决定**：留到 Phase 1 上并发时随 runner 进程模型一起设计（与 reviewer 建议
   一致，review 报告第五节也列为"可留到 Phase 1"）。
 - **触发条件**：Phase 1 引入多进程/多 worker 共享 trace.db 时必须重审此项。
+
+## M0 Review（R4-1~3，2026-09-28）处理记录
+
+- R4-1 ✅ 已修（reviewer 推荐方向）：根级空 conftest.py（pytest 自动插项目根到 sys.path）
+  + 删除 test_smoke.py 指错目录的 sys.path hack（parents[1]=tests/，形同虚设）
+  + 删除根级 __init__.py（P0 遗留、全仓 0 处包引用，是裸 pytest collection error 的根因——
+  它让 pytest 把根的父目录插进 sys.path）。验收：裸 `.venv/bin/pytest tests/unit -q` 2 passed。
+- R4-2 ✅ 已修：P2-3 注释归位到 scan 目标上方。
+- R4-3 ✅ 已修：Makefile 去掉 -q，输出级别单一大本营在 pytest.ini。
+- 无不修改项。附注：删除根级 __init__.py 后 Stage 6/7 复跑通过；Stage 8 的失败与本次
+  改动无关（该脚本本就需要 Appium :4723，今晨已按用户要求停掉），真机环节复跑即可。

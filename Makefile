@@ -1,7 +1,7 @@
-# review P2-3：删除死代码（swift_scan.swift 搬移、恒假 no-op），保留真实构建链
 test:
-	@bash -c 'source .venv/bin/activate && python -m pytest tests -q'
+	@bash -c 'source .venv/bin/activate && python -m pytest tests'
 
+# review P2-3：删除死代码（swift_scan.swift 搬移、恒假 no-op），保留真实构建链
 scan:
 	@bash -c 'export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer; \
 	TOOLCHAIN=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr; \
