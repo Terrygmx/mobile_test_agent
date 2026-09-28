@@ -5,11 +5,17 @@
 
 ## 跳过项
 
-### F5 — 验收用真实改名重编译，而非"查不存在元素"模拟
-- **原因**：真实改名需要内网环境的源 App 包重编译；当前离线环境无法出包。
-- **现状**：语义已由 DRIFT 检测路径 + R2-0 回归用例（stage7 [5]）覆盖；
-  stub 场景证明 reconcile→recover 链路对"源码有/运行时无"判 DRIFT 正确。
-- **风险**：低。等真实 App 内网环境后补端到端用例（阶段 9 计划内）。
+### ~~F5 — 验收用真实改名重编译，而非"查不存在元素"模拟~~ ✅ 已关闭（2026-09-28）
+- **已补齐**：内网环境就绪后执行了真实改名端到端（`phase0/verify_stage9_f5.py`）：
+  - `username_field`→`account_field`、`login_button`→`submit_button` 真实改名，
+    重编译重装，metadata 保持旧产物 → 源/运行时真实 DRIFT；
+  - 真实 LLM（内网网关 step-5-preview）走 reconcile → recover → 唯一性校验 →
+    执行，steps.status=RECOVERED、runs.status=PASS、recoveries.accepted=1 且
+    step_id 精确回填；
+  - 验证后源码已还原、重编译，Stage 6 + demo 复跑通过（基线无回归）。
+- **附带发现**：tap 登录按钮（提交类）时 LLM 可能判 HIGH → fail-closed 拒绝
+  （LLM_RISK_NOT_LOW）。这是 prompt 规则的正确执行，但意味着"tap 提交类按钮"
+  不适合做恢复成功的硬断言场景；确定性断言请用 input 场景。
 
 ### F6 — 元素 type 恒为 unknown（未传元素级 type）
 - **原因**：对 reconciliation 候选过滤是增强项（减少 candidates 噪声），
