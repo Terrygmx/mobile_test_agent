@@ -88,6 +88,9 @@ def recover(expected_id: str, error: Exception, ex: Executor,
         result["confidence"] = float(out.get("confidence", 0))
         result["risk_level"] = out.get("risk_level")
         result["action"] = out.get("action")
+        # review R3-1：解析器与 prompt 契约同步——input_value 是输入内容字段；
+        # 旧字段 value 保留为 legacy 兜底（防 LLM 无视新契约回填旧字段）
+        result["input_value"] = out.get("input_value")
     except Exception:
         return done("LLM_INVALID_OUTPUT")
     if not result["llm_target"]:
@@ -102,7 +105,8 @@ def recover(expected_id: str, error: Exception, ex: Executor,
         return done("LLM_ACTION_MISMATCH")
     # review R2-2：input 恢复值必须优先用 SecretProvider 解析的原值；
     # LLM 编造的输入内容（幻觉密码等）只在原步骤无值时兜底
-    if result["action"] == "input" and not step_value and not result.get("value"):
+    if (result["action"] == "input" and not step_value
+            and not (result.get("input_value") or result.get("value"))):
         return done("LLM_NO_VALUE")
 
     # 5. 唯一性校验 + 执行
@@ -115,7 +119,8 @@ def recover(expected_id: str, error: Exception, ex: Executor,
         return done("LLM_TARGET_AMBIGUOUS")
     if result["action"] == "input":
         # review R2-2：原值（secret 解析后）优先，LLM value 仅兜底
-        ex.input(loc, step_value or result.get("value") or "")
+        ex.input(loc, step_value or result.get("input_value")
+                 or result.get("value") or "")
     else:
         ex.tap(loc)
     return done("RECOVERED", accepted=True)

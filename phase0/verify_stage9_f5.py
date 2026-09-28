@@ -14,6 +14,7 @@
 """
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -40,8 +41,10 @@ CAPS = {
     "udid": UDID, "bundle_id": "com.phaset0.logindemo", "no_reset": True,
     "new_command_timeout": 120,
 }
-GATEWAY = {"base_url": "http://127.0.0.1:15721/v1",
-           "model": "step-5-preview", "api_key": "sk-test"}
+# review R3-5：key 走环境变量（与 LLMProvider 默认行为对齐），不内嵌脚本
+GATEWAY = {"base_url": os.environ.get("LLM_BASE_URL", "http://127.0.0.1:15721/v1"),
+           "model": os.environ.get("LLM_MODEL", "step-5-preview"),
+           "api_key": os.environ.get("LLM_API_KEY", "sk-test")}
 
 
 def main() -> int:
@@ -59,7 +62,7 @@ def main() -> int:
     time.sleep(2)
 
     llm = LLMProvider(**GATEWAY)
-    run_id = rec.start_run("f5_real_rename")
+    run_id = rec.start_run("f5_real_rename_wrapper")  # R3-3：与 runner 内部 run 区分
     ds.attach_recorder(rec, run_id)
 
     print("[1] 运行时确认 login_button 真的不在（真实改名生效）...")
@@ -97,6 +100,8 @@ def main() -> int:
         "SELECT s.id, s.run_id, s.step_index, s.status FROM steps s "
         "JOIN runs ru ON ru.run_id=s.run_id WHERE ru.test_case='f5_real_rename' "
         "ORDER BY s.id DESC LIMIT 1").fetchall()
+    # R3-3：无 step 行时清晰失败，而非 IndexError
+    assert rows, "runner 的 run 未落任何 steps 行（recovery 链路可能早退）"
     step_row = rows[0]
     run_row = rec.conn.execute(
         "SELECT status FROM runs WHERE run_id=?", (step_row[1],)).fetchone()

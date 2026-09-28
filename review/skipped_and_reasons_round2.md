@@ -38,3 +38,19 @@
 - R2-6：objc UNKNOWN:file:line 同步、跨行块注释、prompt target.value/input_value
   措辞消歧、runs RUNNING 残留启动清理
 - 附带：verify_stage7 sys.path 修正、verify_stage2 缺失的 Recorder 导入
+
+## Round 3（2026-09-28）处理记录
+
+已修（review_round3 的 R3-1/2/3/5，均为一行级）：
+- R3-1 解析器同步消费 `input_value`（旧 `value` 保留为 legacy 兜底）
+- R3-2 StubLLM 按 prompt 原动作回显，--stub 自动恢复段真实可演示
+- R3-3 F5 脚本 rows 空守卫 + 外层 run 改名 wrapper 区分
+- R3-5 网关 key 改 os.environ 读取
+
+### 不修改：R3-4 RUNNING 清理假设单进程
+- **原因**：Phase 0 架构单进程跑用例（每 Appium session 一个 runner），不存在
+  两进程共享 trace.db 的场景；改为按 pid/心跳判定需要引入心跳表和过期阈值，
+  复杂度与当前风险不成比例。
+- **决定**：留到 Phase 1 上并发时随 runner 进程模型一起设计（与 reviewer 建议
+  一致，review 报告第五节也列为"可留到 Phase 1"）。
+- **触发条件**：Phase 1 引入多进程/多 worker 共享 trace.db 时必须重审此项。

@@ -134,9 +134,15 @@ def main() -> int:
 
 class StubLLM(LLMProvider):
     def complete(self, prompt, timeout=30):
+        # review R3-2：按 prompt 中的原动作回显——否则 input 步骤恢复时
+        # stub 返回 tap 必然 LLM_ACTION_MISMATCH，--stub 模式的自动恢复段静默失败
+        import re as _re
+        m = _re.search(r'执行 (tap|input)', prompt)
+        action = m.group(1) if m else "tap"
         return json.dumps({
             "target": {"type": "accessibility_id", "value": "username_field"},
-            "action": "tap",
+            "action": action,
+            "input_value": None,
             "scope": "LoginDemoApp", "reason": "stub: 等价元素",
             "confidence": 0.9, "risk_level": "LOW",
         })
