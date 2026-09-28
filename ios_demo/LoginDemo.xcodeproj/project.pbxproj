@@ -8,11 +8,13 @@
 		AA0000010000000000000001 /* LoginDemoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000001; };
 		AA0000010000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000002; };
 		AA0000010000000000000003 /* LoginDemoTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000003; };
+		AA0000010000000000000004 /* SpikeScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000004; };
 
 /* Begin PBXFileReference section */
 		AA0000020000000000000001 /* LoginDemoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginDemoApp.swift; sourceTree = "<group>"; };
 		AA0000020000000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000003 /* LoginDemoTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginDemoTests.swift; sourceTree = "<group>"; };
+		AA0000020000000000000004 /* SpikeScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpikeScreen.swift; sourceTree = "<group>"; };
 		AA0000030000000000000001 /* LoginDemo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LoginDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA0000030000000000000002 /* LoginDemoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LoginDemoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 
@@ -30,6 +32,7 @@
 			children = (
 				AA0000020000000000000001 /* LoginDemoApp.swift */,
 				AA0000020000000000000002 /* ContentView.swift */,
+				AA0000020000000000000004 /* SpikeScreen.swift */,
 				AA0000020000000000000003 /* LoginDemoTests.swift */,
 			);
 			path = LoginDemo;
@@ -115,6 +118,7 @@
 			files = (
 				AA0000010000000000000001 /* LoginDemoApp.swift in Sources */,
 				AA0000010000000000000002 /* ContentView.swift in Sources */,
+				AA0000010000000000000004 /* SpikeScreen.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

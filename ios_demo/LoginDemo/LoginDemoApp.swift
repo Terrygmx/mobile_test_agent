@@ -79,9 +79,21 @@ struct HomeView: View {
 
 @main
 struct LoginDemoApp: App {
+    init() {
+        // P1-03 Spike 入口：-UITestSpikeScreen 时展示三场景（Tab/Nav/Sheet），
+        // 验证 mtaScreen() marker 方案；不带该参数走正常 LoginView 路径。
+        _spikeRoot = State(initialValue: ProcessInfo.processInfo.arguments.contains("-UITestSpikeScreen"))
+    }
+
+    @State private var spikeRoot: Bool
+
     var body: some Scene {
         WindowGroup {
-            LoginView()
+            if spikeRoot {
+                SpikeScreenRoot()
+            } else {
+                LoginView()
+            }
         }
     }
 }
