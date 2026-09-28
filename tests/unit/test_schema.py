@@ -19,7 +19,7 @@ from testcase.schema import (
     TestCase,
     WaitStep,
 )
-from testcase.loader import load_testcase_from_dict
+from testcase.loader import load_testcase, load_testcase_from_dict
 
 
 # --- TargetRef 语法糖（设计 6.3 model_validator(mode="before")） ---
@@ -148,3 +148,110 @@ def test_load_testcase_from_dict_minimal():
         {"schema_version": "0.1", "id": "t1", "name": "smoke login", "steps": []}
     )
     assert case.id == "t1" and case.suite is None and case.tags == []
+
+
+# --- R5-1 修复验证：官方示例契约（§6 示例 + §6.2 条件矩阵） ---
+
+def test_wait_text_condition_with_expected():
+    step = WaitStep.model_validate(
+        {
+            "wait_for": {
+                "target": "status_label",
+                "condition": "text_contains",
+                "expected": "登录成功",
+                "polling_interval": 0.3,
+            }
+        }
+    )
+    assert step.wait_for.polling_interval == 0.3
+    assert step.wait_for.expected == "登录成功"
+
+
+def test_wait_text_condition_without_expected_rejected():
+    with pytest.raises(ValidationError):
+        WaitStep.model_validate(
+            {"wait_for": {"target": "status_label", "condition": "text_equals"}}
+        )
+
+
+def test_design_section6_example_passes_validation():
+    """设计 §6 官方示例（R5-1 修复后契约）必须能过 schema 0.1。"""
+    case = load_testcase_from_dict(
+        {
+            "schema_version": "0.1",
+            "id": "login_001",
+            "name": "用户登录",
+            "suite": "smoke",
+            "tags": ["login", "smoke"],
+            "precondition": {"reset": "RESET_STATE"},
+            "steps": [
+                {"action": "launch_app"},
+                {"action": "tap", "target": "login_button"},
+                {
+                    "action": "input",
+                    "target": "username_field",
+                    "value": "${TEST_USERNAME}",
+                },
+                {
+                    "action": "input",
+                    "target": "password_field",
+                    "value": "${TEST_PASSWORD}",
+                    "sensitive": True,
+                },
+                {
+                    "action": "tap",
+                    "target": "submit_login_button",
+                    "idempotency": "IDEMPOTENT",
+                },
+                {
+                    "wait_for": {
+                        "target": {"type": "screen", "id": "HomeView"},
+                        "condition": "active",
+                        "timeout": 10,
+                        "polling_interval": 0.3,
+                    }
+                },
+                {
+                    "assertion": {
+                        "condition": "exists",
+                        "target": {"type": "screen", "id": "HomeView"},
+                    }
+                },
+            ],
+            "cleanup": {"reset": "RESET_STATE", "failure_policy": "ABORT_SUITE"},
+        }
+    )
+    assert case.steps[5].wait_for.polling_interval == 0.3  # type: ignore[union-attr]
+    assert case.steps[6].assertion.condition == "exists"  # type: ignore[union-attr]
+
+
+# --- R5-2 修复验证：文件级入口不被 strict 旁路 ---
+
+def test_load_testcase_routes_schema_versioned_file_to_strict(tmp_path):
+    """带 schema_version 的 YAML 走 0.1 strict：未知字段必须被拒（不能回落松散模型）。"""
+    p = tmp_path / "case.yaml"
+    p.write_text(
+        "schema_version: '0.1'\n"
+        "id: t_strict\n"
+        "name: strict route\n"
+        "steps:\n"
+        "  - action: tap\n"
+        "    target: login_button\n"
+        "    bogus_key: 1\n"
+    )
+    with pytest.raises(ValidationError):
+        load_testcase(p)
+
+
+def test_load_testcase_p0_file_still_loose(tmp_path):
+    """P0 旧格式（无 schema_version）仍走松散模型（回归底线）。"""
+    p = tmp_path / "p0case.yaml"
+    p.write_text(
+        "id: p0_case\n"
+        "name: p0 loose\n"
+        "steps:\n"
+        "  - action: tap\n"
+        "    target: login_button\n"
+    )
+    case = load_testcase(p)
+    assert case.id == "p0_case" and case.steps[0].target == "login_button"

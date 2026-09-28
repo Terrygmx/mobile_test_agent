@@ -56,15 +56,27 @@ class TargetRef(BaseModel):
 
 
 class WaitSpec(BaseModel):
-    """6.2 wait 条件：`active` 仅限 screen 目标。"""
+    """6.2 wait 条件矩阵：`active` 仅限 screen；文本条件需 `expected`（R5-1）。
+
+    `polling_interval`：None = 未声明 → Executor 取配置默认（7.3「不得写死」）。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     target: TargetRef
     condition: Literal[
-        "exists", "not_exists", "visible", "enabled", "disabled", "active"
+        "exists",
+        "not_exists",
+        "visible",
+        "enabled",
+        "disabled",
+        "text_equals",
+        "text_contains",
+        "active",
     ]
     timeout: float = Field(default=10, gt=0)
+    polling_interval: float | None = Field(default=None, gt=0)
+    expected: Any = None  # text_equals / text_contains 必填
 
     @model_validator(mode="after")
     def _active_screen_only(self) -> "WaitSpec":
@@ -72,6 +84,12 @@ class WaitSpec(BaseModel):
             raise ValueError(
                 f"condition 'active' requires screen target, got {self.target.type!r}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _text_wait_needs_expected(self) -> "WaitSpec":
+        if self.condition in ("text_equals", "text_contains") and self.expected is None:
+            raise ValueError(f"wait condition {self.condition!r} requires 'expected'")
         return self
 
 
@@ -161,6 +179,10 @@ class TestCase(BaseModel):
     name: str
     suite: str | None = None
     tags: list[str] = Field(default_factory=list)
+    # R5-3 记账：precondition 应为 EnvSpec（reset ∈ RESET_STATE/RELAUNCH/TERMINATE/
+    # LOGOUT/REINSTALL/SNAPSHOT）、cleanup 应为 CleanupSpec（含 failure_policy）。
+    # 枚举校验延至 Task 2.x Environment Manager 落地时定型；M1 末 schema 冻结前必须解决，
+    # 否则 `reset: RESET_STATEE` 这类 typo 会静默通过到运行期才炸。
     precondition: dict = Field(default_factory=dict)
     steps: list[ActionStep | WaitStep | AssertionStep] = Field(default_factory=list)
     cleanup: dict | None = None

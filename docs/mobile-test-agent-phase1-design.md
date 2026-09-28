@@ -262,7 +262,7 @@ steps:
       polling_interval: 0.3
 
   - assertion:
-      type: exists
+      condition: exists
       target: {type: screen, id: HomeView}
 
 cleanup:

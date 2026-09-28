@@ -1,5 +1,9 @@
-"""Testcase schema + loader（Stage 5）。ponytail: pydantic 只建用到的字段。"""
+"""Testcase loader：P0 松散模型兼容层 + 设计 6.3 schema 0.1 分发入口（P1-01）。
 
+- 旧 `Step/TestCase/load_testcase`：P0 链路（run_phase0_demo / verify_stage5/9）仍在用；
+- `load_testcase_from_dict`：设计 6.3 strict 入口（extra=forbid + 版本分发）；
+- `load_testcase` 按 `schema_version` 键分流（R5-2：strict 不被文件级入口旁路）。
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -28,7 +32,13 @@ class TestCase(BaseModel):
 
 
 def load_testcase(path: str | Path) -> TestCase:
+    """文件级入口：带 schema_version 的新用例走 0.1 strict 分发，否则回落 P0 松散模型。
+
+    R5-2：防止 strict 校验被文件级入口静默旁路。
+    """
     data = yaml.safe_load(Path(path).read_text())
+    if isinstance(data, dict) and "schema_version" in data:
+        return load_testcase_from_dict(data)
     return TestCase(**data)
 
 
