@@ -33,6 +33,13 @@
 - **0.2 决策**：schema 不变（`active` 条件语义正确——屏在树上就为 active）。
   「可交互」是执行层职责：Task 2.1 wait engine 落地「树静止判定」
   （连续 N 次 page_source 哈希不变）替换固定 sleep，删除 TAP_SETTLE_SECONDS。
+- **已修（Task 2.1 / P1-05）**：`executor/wait.py` 的 `wait_for_settle()` 实现树
+  静止判定（连续 `stable_polls` 次树哈希不变），runner 命中条件后调用，
+  `TAP_SETTLE_SECONDS` 已删除。**例外**：`screen` target 走 7.3 廉价路径
+  （只 find marker，不拉 page_source），故不做静止判定——这是对「active 被转场
+  吞掉」问题的已知未覆盖面：若某 Screen 是 `active` 目标且其后紧跟 tap，
+  仍可能撞上转场窗口。要彻底解决需在 Screen 级加 gesture-ready 信号，
+  记账给 M3（SwiftUI 侧），见 `docs/mobile-test-agent-phase1-design.md` 13.2。
 
 ## 4. `polling_interval` 断言层缺失（已修）
 

@@ -16,6 +16,7 @@ from pathlib import Path
 
 from environment.secrets import SecretProvider
 from executor.executor import AmbiguousElement, ElementNotFound, Executor, Locator
+from executor.wait import WaitConfig, WaitEngine, WaitTimeout
 from repository.resolver import (
     AmbiguousReferenceError,
     Repository,
@@ -51,7 +52,8 @@ class TestcaseRunner:
     def __init__(self, executor: Executor, app: AppSession,
                  recorder: Recorder, secrets: SecretProvider,
                  recovery_context: dict | None = None,
-                 repository: "Repository | None" = None):
+                 repository: "Repository | None" = None,
+                 wait_config: WaitConfig | None = None):
         self.ex = executor
         self.app = app
         self.rec = recorder
@@ -61,6 +63,9 @@ class TestcaseRunner:
         # Task 1.6（P1-04）：传入 Repository 时 target 走 4.1 语义解析
         # （TargetRef → resolve → strategies），不传回落 P0 硬编码链。
         self.repo = repository
+        # Task 2.1：等待参数来自配置（`mta.yaml` wait: 段），不在代码里写死
+        self.wait_config = wait_config or WaitConfig()
+        self._wait_engine_cached: WaitEngine | None = None
         # review R2-3：recovery 行 id（steps 落库后回填 step_id 用）
         self._last_rec_row: int | None = None
 
@@ -181,38 +186,34 @@ class TestcaseRunner:
     def _do_back(self, step) -> None:
         self.ex.ds.ensure_alive().back()
 
-    # Task 2.1（wait engine）替换点：目前用固定 settle 缓冲近似「树静止」。
-    # 实测（Task 1.6 probe4/5）：marker 可 find ≠ 手势层就绪——成功后立即 tap
-    # 会被 SwiftUI 吞掉（NavigationStack 转场期间）。wait engine 落地时改为
-    # 连续 N 次 page_source 树哈希不变的「静止判定」，删掉这个 sleep。
-    TAP_SETTLE_SECONDS = 1.0
+    # Task 2.1：等待语义移交 executor/wait.py（设计 7.3）。此前的固定 settle 缓冲
+    # 已删除——实测（Task 1.6 probe4/5）marker 可 find ≠ 手势层就绪，现在用「连续 N
+    # 次 page_source 树哈希不变」的静止判定替代，见 WaitEngine.wait_for_settle。
+
+    def _wait_engine(self) -> WaitEngine:
+        if self._wait_engine_cached is None:
+            self._wait_engine_cached = WaitEngine(
+                self.ex, self._locator_chain, config=self.wait_config,
+            )
+        return self._wait_engine_cached
 
     def _do_wait_for(self, step) -> None:
-        """Task 1.6 最小 wait：轮询 find（wait engine 完整版在 Task 2.1）。
+        """Task 2.1：完整条件矩阵走 WaitEngine。
 
-        R10-4：condition 白名单外一律 fail-loud，不静默降级为「元素存在」。
+        7.3：超时抛 WaitTimeout（不是 ELEMENT_NOT_FOUND），且默认不触发 Recovery
+        （`recovery.on_wait_timeout: false`）——多半是后端慢/网络/App bug/数据问题，
+        让 LLM 去「修」只会放大成本。`on_wait_timeout=true` 时才放行走 recovery。
         """
-        w = step.wait_for
-        if w.condition not in ("active", "exists"):
-            raise TestFailure(
-                f"wait_for condition {w.condition!r} not supported until "
-                f"Task 2.1 wait engine (only active/exists here)"
-            )
-        deadline = time.time() + w.timeout
-        interval = w.polling_interval or 0.5
-        last_err: Exception | None = None
-        while time.time() < deadline:
-            try:
-                self.ex.find(self._locator_chain(w.target))
-                time.sleep(self.TAP_SETTLE_SECONDS)  # 手势层就绪缓冲，见 TAP_SETTLE_SECONDS
-                return
-            except (ElementNotFound, AmbiguousElement) as e:
-                last_err = e
-                time.sleep(interval)
-        raise TestFailure(
-            f"wait_for {w.target.id!r} condition={w.condition!r} "
-            f"timeout after {w.timeout}s: {last_err}"
-        )
+        try:
+            self._wait_engine().wait_for(step.wait_for)
+        except WaitTimeout as e:
+            if self.recovery_ctx and self.recovery_ctx.get("on_wait_timeout"):
+                raise
+            raise TestFailure(str(e)) from None
+        # 静止判定：命中条件后等 UI 树稳定，避免转场期间 tap 被 SwiftUI 吞掉。
+        # screen active 走 7.3 的廉价路径，明确不拉 page_source，故不做静止判定。
+        if step.wait_for.target.type != "screen":
+            self._wait_engine().wait_for_settle()
 
     def _do_assertion(self, step) -> None:
         """Task 1.6 最小 assertion：exists 轮询复用 wait 路径。

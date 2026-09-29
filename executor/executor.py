@@ -26,6 +26,18 @@ class AmbiguousElement(Exception):
 class Executor:
     def __init__(self, device_session: DeviceSession):
         self.ds = device_session
+        self.apply_implicit_wait_zero()
+
+    def apply_implicit_wait_zero(self) -> None:
+        """H11：Appium implicit wait 固定为 0。
+
+        否则 `not_exists` 类等待会被隐式等待拖慢（每条策略各自等一轮），轮询
+        interval 形同虚设。当前无 driver（如未 connect）时跳过，connect 后由
+        再次调用补上。
+        """
+        driver = self.ds.driver
+        if driver is not None:
+            driver.implicitly_wait(0)
 
     @property
     def driver(self) -> WebDriver:
