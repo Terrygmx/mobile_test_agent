@@ -6,13 +6,7 @@ import SwiftUI
 ///   2. 子元素 accessibilityIdentifier 不被容器折叠/吞掉。
 /// 三场景：TabView / NavigationStack push / Sheet。通过启动参数 -UITestSpikeScreen 激活，
 /// 不影响正常用例路径。
-extension View {
-    /// 设计 13.3 候选方案：Screen marker 统一修饰符
-    func mtaScreen(_ name: String) -> some View {
-        self.accessibilityElement(children: .contain)
-            .accessibilityIdentifier("screen.\(name)")
-    }
-}
+/// mtaScreen() 定义已迁至 MTAScreen.swift（Task 1.5 五屏共用，避免重复声明）。
 
 // MARK: - 场景 1：TabView
 
