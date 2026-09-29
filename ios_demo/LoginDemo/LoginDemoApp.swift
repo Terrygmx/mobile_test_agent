@@ -4,6 +4,7 @@ import SwiftUI
 // 元素 id 与 docs/mobile-test-agent-phase0-design.md 4.4 login_demo.yaml 一一对应。
 // Task 1.5（P1-04）：五屏（Login/Home/Search/Detail/Profile）根视图挂 mtaScreen()
 // marker（设计 13.1/附录 A1），新增 Search→Detail 导航流与 Profile logout。
+// R9-5：原 ContentView.swift 纯转发壳已删除，入口直接用 LoginView。
 
 struct LoginView: View {
     @State private var username: String = ""

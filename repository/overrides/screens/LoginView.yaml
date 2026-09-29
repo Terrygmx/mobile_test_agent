@@ -14,3 +14,27 @@ marker: screen.HomeView
 kind_hint: page
 metadata:
   risk: LOW
+---
+schema_version: "1.0"
+kind: screen
+id: SearchView
+marker: screen.SearchView
+kind_hint: page
+metadata:
+  risk: LOW
+---
+schema_version: "1.0"
+kind: screen
+id: DetailView
+marker: screen.DetailView
+kind_hint: page
+metadata:
+  risk: LOW
+---
+schema_version: "1.0"
+kind: screen
+id: ProfileView
+marker: screen.ProfileView
+kind_hint: page
+metadata:
+  risk: LOW

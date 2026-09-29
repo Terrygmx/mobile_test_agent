@@ -16,7 +16,7 @@ from appium import webdriver
 from appium.options.ios import XCUITestOptions
 from appium.webdriver.common.appiumby import AppiumBy
 
-UDID = "AEBDAE77-7C5B-468B-A5A7-01D41EDAAD9E"
+UDID = os.environ.get("MTA_SIM_UDID", "AEBDAE77-7C5B-468B-A5A7-01D41EDAAD9E")
 BUNDLE_ID = "com.phaset0.logindemo"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(ROOT, "out", "p1_task15")
@@ -31,11 +31,35 @@ SCENES = [
 ]
 
 
+def resolve_udid() -> str:
+    """R9-2：MTA_SIM_UDID 优先；未设时从 booted 模拟器自动发现一台（多台取首台，
+    可读报错代替 Appium 连接超时栈）。"""
+    if UDID and discover_booted() is not None:
+        return UDID  # 显式指定：只校验它确实 booted
+    booted = discover_booted()
+    if booted:
+        return booted[0]
+    raise SystemExit(
+        "no booted simulator found: boot one (xcrun simctl boot <UDID>) "
+        "or set MTA_SIM_UDID"
+    )
+
+
+def discover_booted():
+    import subprocess
+    out = subprocess.run(
+        ["xcrun", "simctl", "list", "devices", "booted"],
+        capture_output=True, text=True,
+    ).stdout
+    import re
+    return re.findall(r"\(([0-9A-Fa-f-]{36})\)", out)
+
+
 def make_driver():
     opts = XCUITestOptions()
     opts.platform_name = "iOS"
     opts.device_name = "iPhone 14"
-    opts.udid = UDID
+    opts.udid = resolve_udid()
     opts.automation_name = "XCUITest"
     opts.bundle_id = BUNDLE_ID
     opts.no_reset = True
@@ -62,17 +86,19 @@ def main():
     driver = make_driver()
     try:
         time.sleep(2)  # 启动动画
-        # Login（no_reset 下可能残留登录态：若直接看到 home_page 就跳过登录）
-        src = driver.page_source
-        if "screen.LoginView" in src:
-            # 先留证再登录：登录后 page_source 已切到 Home，不能复用同一次抓取
-            dump(driver, "Login", results, "screen.LoginView", SCENES[0][2])
-            driver.find_element(AppiumBy.ACCESSIBILITY_ID, "username_field").send_keys("mta")
-            driver.find_element(AppiumBy.ACCESSIBILITY_ID, "password_field").send_keys("pw")
-            driver.find_element(AppiumBy.ACCESSIBILITY_ID, "login_button").click()
-            time.sleep(1.5)
-        else:
-            results["Login"] = {"skipped": "already logged in", "passed": True}
+        # R9-1：登录态是 @State 不持久化，terminate+relaunch 必回 Login 屏——
+        # Login 场景永远有实测证据，不再 fail-open skip。
+        driver.terminate_app(BUNDLE_ID)
+        time.sleep(1)
+        driver.activate_app(BUNDLE_ID)
+        time.sleep(2)
+        dump(driver, "Login", results, "screen.LoginView", SCENES[0][2])
+
+        # 登录 → Home
+        driver.find_element(AppiumBy.ACCESSIBILITY_ID, "username_field").send_keys("mta")
+        driver.find_element(AppiumBy.ACCESSIBILITY_ID, "password_field").send_keys("pw")
+        driver.find_element(AppiumBy.ACCESSIBILITY_ID, "login_button").click()
+        time.sleep(1.5)
 
         # Home
         dump(driver, "Home", results, "screen.HomeView", SCENES[1][2])
