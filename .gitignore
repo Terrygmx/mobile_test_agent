@@ -6,3 +6,4 @@ out/
 *.xcodeproj/project.xcworkspace/
 *.xcodeproj/xcuserdata/
 .DS_Store
+.codegraph/
