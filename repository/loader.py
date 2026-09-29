@@ -184,12 +184,22 @@ def _validate_element_semantics(defs: dict[tuple[str | None, str], ElementDef]) 
 
 
 def _validate_screen_semantics(defs: dict[str, ScreenDef]) -> None:
+    # R8-1：marker 是 current_screen/marker_visible/Reconciliation 的身份锚点，
+    # 全局唯一是 13.2 判定的隐含前提；重复会让 current_screen 静默选边（dict
+    # update 后写者赢）。loader 层拒绝，宁可 fail fast。
+    marker_owners: dict[str, str] = {}
     for d in defs.values():
         if d.id and "." in d.id:
             raise RepositoryLoaderError(
                 f"screen id {d.id!r} must not contain '.' "
                 f"(reserved for qualified name 'Screen.elem')"
             )
+        if d.marker in marker_owners:
+            raise RepositoryLoaderError(
+                f"screen {d.id!r}: marker {d.marker!r} already claimed by "
+                f"screen {marker_owners[d.marker]!r} (markers must be globally unique)"
+            )
+        marker_owners[d.marker] = d.id
         if d.kind_hint not in KIND_HINTS:
             raise RepositoryLoaderError(
                 f"screen {d.id!r}: unknown kind_hint {d.kind_hint!r} "

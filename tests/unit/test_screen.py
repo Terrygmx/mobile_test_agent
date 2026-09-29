@@ -17,6 +17,7 @@ from repository.loader import load_screen_dir
 from repository.resolver import Repository
 from source.screen import (
     CURRENT_SCREEN_UNKNOWN,
+    FOUND,
     SCREEN_AMBIGUOUS,
     ScreenResult,
     current_screen,
@@ -100,7 +101,7 @@ def test_single_page_marker():
     xml = PAGE.format(content=_marker_xml("username_field")
                       + _marker_xml("screen.LoginView"))
     result = current_screen(xml, repo)
-    assert result.status == "FOUND"
+    assert result.status == FOUND
     assert result.screen == "LoginView"
 
 
@@ -120,7 +121,7 @@ def test_page_plus_modal_picks_modal():
     xml = PAGE.format(content=_marker_xml("screen.LoginView")
                       + _marker_xml("screen.ConfirmDialog"))
     result = current_screen(xml, repo)
-    assert result.status == "FOUND"
+    assert result.status == FOUND
     assert result.screen == "ConfirmDialog"
 
 
@@ -166,3 +167,38 @@ def test_marker_visible_helper():
     assert marker_visible(xml, repo, "LoginView") is True
     xml_hidden = PAGE.format(content=_marker_xml("screen.LoginView", visible="false"))
     assert marker_visible(xml_hidden, repo, "LoginView") is False
+
+
+def test_marker_visible_unregistered_screen_false():
+    """marker_visible 对未登记 screen → False（不抛 UnknownReferenceError）。"""
+    from source.screen import marker_visible
+    repo = _repo(LOGIN_PAGE_YAML)
+    xml = PAGE.format(content=_marker_xml("screen.HomeView"))
+    assert marker_visible(xml, repo, "HomeView") is False
+
+
+# --- R8 观察项建议：4-marker 混合组合显式用例 ---
+
+def test_r8_four_marker_mixed_combo():
+    """page + page + modal + overlay 同屏：两个顶层 → '恰一'不成立 → AMBIGUOUS。"""
+    repo = _repo(LOGIN_PAGE_YAML, HOME_PAGE_YAML, MODAL_YAML, OVERLAY_YAML)
+    xml = PAGE.format(content=_marker_xml("screen.LoginView")
+                      + _marker_xml("screen.HomeView")
+                      + _marker_xml("screen.ConfirmDialog")
+                      + _marker_xml("screen.ToastOverlay"))
+    result = current_screen(xml, repo)
+    assert result.status == SCREEN_AMBIGUOUS
+    assert result.screen is None
+    assert result.visible_markers == ("LoginView", "HomeView",
+                                      "ConfirmDialog", "ToastOverlay")
+
+
+def test_r8_page_page_modal_only_combo():
+    """page + page + modal（恰一顶层）：modal 压底成立 → FOUND modal。"""
+    repo = _repo(LOGIN_PAGE_YAML, HOME_PAGE_YAML, MODAL_YAML)
+    xml = PAGE.format(content=_marker_xml("screen.LoginView")
+                      + _marker_xml("screen.HomeView")
+                      + _marker_xml("screen.ConfirmDialog"))
+    result = current_screen(xml, repo)
+    assert result.status == FOUND
+    assert result.screen == "ConfirmDialog"

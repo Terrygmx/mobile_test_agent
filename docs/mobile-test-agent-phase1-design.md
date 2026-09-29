@@ -705,11 +705,16 @@ Identifier Coverage = 用例引用的 identifier 中被 metadata 正确解析(li
 
 ```python
 def current_screen(page_source, repo) -> ScreenResult:
-    markers = visible elements whose id startswith "screen."
+    markers = visible elements matching a repo-registered ScreenDef.marker
     0 个  → CURRENT_SCREEN_UNKNOWN
     1 个  → 该 Screen
     多个  → 若恰有一个 kind_hint ∈ {modal, overlay} → 取它；否则 SCREEN_AMBIGUOUS
 ```
+
+> **实现收紧（R8-2，2026-09-29 确认）**：原文「id startswith "screen."」全扫描
+> 收紧为「匹配 repo 登记的 ScreenDef.marker」。App 侧新增页面尚未登记 repo 时
+> 判 `CURRENT_SCREEN_UNKNOWN`（而非 FOUND 一个未登记 Screen）——未登记 screen
+> 无法做 local reconciliation，UNKNOWN 更诚实，走 Recovery/Reconciliation 路径。
 
 - **仅在需要时拉取 page_source**（定位失败、Reconciliation、Screen 断言），不要每步都做。
 - `wait_for(screen, active)` 走廉价路径：直接查该 marker 是否存在且 visible。

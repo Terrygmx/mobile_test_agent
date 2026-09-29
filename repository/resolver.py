@@ -270,6 +270,10 @@ class Repository:
             raise UnknownReferenceError(screen_id)
         return _merge_screen(generated, override, screen_id)
 
+    def screen_kind_hint(self, screen_id: str) -> str | None:
+        """公开查询：合并后 Screen 的 kind_hint（current_screen 压底判定用）。"""
+        return self._screen(screen_id).kind_hint
+
     # --- 5.5 接口 ---
 
     def resolve(

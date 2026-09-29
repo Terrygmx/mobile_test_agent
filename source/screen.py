@@ -38,14 +38,26 @@ class ScreenResult:
     visible_markers: tuple[str, ...] = ()  # 调试用：参与判定的 marker 名（screen id）
 
 
-def _visible_marker_nodes(page_source: str, repo: Repository) -> list[tuple[str, ET.Element]]:
-    """返回 [(screen_id, node)]：repo 登记的 marker 且 visible=true。"""
+def _marker_to_screen(repo: Repository) -> dict[str, str]:
+    """marker → screen_id 映射（generated 被 override 同名 marker 覆盖）。
+
+    TODO(M3, R8-3)：override 改 marker 后，generated 旧 marker 仍映射同一
+    Screen——树中新旧 marker 同时 visible 会把同一 screen 计两次，多 marker
+    分支可能误判 AMBIGUOUS。M3 接入 generated 时改为 override marker 取代
+    generated marker（旧映射不保留），或 hits 按 screen_id 去重。
+    """
     marker_to_screen = {
         s.marker: s_id for s_id, s in repo.generated_screens.items()
     }
     marker_to_screen.update({
         s.marker: s_id for s_id, s in repo.override_screens.items()
     })
+    return marker_to_screen
+
+
+def _visible_marker_nodes(page_source: str, repo: Repository) -> list[tuple[str, ET.Element]]:
+    """返回 [(screen_id, node)]：repo 登记的 marker 且 visible=true。"""
+    marker_to_screen = _marker_to_screen(repo)
     if not marker_to_screen:
         return []
     root = ET.fromstring(page_source)
@@ -71,27 +83,21 @@ def current_screen(page_source: str, repo: Repository) -> ScreenResult:
         return ScreenResult(FOUND, hits[0][0], (hits[0][0],))
 
     # 多 marker：恰一 modal/overlay → 取它；否则 AMBIGUOUS
-    hint_by_id = {
-        s_id: repo._screen(s_id).kind_hint for s_id, _ in hits
-    }
-    top = [s_id for s_id, _ in hits if hint_by_id.get(s_id) in TOP_LAYER_HINTS]
+    top = [s_id for s_id, _ in hits
+           if repo.screen_kind_hint(s_id) in TOP_LAYER_HINTS]
     if len(top) == 1:
         return ScreenResult(FOUND, top[0], tuple(s_id for s_id, _ in hits))
     return ScreenResult(SCREEN_AMBIGUOUS, None, tuple(s_id for s_id, _ in hits))
 
 
 def marker_visible(page_source: str, repo: Repository, screen_id: str) -> bool:
-    """`wait_for(screen, active)` 廉价路径（13.2 注）：直接查该 marker 是否
-    存在且 visible，不拉整棵树判定。"""
-    marker_to_screen = {
-        s.marker: s_id for s_id, s in repo.generated_screens.items()
-    }
-    marker_to_screen.update({
-        s.marker: s_id for s_id, s in repo.override_screens.items()
-    })
+    """`wait_for(screen, active)` 廉价路径（13.2 注）：只做目标 marker 的
+    存在性 + visible 检查，省去完整多 marker 判定分支与后续处理。"""
+    marker_to_screen = _marker_to_screen(repo)
     root = ET.fromstring(page_source)
     for el in root.iter():
-        if marker_to_screen.get(el.get("name")) == screen_id \
+        name = el.get("name")
+        if name is not None and marker_to_screen.get(name) == screen_id \
                 and el.get("visible", "true") != "false":
             return True
     return False

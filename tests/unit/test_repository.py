@@ -408,6 +408,33 @@ def test_p3_element_id_with_dot_rejected():
         load_screen_dir([("LoginView.yaml", bad_screen)])
 
 
+# --- R8-1：marker 全局唯一（current_screen 身份锚点的隐含前提，13.2） ---
+
+def test_r8_1_duplicate_marker_rejected():
+    """两个 Screen 声明同一 marker → RepositoryLoaderError（此前静默后写者赢）。"""
+    a = """\
+kind: screen
+id: LoginView
+marker: screen.LoginView
+kind_hint: page
+"""
+    b = """\
+kind: screen
+id: HomeView
+marker: screen.LoginView
+kind_hint: modal
+"""
+    with pytest.raises(RepositoryLoaderError, match="marker 'screen.LoginView'"):
+        load_screen_dir([("a.yaml", a), ("b.yaml", b)])
+
+
+def test_r8_1_distinct_markers_ok():
+    a = GENERATED_SCREENS
+    b = GENERATED_SCREENS.replace("LoginView", "HomeView")
+    defs = load_screen_dir([("a.yaml", a), ("b.yaml", b)])
+    assert set(defs) == {"LoginView", "HomeView"}
+
+
 def test_from_dirs_loads_real_overrides(tmp_path):
     """P3：磁盘入口 from_dirs 有覆盖（此前全走低层注入）；.yml 同样收录。"""
     gen = tmp_path / "generated"
