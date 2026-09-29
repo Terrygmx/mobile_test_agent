@@ -6,14 +6,12 @@
 
 /* Begin PBXBuildFile section */
 		AA0000010000000000000001 /* LoginDemoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000001; };
-		AA0000010000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000002; };
 		AA0000010000000000000003 /* LoginDemoTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000003; };
 		AA0000010000000000000004 /* SpikeScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000004; };
 		AA0000010000000000000005 /* MTAScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000005; };
 
 /* Begin PBXFileReference section */
 		AA0000020000000000000001 /* LoginDemoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginDemoApp.swift; sourceTree = "<group>"; };
-		AA0000020000000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000003 /* LoginDemoTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginDemoTests.swift; sourceTree = "<group>"; };
 		AA0000020000000000000004 /* SpikeScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpikeScreen.swift; sourceTree = "<group>"; };
 		AA0000020000000000000005 /* MTAScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MTAScreen.swift; sourceTree = "<group>"; };
@@ -33,7 +31,6 @@
 			isa = PBXGroup;
 			children = (
 				AA0000020000000000000001 /* LoginDemoApp.swift */,
-				AA0000020000000000000002 /* ContentView.swift */,
 				AA0000020000000000000004 /* SpikeScreen.swift */,
 				AA0000020000000000000005 /* MTAScreen.swift */,
 				AA0000020000000000000003 /* LoginDemoTests.swift */,
@@ -120,7 +117,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				AA0000010000000000000001 /* LoginDemoApp.swift in Sources */,
-				AA0000010000000000000002 /* ContentView.swift in Sources */,
 				AA0000010000000000000004 /* SpikeScreen.swift in Sources */,
 				AA0000010000000000000005 /* MTAScreen.swift in Sources */,
 			);
