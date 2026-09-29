@@ -74,6 +74,19 @@ def test_cli_lint_schema_invalid_exit_3(repo_env):
     assert main(["lint", tc]) == 3
 
 
+# --- R7-1：文件级错误 → exit 3（8.4：exit 1 只留给「存在 FAIL」） ---
+
+def test_cli_lint_missing_file_exit_3(repo_env, capsys):
+    assert main(["lint", str(repo_env / "no_such.yaml")]) == 3
+    assert "not found" in capsys.readouterr().out
+
+
+def test_cli_lint_invalid_yaml_exit_3(repo_env, capsys):
+    tc = _write(repo_env, "bad_syntax.yaml", "steps: [\n  - {unclosed")
+    assert main(["lint", tc]) == 3
+    assert "invalid YAML" in capsys.readouterr().out
+
+
 def test_cli_placeholder_exit_2(capsys):
     assert main(["run"]) == 2
     assert "not implemented" in capsys.readouterr().out

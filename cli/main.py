@@ -15,10 +15,8 @@ from typing import Sequence
 import yaml
 
 from environment.secrets import EnvSecretProvider
-from repository.loader import load_elements, load_screens
-from repository.resolver import Repository
-from testcase.lint import lint, max_severity, lint_exit_code
-from testcase.loader import load_testcase
+from repository.resolver import Repository, Severity
+from testcase.lint import lint, max_severity
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -62,21 +60,32 @@ def _load_repository(args: argparse.Namespace) -> Repository:
 def cmd_lint(args: argparse.Namespace) -> int:
     repo = _load_repository(args)
     secrets = EnvSecretProvider()
-    testcases = []
+    testcases: list = []
+    # R7-1：文件级错误（缺文件/坏 YAML）是前置配置错误 → exit 3（8.4 语义：
+    # exit 1 只留给「存在 FAIL」，不能被加载失败占用误导 CI 判读）。
     for path in args.testcases:
-        data = yaml.safe_load(Path(path).read_text())
+        try:
+            data = yaml.safe_load(Path(path).read_text())
+        except FileNotFoundError:
+            print(f"ERROR load_failure: testcase file not found: {path}")
+            print("lint: exit 3")
+            return 3
+        except yaml.YAMLError as exc:
+            print(f"ERROR load_failure: invalid YAML in {path}: {exc}")
+            print("lint: exit 3")
+            return 3
         if isinstance(data, list):
             testcases.extend(data)
         else:
             testcases.append(data)
     issues = lint(testcases, repo, secrets)
     for i in issues:
-        prefix = "ERROR" if i.severity.value == "error" else "WARN "
+        prefix = "ERROR" if i.severity is Severity.ERROR else "WARN "
         print(f"{prefix} {i.code}: {i.message}")
     if not issues:
         print("lint: OK (0 issues)")
-    code = 3 if max_severity(issues) is not None and any(
-        i.severity.value == "error" for i in issues) else 0
+    # R7-3：退出码只经 max_severity 一处判定（不与 lint_exit_code 重复实现）。
+    code = 3 if max_severity(issues) is Severity.ERROR else 0
     print(f"lint: exit {code}")
     return code
 

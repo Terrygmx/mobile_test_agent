@@ -1,3 +1,5 @@
+# P0 遗留用例（Phase 0 验收）：松散模型、无 schema_version，不走 P1 lint 门禁
+# （mta lint 会报 schema_invalid exit 3，属预期）。Task 1.6 另建 suites/smoke/*.yaml。
 id: login_demo_001
 name: 登录 Demo（Phase 0 验收用例）
 

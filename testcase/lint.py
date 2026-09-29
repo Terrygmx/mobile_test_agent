@@ -102,12 +102,14 @@ def _check_postcondition(steps: list[dict], tc_id: str, issues: list[LintIssue])
         action = step.get("action")
         if action not in ("tap", "input"):
             continue
-        if declared == "NON_IDEMPOTENT" and not has_post:
+        # R7-2：设计 7.4「UNKNOWN 一律按 NON_IDEMPOTENT 处理」——显式声明
+        # UNKNOWN 且缺 postcondition 同样要警告（执行器无法判定动作结果）。
+        if declared in ("NON_IDEMPOTENT", "UNKNOWN") and not has_post:
             issues.append(LintIssue(
                 "missing_postcondition",
-                f"testcase {tc_id!r} step {idx}: NON_IDEMPOTENT step "
-                f"(target={step.get('target')!r}) lacks postcondition (H7); add one "
-                f"so the executor can determine the outcome after dispatch",
+                f"testcase {tc_id!r} step {idx}: {declared} step "
+                f"(target={step.get('target')!r}) lacks postcondition (H7/7.4); "
+                f"add one so the executor can determine the outcome after dispatch",
                 tc_id, idx, Severity.WARNING,
             ))
         elif declared is None:

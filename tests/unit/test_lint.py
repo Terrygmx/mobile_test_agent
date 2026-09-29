@@ -210,6 +210,25 @@ def test_non_idempotent_with_postcondition_no_warning():
                    for i in lint([tc], _repo(), DictSecrets()))
 
 
+def test_r7_2_unknown_without_postcondition_warns():
+    """R7-2：设计 7.4「UNKNOWN 一律按 NON_IDEMPOTENT 处理」→ 缺 postcondition
+    同样警告。"""
+    tc = _tc(steps=[{"action": "tap", "target": "login_button",
+                     "idempotency": "UNKNOWN"}])
+    issues = lint([tc], _repo(), DictSecrets())
+    assert any(i.code == "missing_postcondition" and i.severity is Severity.WARNING
+               for i in issues)
+    assert lint_exit_code([tc], _repo(), DictSecrets()) == 0
+
+
+def test_r7_2_unknown_with_postcondition_no_warning():
+    tc = _tc(steps=[{"action": "tap", "target": "login_button",
+                     "idempotency": "UNKNOWN",
+                     "postcondition": {"target": "screen:LoginView", "condition": "exists"}}])
+    assert not any(i.code == "missing_postcondition"
+                   for i in lint([tc], _repo(), DictSecrets()))
+
+
 def test_idempotent_step_no_postcondition_check():
     assert not any(i.code == "missing_postcondition"
                    for i in lint([_tc()], _repo(), DictSecrets()))
