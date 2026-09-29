@@ -32,6 +32,10 @@ DEFAULT_POLLING_INTERVAL = 0.3
 # 树静止判定参数（Task 1.6 probe4/5 实测 1.0s 固定缓冲不足且浪费）
 DEFAULT_STABLE_POLLS = 2
 DEFAULT_STABLE_INTERVAL = 0.2
+# R11-2：静止判定的上限。带动画/时钟/进度条的页面树永不静止，无上限 = 整条 run
+# 挂死（且每 0.2s 一次全量 page_source，真机单次 0.5~2s）。超时**放行**而非失败：
+# settle 是「尽力而为的额外保险」，不是被测行为判定，失败它会让本来通过的用例挂掉。
+DEFAULT_SETTLE_TIMEOUT = 10.0
 
 # 条件 → 需要读元素哪个属性；None = 只要求 find 成功
 _CONDITION_ATTR: dict[str, str | None] = {
@@ -59,6 +63,10 @@ class UnsupportedWaitCondition(ValueError):
     """condition 不在矩阵内 → fail-loud，不静默降级为「元素存在」（R10-4 同款口径）。"""
 
 
+class SettleNotReached(Exception):
+    """R11-2：树在 settle 上限内始终未静止。放行不抛——调用方只记 warning。"""
+
+
 @dataclass(frozen=True)
 class WaitConfig:
     """`mta.yaml` 的 `wait:` 段（设计 15）。默认值只在此处定义，代码别处不写死。"""
@@ -67,9 +75,18 @@ class WaitConfig:
     polling_interval: float = DEFAULT_POLLING_INTERVAL
     stable_polls: int = DEFAULT_STABLE_POLLS
     stable_interval: float = DEFAULT_STABLE_INTERVAL
+    settle_timeout: float = DEFAULT_SETTLE_TIMEOUT
+    # R11-1：screen target 是否也做静止判定。
+    # 默认 False = 守住 7.3「active 只 find marker、不拉 page_source」的廉价路径。
+    # 实测（3 轮 M1 Gate）：`wait_for screen active → tap` 模式下 HomeView 的转场会
+    # 吞掉紧随的 tap，ProfileView 永不出现（2/3 轮失败）——廉价路径覆盖不到手势就绪。
+    # 置 True 则 active 之后补树静止判定（多若干次 page_source），是 M3 gesture-ready
+    # 信号落地前的过渡开关。
+    settle_on_screen_wait: bool = False
 
     def __post_init__(self) -> None:
-        for name in ("default_timeout", "polling_interval", "stable_interval"):
+        for name in ("default_timeout", "polling_interval", "stable_interval",
+                     "settle_timeout"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"wait config {name} must be > 0")
         if self.stable_polls < 1:
@@ -128,6 +145,19 @@ class WaitEngine:
         if spec.condition == "exists":
             return True, None
 
+        # R11-3：find 之后的属性读取发生在转场期（恰恰是 wait 最常发生的时刻），
+        # 可能抛 stale element / no such element 一类驱动异常。这属于「本轮不满足」，
+        # 不是失败——让 wait 继续轮询。直接冒泡会让 run 在最需要重试的时刻 FAIL，
+        # 且它既不是 WaitTimeout 也不在 recovery 白名单里。
+        try:
+            return self._check_attrs(spec, el)
+        except UnsupportedWaitCondition:
+            raise  # 内部 fail-loud，不属于「驱动读属性失败」，不能被降级成轮询
+        except Exception as e:  # noqa: BLE001 — 驱动异常类型随 Appium 版本变化
+            return False, f"stale element read failed: {type(e).__name__}: {e}"
+
+    def _check_attrs(self, spec: WaitSpec, el) -> tuple[bool, str | None]:
+        """属性判定。调用方负责把驱动异常转成「本轮不满足」。"""
         attr = _CONDITION_ATTR[spec.condition]
         if attr == "visible":
             if bool(el.is_displayed()) is True:
@@ -183,12 +213,17 @@ class WaitEngine:
 
     # --- 树静止（替代 TAP_SETTLE_SECONDS 固定缓冲） ---
 
-    def wait_for_settle(self) -> None:
+    def wait_for_settle(self) -> bool:
         """连续 `stable_polls` 次 page_source 哈希不变 → 认为 UI 树已静止。
 
         首次取树 + 之后每次取树都算 round-trip；间隔 `stable_interval`。
         与固定 sleep 相比：不达标就继续等（SwiftUI 转场可能任意长），达标即返回。
+
+        R11-2：`settle_timeout` 内仍未静止 → 返回 False（**不抛**）。树永不静止的页面
+        （动画/时钟/轮播）否则会无限循环并持续拉全量 page_source。放行而非失败：settle
+        是执行层的额外保险，被测行为判定已在 wait/assertion 里做完。
         """
+        deadline = self.clock() + self.config.settle_timeout
         previous = self._tree_hash()
         streak = 1
         while streak < self.config.stable_polls:
@@ -199,6 +234,9 @@ class WaitEngine:
             else:
                 streak = 1  # 树还在变（转场进行中）→ 重新计数，不提前返回
             previous = current
+            if self.clock() >= deadline:
+                return False
+        return True
 
     def _tree_hash(self) -> str:
         return hashlib.sha256(self.ex.page_source().encode("utf-8")).hexdigest()

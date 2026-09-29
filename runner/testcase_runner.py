@@ -66,6 +66,8 @@ class TestcaseRunner:
         # Task 2.1：等待参数来自配置（`mta.yaml` wait: 段），不在代码里写死
         self.wait_config = wait_config or WaitConfig()
         self._wait_engine_cached: WaitEngine | None = None
+        # R11-2：settle 放行记录（每 run 重置），供 trace / 事后区分「放行过」
+        self.settle_timeouts: list[str] = []
         # review R2-3：recovery 行 id（steps 落库后回填 step_id 用）
         self._last_rec_row: int | None = None
 
@@ -77,6 +79,7 @@ class TestcaseRunner:
 
     def run(self, tc) -> str:
         run_id = self.rec.start_run(tc.id)
+        self.settle_timeouts.clear()  # R11-2：放行记录按 run 隔离
         try:
             reset = tc.precondition.get("reset")
             if reset:
@@ -127,6 +130,13 @@ class TestcaseRunner:
             else:
                 raise
         finally:
+            # R11-2：settle 放行记进该步 error 字段（SUCCESS 步 error 原本为 None）。
+            # 目的：事后能区分「树真静止了」和「到上限放行的」。trace schema 0.1
+            # 没有独立 warning 列，加列是 Task 2.4 迁移的事，这里不越界改 schema。
+            if self.settle_timeouts:
+                notice = "; ".join(self.settle_timeouts)
+                self.settle_timeouts.clear()
+                error = f"{error} | {notice}" if error else notice
             # value 字段不落 trace（密码等输入值，设计文档硬约束：写盘前脱敏）
             shot, tree = self._save_evidence(run_id, idx) if status != "SUCCESS" else (None, None)
             step_id = self.rec.record_step(run_id, idx, action, locator, status,
@@ -211,9 +221,17 @@ class TestcaseRunner:
                 raise
             raise TestFailure(str(e)) from None
         # 静止判定：命中条件后等 UI 树稳定，避免转场期间 tap 被 SwiftUI 吞掉。
-        # screen active 走 7.3 的廉价路径，明确不拉 page_source，故不做静止判定。
-        if step.wait_for.target.type != "screen":
-            self._wait_engine().wait_for_settle()
+        # screen target 默认走 7.3 廉价路径（明确不拉 page_source）→ 不做静止判定。
+        # R11-1 实测该豁免会让 `active → tap` 丢 tap（3 轮 Gate 挂 2 轮），故给出
+        # 开关 settle_on_screen_wait；M3 gesture-ready 信号落地后应能关掉它。
+        spec = step.wait_for
+        is_screen = spec.target.type == "screen"
+        if not is_screen or self.wait_config.settle_on_screen_wait:
+            if not self._wait_engine().wait_for_settle():
+                self.settle_timeouts.append(
+                    f"step settle: ui tree never stable within "
+                    f"{self.wait_config.settle_timeout}s (proceeded anyway)"
+                )
 
     def _do_assertion(self, step) -> None:
         """Task 1.6 最小 assertion：exists 轮询复用 wait 路径。

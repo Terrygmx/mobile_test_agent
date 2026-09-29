@@ -13,6 +13,7 @@ import pytest
 
 from executor.executor import ElementNotFound
 from executor.wait import WaitConfig, WaitTimeout
+from repository.loader import load_element_dir, load_screen_dir
 from repository.resolver import Repository
 from runner.testcase_runner import TestcaseRunner, TestFailure
 from testcase.schema import TargetRef, WaitSpec
@@ -133,7 +134,6 @@ def test_wait_timeout_propagates_when_config_allows_recovery():
 
 
 def _repo() -> Repository:
-    from repository.loader import load_element_dir, load_screen_dir
     gen_el = load_element_dir([("HomeView.yaml", """\
 kind: element
 id: go_search
@@ -149,3 +149,55 @@ marker: screen.HomeView
 kind_hint: page
 """)])
     return Repository(generated_elements=gen_el, generated_screens=gen_sc)
+
+
+# --- R11-2：settle 放行必须留痕（否则事后分不清「真静止」和「放行过」） ---
+
+class UnstableExecutor(FakeExecutor):
+    """树每次都变 → settle 到上限放行。"""
+
+    def __init__(self, sequence):
+        super().__init__(sequence)
+        self.n = 0
+
+    def page_source(self):
+        self.page_source_calls += 1
+        self.n += 1
+        return f"<tree seq={self.n}/>"
+
+
+def test_settle_timeout_is_recorded_on_step_error():
+    ex = UnstableExecutor([FakeElement()])
+    r = _runner(ex)
+    r.wait_config = WaitConfig(polling_interval=0.01, default_timeout=0.05,
+                               stable_polls=2, stable_interval=0.01,
+                               settle_timeout=0.05)
+    r._do_wait_for(_Step(_spec()))
+    assert r.settle_timeouts, "放行必须被记录，否则和真静止无法区分"
+
+
+def test_settle_stable_leaves_no_notice():
+    ex = FakeExecutor([FakeElement()])  # page_source 恒定 → 真静止
+    r = _runner(ex)
+    r._do_wait_for(_Step(_spec()))
+    assert r.settle_timeouts == []
+
+
+def test_screen_wait_skips_settle_by_default():
+    """7.3 廉价路径默认：active 不拉 page_source。"""
+    ex = FakeExecutor([FakeElement()])
+    r = _runner(ex)
+    r.repo = _repo()
+    r._do_wait_for(_Step(_spec("active", target=TargetRef(type="screen", id="HomeView"))))
+    assert ex.page_source_calls == 0
+
+
+def test_screen_wait_settles_when_config_enabled():
+    """R11-1：3 轮实测默认豁免会丢 tap，开关打开后 active 也做静止判定。"""
+    ex = FakeExecutor([FakeElement()])
+    r = _runner(ex)
+    r.repo = _repo()
+    r.wait_config = WaitConfig(stable_polls=2, stable_interval=0.01,
+                               settle_timeout=0.05, settle_on_screen_wait=True)
+    r._do_wait_for(_Step(_spec("active", target=TargetRef(type="screen", id="HomeView"))))
+    assert ex.page_source_calls == 2

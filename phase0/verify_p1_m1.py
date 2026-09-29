@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from executor.wait import WaitConfig
 from repository.resolver import Repository
 from runner.testcase_runner import TestFailure, TestcaseRunner
 from testcase.loader import load_testcase
@@ -108,13 +109,21 @@ def main() -> int:
         "new_command_timeout": 120,
     }
     rec = Recorder(OUT_DIR / "trace.db")
+    # R11-1：3 轮实测 `wait_for screen active → tap` 会被 SwiftUI 转场吞掉 tap
+    # （HomeView 成立后紧跟的 go_profile tap 丢失，ProfileView 永不出现，2/3 轮挂）。
+    # settle_on_screen_wait=True 让 active 之后补树静止判定——M3 gesture-ready
+    # 信号落地后应能关掉，届时恢复 7.3 的纯廉价路径。
+    # stable_polls=3 × stable_interval=0.25 ≈ 0.5s 下限：SwiftUI push/pop 转场实测
+    # 0.35~0.45s，默认的 2×0.2 偏紧。
+    wait_cfg = WaitConfig(settle_on_screen_wait=True,
+                          stable_polls=3, stable_interval=0.25)
     # R10-5.3：run_id 带时间戳，避免 trace.db 跨次运行累积后按 run_id 查出多批
     run_id = f"p1_m1_gate_{time.strftime('%Y%m%d_%H%M%S')}"
     ds = DeviceSession(APPIUM_URL, caps, recorder=rec, run_id=run_id)
     ds.connect()
     ex = Executor(ds)
     app = AppSession(ds, BUNDLE_ID)
-    runner = TestcaseRunner(ex, app, rec, secrets, repository=repo)
+    runner = TestcaseRunner(ex, app, rec, secrets, repository=repo, wait_config=wait_cfg)
 
     results: dict[str, dict] = {}
     for case_id in CASES:

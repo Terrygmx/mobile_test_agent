@@ -26,6 +26,8 @@ class AmbiguousElement(Exception):
 class Executor:
     def __init__(self, device_session: DeviceSession):
         self.ds = device_session
+        # H11 的主保证在 DeviceSession.connect()（WDA 自愈后新 driver 也会带上）。
+        # 这里对「Executor 先于 connect 构造」的用法补一次；无 driver 时静默跳过。
         self.apply_implicit_wait_zero()
 
     def apply_implicit_wait_zero(self) -> None:
@@ -33,7 +35,7 @@ class Executor:
 
         否则 `not_exists` 类等待会被隐式等待拖慢（每条策略各自等一轮），轮询
         interval 形同虚设。当前无 driver（如未 connect）时跳过，connect 后由
-        再次调用补上。
+        DeviceSession.connect 兜底设置。
         """
         driver = self.ds.driver
         if driver is not None:

@@ -47,6 +47,10 @@ class DeviceSession:
         for k, v in self.caps.items():
             options.set_capability(k, v)
         self.driver = webdriver.Remote(self.appium_url, options=options)
+        # H11：implicit wait 固定为 0。放在这里而不是 Executor 构造期——WDA 重启
+        # （restart_wda → connect）会造出**新** driver，只在 Executor.__init__ 设一次
+        # 会在自愈后丢失该保证，等于靠 Appium 默认值（恰好也是 0）侥幸成立。
+        self.driver.implicitly_wait(0)
         return self.driver
 
     def health_check(self) -> bool:

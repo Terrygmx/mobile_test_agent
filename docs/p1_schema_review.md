@@ -35,11 +35,20 @@
   （连续 N 次 page_source 哈希不变）替换固定 sleep，删除 TAP_SETTLE_SECONDS。
 - **已修（Task 2.1 / P1-05）**：`executor/wait.py` 的 `wait_for_settle()` 实现树
   静止判定（连续 `stable_polls` 次树哈希不变），runner 命中条件后调用，
-  `TAP_SETTLE_SECONDS` 已删除。**例外**：`screen` target 走 7.3 廉价路径
-  （只 find marker，不拉 page_source），故不做静止判定——这是对「active 被转场
-  吞掉」问题的已知未覆盖面：若某 Screen 是 `active` 目标且其后紧跟 tap，
-  仍可能撞上转场窗口。要彻底解决需在 Screen 级加 gesture-ready 信号，
-  记账给 M3（SwiftUI 侧），见 `docs/mobile-test-agent-phase1-design.md` 13.2。
+  `TAP_SETTLE_SECONDS` 已删除。**screen target 例外**：`active` 走 7.3 廉价路径
+  （只 find marker，不拉 page_source），默认不做静止判定。
+- **R11-1 真机复跑结论（3 轮 M1 Gate，2026-09-29）**：screen 豁免**确实会丢 tap**。
+  第 1 轮 5/5 通过，第 2、3 轮 `profile_001` / `logout_001` 挂在
+  `WAIT_TIMEOUT: target='ProfileView' condition='active'`——`wait_for screen:HomeView
+  active` 成立即返回，紧随的 `go_profile` tap 被 SwiftUI 转场吞掉，ProfileView 永不出现。
+  兜底缓冲删了、替代机制又不覆盖这个模式，原始事故面确实回到了无保护状态。
+  **过渡方案**：`WaitConfig.settle_on_screen_wait`（默认 False = 守住 7.3 廉价路径；
+  置 True 则 active 后补树静止判定）。M1 Gate 开启后复跑 3 轮全绿。
+  `stable_polls=3 × stable_interval=0.25`（≈0.5s 下限）——SwiftUI push/pop 转场实测
+  0.35~0.45s，默认的 2×0.2 偏紧。
+  **未解决**：M3 的 gesture-ready 信号（App 侧显式标记可交互时刻）落地后应能关掉
+  `settle_on_screen_wait`，恢复 7.3 的纯廉价路径。现在是「多花 page_source 换稳定」，
+  不是设计意图的正解。
 
 ## 4. `polling_interval` 断言层缺失（已修）
 

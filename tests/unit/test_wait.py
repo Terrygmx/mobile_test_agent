@@ -43,11 +43,14 @@ class FakeElement:
 class FakeExecutor:
     """记录每次 driver 调用，供「廉价路径」断言。"""
 
-    def __init__(self, sequence, repeat_last=False):
+    def __init__(self, sequence, repeat_last=False, tree_always_changes=False):
         self.sequence = list(sequence)  # 每项：element / Exception / page_source 字符串
         self.repeat_last = repeat_last
+        # 树永不静止（动画/时钟/轮播页面）
+        self.tree_always_changes = tree_always_changes
         self.calls: list[str] = []
         self._last = None
+        self._tree_seq = 0
         self._trees: list[str] = []
 
     def find(self, locator):
@@ -64,6 +67,9 @@ class FakeExecutor:
 
     def page_source(self):
         self.calls.append("page_source")
+        if self.tree_always_changes:
+            self._tree_seq += 1
+            return f"<AppiumAUT seq={self._tree_seq}/>"  # 每次都不同
         return self._trees.pop(0) if self._trees else "<AppiumAUT/>"
 
 
@@ -274,3 +280,62 @@ def test_settle_requires_three_consecutive_identical_trees():
     ex._trees = ["<A/>", "<A/>", "<B/>", "<B/>", "<B/>"]
     _engine(ex, clock, WaitConfig(stable_polls=3)).wait_for_settle()
     assert ex.calls.count("page_source") == 5
+
+
+# --- R11-2：静止判定有上限，永不静止的页面不能挂死整条 run ---
+
+def test_settle_gives_up_at_settle_timeout_and_returns_false():
+    clock = FakeClock()
+    ex = FakeExecutor([], tree_always_changes=True)  # 树每次都变，永不静止
+    ok = _engine(ex, clock, WaitConfig(stable_polls=2, stable_interval=1.0,
+                                       settle_timeout=5.0)).wait_for_settle()
+    assert ok is False
+    # 上限内停止：首次 + 5 次（每次推进 1.0s 到 deadline）
+    assert ex.calls.count("page_source") == 6
+    assert clock.t <= 5.0
+
+
+def test_settle_returns_true_when_stable():
+    clock = FakeClock()
+    ex = FakeExecutor([])
+    ex._trees = ["<A/>", "<A/>"]
+    assert _engine(ex, clock, WaitConfig(settle_timeout=5.0)).wait_for_settle() is True
+
+
+def test_wait_config_rejects_nonpositive_settle_timeout():
+    with pytest.raises(ValueError):
+        WaitConfig(settle_timeout=0)
+
+
+# --- R11-3：find 之后的属性读取遇 stale 异常应继续轮询，不冒泡 ---
+
+class StaleElement(FakeElement):
+    """转场期的典型对象：属性读取抛 stale element。"""
+
+    def is_displayed(self):
+        raise RuntimeError("stale element reference: element is not attached")
+
+
+def test_stale_attribute_read_is_retried_not_raised():
+    clock = FakeClock()
+    ex = FakeExecutor([StaleElement(), FakeElement()])  # 第 2 轮恢复正常
+    _engine(ex, clock).wait_for(_spec(condition="visible", timeout=5.0))
+    assert len(clock.sleeps) == 1  # 轮询过一次后满足
+
+
+def test_stale_read_until_timeout_reports_wait_timeout_not_driver_error():
+    clock = FakeClock()
+    ex = FakeExecutor([StaleElement()], repeat_last=True)
+    with pytest.raises(WaitTimeout) as ei:
+        _engine(ex, clock).wait_for(_spec(condition="visible", timeout=0.5))
+    # 关键：不是驱动异常冒泡，而是 WaitTimeout
+    assert "stale element" in str(ei.value)
+
+
+def test_stale_read_does_not_swallow_unsupported_condition():
+    clock = FakeClock()
+    ex = FakeExecutor([StaleElement()], repeat_last=True)
+    bad = WaitSpec(target=TargetRef(id="x"), condition="exists", timeout=1.0)
+    object.__setattr__(bad, "condition", "sparkles")
+    with pytest.raises(UnsupportedWaitCondition):
+        _engine(ex, clock).wait_for(bad)
