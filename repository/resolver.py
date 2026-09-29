@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -27,6 +28,13 @@ from testcase.schema import Idempotency, Risk, TargetRef, TestCase
 ElementKey = tuple[str | None, str]
 
 
+class Severity(enum.Enum):
+    """lint 严重级（6.4）：ERROR → 退出码 3；WARNING → 退出码 0。"""
+
+    ERROR = "error"
+    WARNING = "warning"
+
+
 class UnknownReferenceError(KeyError):
     """target 引用的 element/screen 不存在（4.1：lint 报错）。"""
 
@@ -37,12 +45,18 @@ class AmbiguousReferenceError(ValueError):
 
 @dataclass(frozen=True)
 class LintIssue:
-    """lint 产出的最小结构；severity/退出码归 Task 1.3 的 `mta lint` 汇总。"""
+    """lint 结果（单一类型：Repository 侧 + testcase.lint 共用）。
 
-    code: str  # ambiguous_target / unknown_target
+    repository 侧 target 检查（unknown_target / ambiguous_target）恒为 ERROR
+    级（4.1），故 severity 默认 ERROR；testcase.lint 的 warning 项显式传
+    Severity.WARNING。
+    """
+
+    code: str  # ambiguous_target / unknown_target / schema_invalid / ...
     message: str
-    testcase_id: str
+    testcase_id: str | None = None
     step_index: int | None = None
+    severity: Severity = Severity.ERROR
 
 
 @dataclass(frozen=True)
