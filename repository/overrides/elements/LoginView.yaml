@@ -1,0 +1,55 @@
+# overrides/elements/LoginView.yaml — Demo App 登录页元素（M1 手写起点，设计 5.1）
+# 语义 ID 对齐 ios_demo/LoginDemo/LoginDemoApp.swift 的 accessibilityIdentifier。
+# M3 接入 Source Intelligence 后本目录转 override 语义（mode 合并，5.3）。
+schema_version: "1.0"
+kind: element
+id: username_field
+screen: LoginView
+type: textfield
+strategies:
+  - {type: accessibility_id, value: username_field, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 22}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: INTERNAL
+---
+schema_version: "1.0"
+kind: element
+id: password_field
+screen: LoginView
+type: securetextfield
+strategies:
+  - {type: accessibility_id, value: password_field, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 26}
+metadata:
+  risk: MEDIUM
+  idempotency: IDEMPOTENT
+  data_class: SENSITIVE
+---
+schema_version: "1.0"
+kind: element
+id: login_button
+screen: LoginView
+type: button
+strategies:
+  - {type: accessibility_id, value: login_button, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 42}
+  - {type: predicate, value: "label == '登录'", origin: manual}
+metadata:
+  risk: MEDIUM
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: error_message
+screen: LoginView
+type: text
+strategies:
+  - {type: accessibility_id, value: error_message, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 31}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC

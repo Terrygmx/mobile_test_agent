@@ -1,0 +1,16 @@
+# overrides/screens/LoginView.yaml — Demo App Screen 定义（M1 手写起点，设计 5.1/5.4）
+schema_version: "1.0"
+kind: screen
+id: LoginView
+marker: screen.LoginView
+kind_hint: page
+metadata:
+  risk: LOW
+---
+schema_version: "1.0"
+kind: screen
+id: HomeView
+marker: screen.HomeView
+kind_hint: page
+metadata:
+  risk: LOW
