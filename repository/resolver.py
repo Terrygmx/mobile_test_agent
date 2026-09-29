@@ -19,8 +19,8 @@ from repository.loader import (
     DataClass,
     ElementDef,
     ScreenDef,
-    load_element_file,
-    load_screen_file,
+    load_elements,
+    load_screens,
 )
 from testcase.schema import Idempotency, Risk, TargetRef, TestCase
 
@@ -94,14 +94,17 @@ def _merge_element(
 
     warnings: list[str] = []
     if other is not None:
-        # 不能静默覆盖：override 的 accessibility_id 值与 generated 不同 → warning（5.3）。
+        # 不能静默覆盖（R6-2）：仅当 override **改写**了 generated 已有的
+        # accessibility_id 值（replace 语义）才告警；prepend/append 新增
+        # generated 中不存在的策略是扩位，不是冲突。
         gen_access = [s.value for s in other.strategies if s.type == "accessibility_id"]
-        for s in base.strategies:
-            if s.type == "accessibility_id" and gen_access and s.value not in gen_access:
-                warnings.append(
-                    f"override_shadows_source: {element_id} accessibility_id "
-                    f"{s.value!r} shadows source {gen_access[0]!r}"
-                )
+        if mode == "replace" and gen_access:
+            for s in base.strategies:
+                if s.type == "accessibility_id" and s.value not in gen_access:
+                    warnings.append(
+                        f"override_shadows_source: {element_id} accessibility_id "
+                        f"{s.value!r} shadows source {gen_access[0]!r}"
+                    )
 
     meta = dict(other.metadata if other is not None else {})
     meta.update(base.metadata)  # overrides > generated
@@ -180,10 +183,10 @@ class Repository:
             p = Path(root) / name
             return p if p.exists() else None
 
-        gen_el = load_element_file(p) if (p := _sub(generated_root, "elements")) else None
-        gen_sc = load_screen_file(p) if (p := _sub(generated_root, "screens")) else None
-        ov_el = load_element_file(p) if (p := _sub(overrides_root, "elements")) else None
-        ov_sc = load_screen_file(p) if (p := _sub(overrides_root, "screens")) else None
+        gen_el = load_elements(p) if (p := _sub(generated_root, "elements")) else None
+        gen_sc = load_screens(p) if (p := _sub(generated_root, "screens")) else None
+        ov_el = load_elements(p) if (p := _sub(overrides_root, "elements")) else None
+        ov_sc = load_screens(p) if (p := _sub(overrides_root, "screens")) else None
         return cls(
             generated_elements=gen_el or {},
             generated_screens=gen_sc or {},
@@ -194,36 +197,51 @@ class Repository:
     # --- 合并（5.3） ---
 
     def _element(self, element_id: str, screen: str | None = None) -> EffectiveElement:
-        """按 id（可选限定 screen）合并。screen=None 时要求全局唯一（4.1）。"""
-        gen_matches = [
-            d for (s, i), d in self.generated_elements.items()
-            if i == element_id and (screen is None or s == screen)
-        ]
-        ov_matches = [
-            d for (s, i), d in self.override_elements.items()
-            if i == element_id and (screen is None or s == screen)
-        ]
-        if not gen_matches and not ov_matches:
+        """按 id（可选限定 screen）合并。
+
+        - screen=None（短名）：要求全局唯一，跨 Screen 同名 → AmbiguousReferenceError（4.1）；
+        - screen=显式（限定名 / elements_of）：screenless override（R6-1，设计 5.3
+          规范写法）与显式 screen override 同等参与合并，省略的 screen 沿用
+          generated——三条路径（短名/限定名/elements_of）行为必须一致。
+        """
+        gen_all = [d for (_, i), d in self.generated_elements.items() if i == element_id]
+        ov_all = [d for (_, i), d in self.override_elements.items() if i == element_id]
+        if not gen_all and not ov_all:
             raise UnknownReferenceError(element_id)
-        # 逻辑匹配数：override 省略 screen 时并入 generated 的 screen，
-        # 不构成第二个匹配；独立计数只看显式 screen 的 (screen, id) 组合。
-        explicit_screens = {
-            d.screen for d in gen_matches + ov_matches if d.screen is not None
-        }
-        screenless_override = any(
-            d.screen is None for d in ov_matches
-        )
-        if screen is None and (len(explicit_screens) > 1 or (not explicit_screens and len(ov_matches) > 1)):
-            raise AmbiguousReferenceError(
-                f"element id {element_id!r} ambiguous across screens "
-                f"{sorted(explicit_screens)}; use qualified name 'Screen.{element_id}'"
-            )
-        if screen is None and screenless_override and not gen_matches:
-            # overrides-only 且未声明 screen：无法确定归属，拒绝
-            raise AmbiguousReferenceError(
-                f"override for element {element_id!r} must declare screen "
-                f"(no generated definition to inherit from)"
-            )
+
+        if screen is not None:
+            gen_matches = [d for d in gen_all if d.screen == screen]
+            # R6-1：screenless override 纳入显式 screen 匹配
+            ov_matches = [d for d in ov_all if d.screen in (None, screen)]
+            if not gen_matches and not ov_matches:
+                raise UnknownReferenceError(element_id)
+            if not gen_matches and any(d.screen is None for d in ov_matches):
+                # screenless override 无 generated 可继承 → 无法确定归属，拒绝
+                raise AmbiguousReferenceError(
+                    f"override for element {element_id!r} must declare screen "
+                    f"(no generated definition on screen {screen!r} to inherit from)"
+                )
+        else:
+            # 短名：只统计显式 screen；screenless override 继承 generated 的
+            # 唯一 screen，不构成第二个匹配。
+            explicit = {d.screen for d in gen_all + ov_all if d.screen is not None}
+            screenless_ov = any(d.screen is None for d in ov_all)
+            if len(explicit) > 1:
+                raise AmbiguousReferenceError(
+                    f"element id {element_id!r} ambiguous across screens "
+                    f"{sorted(explicit)}; use qualified name 'Screen.{element_id}'"
+                )
+            if not explicit:
+                if screenless_ov:
+                    raise AmbiguousReferenceError(
+                        f"override for element {element_id!r} must declare screen "
+                        f"(no generated definition to inherit from)"
+                    )
+                raise UnknownReferenceError(element_id)
+            screen = next(iter(explicit))
+            gen_matches = [d for d in gen_all if d.screen == screen]
+            ov_matches = [d for d in ov_all if d.screen in (None, screen)]
+
         generated = gen_matches[0] if gen_matches else None
         override = ov_matches[0] if ov_matches else None
         # override 省略 screen 时沿用 generated 的 screen（5.3 合并语义）
@@ -268,14 +286,21 @@ class Repository:
         return self._element(text)
 
     def elements_of(self, screen: str) -> list[EffectiveElement]:
-        """5.5：某 Screen 下全部 element（合并后），id 升序保证确定性。"""
-        ids = {
-            e_id
-            for (s, e_id) in (*self.generated_elements.keys(),
-                              *self.override_elements.keys())
-            if s == screen
+        """5.5：某 Screen 下全部 element（合并后），id 升序保证确定性。
+
+        R6-1：screenless override 归入其 generated 定义所在的 screen——
+        与 resolve 短名/限定名路径行为一致。
+        """
+        gen_screens_by_id: dict[str, set[str | None]] = {}
+        for s, i in self.generated_elements:
+            gen_screens_by_id.setdefault(i, set()).add(s)
+        ids = {i for (s, i) in self.generated_elements if s == screen}
+        ids |= {i for (s, i) in self.override_elements if s == screen}
+        ids |= {
+            i for (s, i) in self.override_elements
+            if s is None and screen in gen_screens_by_id.get(i, set())
         }
-        return sorted((self._element(e_id, screen=screen) for e_id in ids),
+        return sorted((self._element(i, screen=screen) for i in ids),
                       key=lambda e: e.id)
 
     # --- lint（Repository 侧静态检查；全量 6.4 在 Task 1.3 testcase.lint） ---

@@ -1,6 +1,9 @@
 # overrides/elements/LoginView.yaml — Demo App 登录页元素（M1 手写起点，设计 5.1）
 # 语义 ID 对齐 ios_demo/LoginDemo/LoginDemoApp.swift 的 accessibilityIdentifier。
 # M3 接入 Source Intelligence 后本目录转 override 语义（mode 合并，5.3）。
+# 注：source_file/source_line 目前随 origin: manual 记录的是**手写时点的真实
+# 源码行号**（P3 review 提示：source 系字段语义上属于 origin: source，M3 切换
+# 时这些行号将改由生成器自动填写）。
 schema_version: "1.0"
 kind: element
 id: username_field

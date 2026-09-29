@@ -304,3 +304,128 @@ def test_loader_allows_same_id_across_screens():
     assert len(defs) == 2
     assert {k for k in defs} == {("HomeView", "confirm_button"),
                                  ("SettingsView", "confirm_button")}
+
+
+# --- R6 修复回归（review_m1_task12_2026-09-29） ---
+
+OVERRIDE_SCREENLESS = """\
+kind: element
+id: login_button
+mode: replace
+strategies:
+  - {type: accessibility_id, value: signin_button, origin: manual}
+"""
+
+OVERRIDE_PREPEND_NEW_ID = """\
+kind: element
+id: login_button
+screen: LoginView
+mode: prepend
+strategies:
+  - {type: accessibility_id, value: brand_new_fallback, origin: manual}
+"""
+
+
+def test_r6_1_screenless_override_consistent_across_paths():
+    """R6-1：省略 screen 的 override（5.3 规范写法）在短名/限定名/elements_of
+    三条路径行为一致，不因解析路径不同被静默忽略。"""
+    repo = _repo(override_elements=OVERRIDE_SCREENLESS)
+    by_short = repo.resolve("login_button", build="b1")
+    by_qualified = repo.resolve("LoginView.login_button", build="b1")
+    by_elements_of = repo.elements_of("LoginView")
+    assert [s.value for s in by_short.strategies] == ["signin_button"]
+    assert [s.value for s in by_qualified.strategies] == ["signin_button"]
+    assert [s.value for s in by_elements_of[0].strategies] == ["signin_button"]
+    # 合并语义继承：screen/type 沿用 generated
+    assert by_short.screen == by_qualified.screen == "LoginView"
+    assert by_short.type == "button"
+
+
+def test_r6_1_screenless_override_without_generated_rejected():
+    """screenless override 且无 generated 可继承 → 明确报错（不静默猜归属）。"""
+    repo2 = _repo(
+        generated_elements=GENERATED_ELEMENTS_CONFIRM_HOME,
+        override_elements="""\
+kind: element
+id: ghost_elem
+mode: replace
+strategies:
+  - {type: accessibility_id, value: x, origin: manual}
+""",
+    )
+    with pytest.raises(AmbiguousReferenceError):
+        repo2._element("ghost_elem")
+    # 对照：有 generated 同 screen 定义时不触发（confirm_button 正常合并）
+    ok = _repo(
+        generated_elements=GENERATED_ELEMENTS_CONFIRM_HOME,
+        override_elements="""\
+kind: element
+id: confirm_button
+mode: replace
+strategies:
+  - {type: accessibility_id, value: new_confirm, origin: manual}
+""",
+    )
+    assert ok.resolve("confirm_button", build="b1").screen == "HomeView"
+
+
+def test_r6_2_prepend_new_id_no_false_warning():
+    """R6-2：prepend 新增 generated 中不存在的 accessibility_id 是扩位不是冲突，
+    不误报 override_shadows_source。"""
+    eff = _repo(override_elements=OVERRIDE_PREPEND_NEW_ID).resolve(
+        "login_button", build="b1"
+    )
+    assert eff.warnings == ()
+    # append 同理
+    ov = OVERRIDE_PREPEND_NEW_ID.replace("mode: prepend", "mode: append")
+    eff = _repo(override_elements=ov).resolve("login_button", build="b1")
+    assert eff.warnings == ()
+
+
+def test_r6_3_metadata_enum_typo_rejected_at_loader():
+    """R6-3：metadata 枚举 typo（risk: EXTREME）在 loader 层拦截，
+    不漏到 resolve 时裸 KeyError。"""
+    bad = GENERATED_ELEMENTS_LOGIN.replace("risk: LOW", "risk: EXTREME")
+    with pytest.raises(RepositoryLoaderError, match="EXTREME"):
+        load_element_dir([("LoginView.yaml", bad)])
+    for key, bad_val in (("idempotency", "SOMETIMES"), ("data_class", "TOP_SECRET")):
+        bad2 = GENERATED_ELEMENTS_LOGIN.replace(
+            f"{key}:", f"{key}:"  # noop 保证 key 存在
+        ).replace(
+            {"idempotency": "IDEMPOTENT", "data_class": "PUBLIC"}[key], bad_val
+        )
+        with pytest.raises(RepositoryLoaderError, match=bad_val):
+            load_element_dir([("LoginView.yaml", bad2)])
+
+
+def test_p3_element_id_with_dot_rejected():
+    """语义 ID 含 `.` 会让短名解析被误判为限定名 → loader 直接禁止。"""
+    bad = GENERATED_ELEMENTS_LOGIN.replace("id: login_button", "id: a.b")
+    with pytest.raises(RepositoryLoaderError, match="'.'"):
+        load_element_dir([("LoginView.yaml", bad)])
+    bad_screen = GENERATED_SCREENS.replace("id: LoginView", "id: A.B")
+    with pytest.raises(RepositoryLoaderError, match="'.'"):
+        load_screen_dir([("LoginView.yaml", bad_screen)])
+
+
+def test_from_dirs_loads_real_overrides(tmp_path):
+    """P3：磁盘入口 from_dirs 有覆盖（此前全走低层注入）；.yml 同样收录。"""
+    gen = tmp_path / "generated"
+    (gen / "elements").mkdir(parents=True)
+    (gen / "screens").mkdir()
+    (gen / "elements" / "LoginView.yaml").write_text(GENERATED_ELEMENTS_LOGIN)
+    (gen / "screens" / "LoginView.yaml").write_text(GENERATED_SCREENS)
+    ov = tmp_path / "overrides"
+    (ov / "elements").mkdir(parents=True)
+    (ov / "screens").mkdir()
+    # screenless override（5.3 规范写法）+ .yml 后缀收录
+    (ov / "elements" / "LoginView.yml").write_text(OVERRIDE_SCREENLESS)
+    (ov / "screens" / "LoginView.yaml").write_text(GENERATED_SCREENS)
+    repo = Repository.from_dirs(generated_root=str(gen), overrides_root=str(ov))
+    eff = repo.resolve("login_button", build="b1")
+    assert [s.value for s in eff.strategies] == ["signin_button"]
+    assert eff.screen == "LoginView"  # screenless 继承 generated
+    assert repo.resolve("screen:LoginView", build="b1").marker == "screen.LoginView"
+    # 对照：低层注入路径结果一致
+    low = _repo(override_elements=OVERRIDE_SCREENLESS)
+    assert low.resolve("login_button", build="b1") == eff

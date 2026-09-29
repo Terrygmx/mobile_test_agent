@@ -29,6 +29,10 @@ ORIGINS = ("source", "manual")
 # V2 预留 origin: experience（5.3），P1 不产生。
 MODES = ("replace", "prepend", "append")
 KIND_HINTS = ("page", "modal", "overlay")
+# 5.2 metadata 枚举（R6-3：typo 在 loader 层拦截，不漏到 resolve 时裸 KeyError）
+RISKS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+IDEMPOTENCIES = ("IDEMPOTENT", "NON_IDEMPOTENT", "UNKNOWN")
+DATA_CLASSES = ("PUBLIC", "INTERNAL", "SENSITIVE", "SECRET")
 
 
 class RepositoryLoaderError(ValueError):
@@ -137,8 +141,19 @@ def _build_defs(
 
 
 def _validate_element_semantics(defs: dict[tuple[str | None, str], ElementDef]) -> None:
-    """ElementDef 枚举字段逐个校验（str + 手查，报错信息可控、可读）。"""
+    """ElementDef 枚举字段逐个校验（str + 手查，报错信息可控、可读）。
+
+    R6-3：metadata 的 risk/idempotency/data_class 枚举在此前移校验——
+    若漏到 resolve 时会以裸 KeyError 暴露，脱离 RepositoryLoaderError 体系。
+    """
     for (_screen, e_id), d in defs.items():
+        if d.id and "." in d.id:
+            # 限定名 `Screen.elem` 语法保留字：语义 ID 含 `.` 会让短名解析被
+            # 误判为限定名（P3）。
+            raise RepositoryLoaderError(
+                f"element id {d.id!r} must not contain '.' "
+                f"(reserved for qualified name 'Screen.elem')"
+            )
         if d.type is not None and d.type not in ELEMENT_TYPES:
             raise RepositoryLoaderError(
                 f"element {e_id!r}: unknown type {d.type!r} (allowed: {ELEMENT_TYPES})"
@@ -147,6 +162,14 @@ def _validate_element_semantics(defs: dict[tuple[str | None, str], ElementDef]) 
             raise RepositoryLoaderError(
                 f"element {e_id!r}: unknown mode {d.mode!r} (allowed: {MODES})"
             )
+        for key, allowed in (
+            ("risk", RISKS), ("idempotency", IDEMPOTENCIES), ("data_class", DATA_CLASSES),
+        ):
+            if key in d.metadata and d.metadata[key] not in allowed:
+                raise RepositoryLoaderError(
+                    f"element {e_id!r}: metadata {key}={d.metadata[key]!r} "
+                    f"invalid (allowed: {allowed})"
+                )
         for s in d.strategies:
             if s.type not in STRATEGY_TYPES:
                 raise RepositoryLoaderError(
@@ -162,10 +185,23 @@ def _validate_element_semantics(defs: dict[tuple[str | None, str], ElementDef]) 
 
 def _validate_screen_semantics(defs: dict[str, ScreenDef]) -> None:
     for d in defs.values():
+        if d.id and "." in d.id:
+            raise RepositoryLoaderError(
+                f"screen id {d.id!r} must not contain '.' "
+                f"(reserved for qualified name 'Screen.elem')"
+            )
         if d.kind_hint not in KIND_HINTS:
             raise RepositoryLoaderError(
                 f"screen {d.id!r}: unknown kind_hint {d.kind_hint!r} "
                 f"(allowed: {KIND_HINTS})"
+            )
+        # R6-4：includes（5.4 子组件归属）M1 加载但不消费——M1 无 generated
+        # 多组件来源；TODO(Task 4.x/Source Intelligence)：elements_of 合并
+        # includes 指向的子组件元素。留在此处记账，M1 末冻结盘点不漏。
+        if d.includes:
+            raise RepositoryLoaderError(
+                f"screen {d.id!r}: includes is not consumed yet in P1 "
+                f"(TODO M1-end freeze accounting, R6-4); remove or leave empty"
             )
 
 
@@ -185,19 +221,21 @@ def load_screen_dir(entries: list[tuple[str, str]]) -> dict[str, ScreenDef]:
     return defs
 
 
-def _dir_entries(directory: Path, suffix: str = ".yaml") -> list[tuple[str, str]]:
+def _dir_entries(directory: Path) -> list[tuple[str, str]]:
     if not directory.exists():
         return []
-    return [(p.name, p.read_text()) for p in sorted(directory.glob(f"*{suffix}"))]
+    return [
+        (p.name, p.read_text())
+        for p in sorted(directory.iterdir())
+        if p.suffix in (".yaml", ".yml")
+    ]
 
 
-def load_element_file(
-    path: str | Path,
-) -> dict[tuple[str | None, str], ElementDef]:
-    """目录下所有 *.yaml → {(screen, element_id): ElementDef}。"""
+def load_elements(path: str | Path) -> dict[tuple[str | None, str], ElementDef]:
+    """磁盘目录入口：目录下所有 *.yaml/*.yml → {(screen, element_id): ElementDef}。"""
     return load_element_dir(_dir_entries(Path(path)))
 
 
-def load_screen_file(path: str | Path) -> dict[str, ScreenDef]:
-    """目录下所有 *.yaml → {screen_id: ScreenDef}。"""
+def load_screens(path: str | Path) -> dict[str, ScreenDef]:
+    """磁盘目录入口：目录下所有 *.yaml/*.yml → {screen_id: ScreenDef}。"""
     return load_screen_dir(_dir_entries(Path(path)))
