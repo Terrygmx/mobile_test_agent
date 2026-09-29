@@ -60,6 +60,12 @@ class _FakeRecorder:
         return "r1"
 
 
+# R10-5.5：类名 Test*/Test* 会被 pytest 误收集（PytestCollectionWarning），
+# 用 __test__ = False 显式排除——与 testcase.schema.TestCase 同款处理。
+TestcaseRunner.__test__ = False  # type: ignore[attr-defined]
+TestFailure.__test__ = False  # type: ignore[attr-defined]
+
+
 def _runner(repo: Repository | None) -> TestcaseRunner:
     return TestcaseRunner(
         executor=None, app=None, recorder=_FakeRecorder(),

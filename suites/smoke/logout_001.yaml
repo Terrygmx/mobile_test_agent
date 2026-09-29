@@ -31,7 +31,6 @@ steps:
   - action: tap
     target: ProfileView.logout_button
     idempotency: NON_IDEMPOTENT
-    postcondition:
-      target: screen:LoginView
-      condition: active
-      timeout: 10
+    # postcondition（screen:LoginView active）待 M2 postcondition 引擎落地后
+    # 加回——当前 runner 不消费（R10-2 lint declaration_not_consumed 会拦）。
+    # 终态回 Login 由 Gate 脚本的 marker 精确断言覆盖。

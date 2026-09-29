@@ -248,6 +248,34 @@ def test_idempotent_step_no_postcondition_check():
                    for i in lint([_tc()], _repo(), DictSecrets()))
 
 
+# --- R10-2：runner 未消费的声明 fail-loud ---
+
+def test_r10_2_declared_postcondition_reports_not_consumed():
+    """postcondition 当前 runner 不执行 → lint ERROR（防作者以为生效）。"""
+    issues = lint([_tc(steps=[{"action": "tap", "target": "login_button",
+                               "postcondition": {"target": "screen:LoginView",
+                                                 "condition": "active"}}])],
+                  _repo(), DictSecrets())
+    hits = [i for i in issues if i.code == "declaration_not_consumed"]
+    assert hits and hits[0].severity is Severity.ERROR
+
+
+def test_r10_2_no_declaration_no_issue():
+    assert not any(i.code == "declaration_not_consumed"
+                   for i in lint([_tc()], _repo(), DictSecrets()))
+
+
+# --- R10-4：wait_for condition 白名单（runner 层，间接验证 schema 条件枚举） ---
+
+def test_r10_4_wait_condition_enum():
+    """schema 层 condition 是闭集 Literal；runner 白名单外 fail-loud 的行为
+    由 runner 集成测试覆盖（真机 Gate），这里验证 text_contains 可过 schema。"""
+    parsed = parse_testcase_dict(_tc(steps=[{"wait_for": {
+        "target": "login_button", "condition": "text_contains",
+        "expected": "x"}}]))
+    assert parsed.steps[0].wait_for.condition == "text_contains"
+
+
 # --- 退出码表 ---
 
 def test_exit_code_error_is_3():

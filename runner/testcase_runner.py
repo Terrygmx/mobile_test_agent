@@ -188,8 +188,16 @@ class TestcaseRunner:
     TAP_SETTLE_SECONDS = 1.0
 
     def _do_wait_for(self, step) -> None:
-        """Task 1.6 最小 wait：轮询 find（wait engine 完整版在 Task 2.1）。"""
+        """Task 1.6 最小 wait：轮询 find（wait engine 完整版在 Task 2.1）。
+
+        R10-4：condition 白名单外一律 fail-loud，不静默降级为「元素存在」。
+        """
         w = step.wait_for
+        if w.condition not in ("active", "exists"):
+            raise TestFailure(
+                f"wait_for condition {w.condition!r} not supported until "
+                f"Task 2.1 wait engine (only active/exists here)"
+            )
         deadline = time.time() + w.timeout
         interval = w.polling_interval or 0.5
         last_err: Exception | None = None

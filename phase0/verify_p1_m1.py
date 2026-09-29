@@ -86,10 +86,15 @@ def main() -> int:
 
     from environment.secrets import EnvSecretProvider
     from executor.executor import Executor
+    from repository.resolver import Severity
     from runner.testcase_runner import TestFailure  # noqa: F401
     from session.app_session import AppSession
     from session.device_session import DeviceSession
     from tracer.recorder import Recorder
+    # TODO(M3, R10-5.2)：overrides 目录当前被当作 generated_root 传入——M1
+    # overrides-only 下功能等价；M3 接入 generated 后这里必须改为
+    # generated_root=<generated目录> + overrides_root=<overrides目录>，
+    # generated 与 override 的解析语义不同（5.3 mode 合并）。
     repo = Repository.from_dirs(generated_root=str(ROOT / "repository" / "overrides"))
     secrets = EnvSecretProvider()
 
@@ -103,7 +108,9 @@ def main() -> int:
         "new_command_timeout": 120,
     }
     rec = Recorder(OUT_DIR / "trace.db")
-    ds = DeviceSession(APPIUM_URL, caps, recorder=rec, run_id="p1_m1_gate")
+    # R10-5.3：run_id 带时间戳，避免 trace.db 跨次运行累积后按 run_id 查出多批
+    run_id = f"p1_m1_gate_{time.strftime('%Y%m%d_%H%M%S')}"
+    ds = DeviceSession(APPIUM_URL, caps, recorder=rec, run_id=run_id)
     ds.connect()
     ex = Executor(ds)
     app = AppSession(ds, BUNDLE_ID)
@@ -115,7 +122,8 @@ def main() -> int:
         print(f"[case] {case_id} ...")
         tc = load_testcase(path)  # strict 0.2 分发
         issues = lint([tc], repo, secrets)
-        errors = [i for i in issues if i.severity.value == "error"]
+        # R10-5.1：Severity enum 用 is 比较（R7-3 同款，不做 stringly 比较）
+        errors = [i for i in issues if i.severity is Severity.ERROR]
         if errors:
             results[case_id] = {"passed": False, "stage": "lint",
                                 "errors": [f"{i.code}: {i.message}" for i in errors]}

@@ -41,12 +41,15 @@
   **0.2 不给 AssertionSpec 加 polling_interval**：断言是终态判定不是等待，
   timeout 兜底即可；若 2.2 需要再加。
 
-## 5. precondition.reset 仍是松散 dict（R5-3 遗留，0.2 冻结前必须解决）
+## 5. precondition.reset 仍是松散 dict（R5-3 遗留，顺延 0.3 / M2 开头）
 
 - 5 条用例都写了 `precondition: {reset: RELAUNCH}`，schema 未校验枚举，
-  `RESET_STATEE` typo 会静默通过到运行期才炸。**0.2 升版时一并定型
-  EnvSpec**（枚举：RESET_STATE/RELAUNCH/TERMINATE/LOGOUT/REINSTALL/SNAPSHOT）。
-  本次 5 条用例只用 RELAUNCH，风险已知可控。
+  `RESET_STATEE` typo 会静默通过到运行期才炸（`reset_state` matrix 运行期
+  fail-loud 兜底，但 lint 阶段就该拦）。
+- **0.2 未含 EnvSpec**（0.2 仅版本号变更，见下）。M2 开头升 0.3 时定型
+  EnvSpec（枚举：RESET_STATE/RELAUNCH/TERMINATE/LOGOUT/REINSTALL/SNAPSHOT），
+  记账位置：本节 + R5-3 + M1 末冻结盘点。本次 5 条用例只用 RELAUNCH，
+  风险已知可控。
 
 ## 6. 别扭但保留的点
 

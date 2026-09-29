@@ -145,6 +145,30 @@ def _schema_error_issue(data: dict, exc: Exception) -> LintIssue:
                      f"testcase {tc_id!r} failed 0.1 schema: {detail}")
 
 
+def _check_unconsumed_declarations(
+    raw_steps: list[dict], tc_id: str, issues: list[LintIssue]
+) -> None:
+    """R10-2（fail-loud）：runner 尚未消费的声明报 ERROR，防止作者以为生效。
+
+    - postcondition：当前最小 runner 不执行（M2 第一批实现 + 失败语义定型）；
+    - cleanup：同上（M2 Gate「cleanup 失败终止套件」依赖它）。
+    M2 实现翻正时，从 RUNNER_UNCONSUMED 中删除对应键即可。
+    """
+    RUNNER_UNCONSUMED = ("postcondition", "cleanup")
+    for idx, step in enumerate(raw_steps):
+        if not isinstance(step, dict) or step.get("action") is None:
+            continue
+        for key in RUNNER_UNCONSUMED:
+            if step.get(key) is not None:
+                issues.append(LintIssue(
+                    "declaration_not_consumed",
+                    f"testcase {tc_id!r} step {idx}: {key!r} is declared but the "
+                    f"runner does not consume it yet (M2 implements postcondition/"
+                    f"cleanup semantics); remove it or accept it is inert",
+                    tc_id, idx, Severity.ERROR,
+                ))
+
+
 def lint(
     testcases: list[dict | TestCase],
     repo: Repository,
@@ -179,6 +203,7 @@ def lint(
         _check_active_scope(raw_steps, tc_id, issues)
         _check_secrets(raw_steps, tc_id, secrets, issues)
         _check_postcondition(raw_steps, tc_id, issues)
+        _check_unconsumed_declarations(raw_steps, tc_id, issues)
     return issues
 
 
