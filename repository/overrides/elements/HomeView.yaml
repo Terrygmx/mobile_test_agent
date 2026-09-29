@@ -1,0 +1,92 @@
+# overrides/elements/HomeView.yaml — Demo App 首页元素（Task 1.6 / P1-04）
+# 语义 ID 对齐 ios_demo/LoginDemo/LoginDemoApp.swift 的 accessibilityIdentifier。
+schema_version: "1.0"
+kind: element
+id: home_page
+screen: HomeView
+type: text
+strategies:
+  - {type: accessibility_id, value: home_page, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 71}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: welcome_label
+screen: HomeView
+type: text
+strategies:
+  - {type: accessibility_id, value: welcome_label, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 73}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: cell_alpha
+screen: HomeView
+type: cell
+strategies:
+  - {type: accessibility_id, value: cell_alpha, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 89}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: cell_beta
+screen: HomeView
+type: cell
+strategies:
+  - {type: accessibility_id, value: cell_beta, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 89}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: cell_gamma
+screen: HomeView
+type: cell
+strategies:
+  - {type: accessibility_id, value: cell_gamma, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 89}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: go_search
+screen: HomeView
+type: button
+strategies:
+  - {type: accessibility_id, value: go_search, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 96}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: go_profile
+screen: HomeView
+type: button
+strategies:
+  - {type: accessibility_id, value: go_profile, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 100}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC

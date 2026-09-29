@@ -16,6 +16,11 @@ from pathlib import Path
 
 from environment.secrets import SecretProvider
 from executor.executor import AmbiguousElement, ElementNotFound, Executor, Locator
+from repository.resolver import (
+    AmbiguousReferenceError,
+    Repository,
+    UnknownReferenceError,
+)
 from session.app_session import AppSession
 from session.device_session import InfraError
 from tracer.recorder import Recorder
@@ -23,6 +28,15 @@ from tracer.recorder import Recorder
 MAX_ID = re.compile(r"^\$\{(\w+)\}$")
 
 ARTIFACT_DIR = Path("out/artifacts")
+
+
+def _str_target(text: str):
+    """P0 裸字符串 → TargetRef（4.1 语法：screen: 前缀 / 短名）。"""
+    from testcase.schema import TargetRef
+
+    if text.startswith("screen:"):
+        return TargetRef(type="screen", id=text.removeprefix("screen:"))
+    return TargetRef(type="element", id=text)
 
 # Recorder.record_step 的 locator 参数是 dict|None，Locator 是 list[dict]；
 # record_step 内部 json.dumps 直接可序列化两者，类型层面放宽：
@@ -36,13 +50,17 @@ class TestFailure(Exception):
 class TestcaseRunner:
     def __init__(self, executor: Executor, app: AppSession,
                  recorder: Recorder, secrets: SecretProvider,
-                 recovery_context: dict | None = None):
+                 recovery_context: dict | None = None,
+                 repository: "Repository | None" = None):
         self.ex = executor
         self.app = app
         self.rec = recorder
         self.secrets = secrets
         # review P0-1：{"metadata": ..., "budget": ..., "llm": ...}，可选
         self.recovery_ctx = recovery_context
+        # Task 1.6（P1-04）：传入 Repository 时 target 走 4.1 语义解析
+        # （TargetRef → resolve → strategies），不传回落 P0 硬编码链。
+        self.repo = repository
         # review R2-3：recovery 行 id（steps 落库后回填 step_id 用）
         self._last_rec_row: int | None = None
 
@@ -70,10 +88,26 @@ class TestcaseRunner:
 
     def _run_step(self, run_id: str, idx: int, step) -> None:
         t0 = time.time()
-        locator = self._locator_chain(step.target) if step.target else None
+        # Task 1.6：新 schema 步骤形态分派（6.3：wait_for / assertion / action）
+        if hasattr(step, "wait_for"):
+            action = "wait_for"
+        elif hasattr(step, "assertion"):
+            action = "assertion"
+        else:
+            action = step.action
+        try:
+            locator = (self._locator_chain(step.target)
+                       if getattr(step, "target", None) else None)
+        except (UnknownReferenceError, AmbiguousReferenceError):
+            # 4.1：引用错误是**用例缺陷**（lint 应已拦截），运行期直接 FAIL
+            # 该步并终止用例，不做 recovery（recovery 修的是定位失效，不是坏引用）。
+            self.rec.record_step(run_id, idx, action, None, "FAILED",
+                                 f"unresolvable target (4.1): {step.target}",
+                                 0)
+            raise TestFailure(f"step {idx}: unresolvable target {step.target}") from None
         status, error = "SUCCESS", None
         try:
-            getattr(self, f"_do_{step.action}")(step)
+            getattr(self, f"_do_{action}")(step)
         except Exception as e:
             status, error = "FAILED", f"{type(e).__name__}: {e}"
             # review P0-1/R2-1：元素定位失败 → 自动 reconcile + recovery；
@@ -90,7 +124,7 @@ class TestcaseRunner:
         finally:
             # value 字段不落 trace（密码等输入值，设计文档硬约束：写盘前脱敏）
             shot, tree = self._save_evidence(run_id, idx) if status != "SUCCESS" else (None, None)
-            step_id = self.rec.record_step(run_id, idx, step.action, locator, status,
+            step_id = self.rec.record_step(run_id, idx, action, locator, status,
                                            error, int((time.time() - t0) * 1000),
                                            screenshot_path=shot, ui_tree_path=tree)
             # review R2-3：recover() 返回 rec_row_id（精确行），按行 id 回填
@@ -141,6 +175,59 @@ class TestcaseRunner:
     def _do_launch_app(self, step) -> None:
         self.app.launch()
 
+    def _do_terminate_app(self, step) -> None:
+        self.app.terminate()
+
+    def _do_back(self, step) -> None:
+        self.ex.ds.ensure_alive().back()
+
+    # Task 2.1（wait engine）替换点：目前用固定 settle 缓冲近似「树静止」。
+    # 实测（Task 1.6 probe4/5）：marker 可 find ≠ 手势层就绪——成功后立即 tap
+    # 会被 SwiftUI 吞掉（NavigationStack 转场期间）。wait engine 落地时改为
+    # 连续 N 次 page_source 树哈希不变的「静止判定」，删掉这个 sleep。
+    TAP_SETTLE_SECONDS = 1.0
+
+    def _do_wait_for(self, step) -> None:
+        """Task 1.6 最小 wait：轮询 find（wait engine 完整版在 Task 2.1）。"""
+        w = step.wait_for
+        deadline = time.time() + w.timeout
+        interval = w.polling_interval or 0.5
+        last_err: Exception | None = None
+        while time.time() < deadline:
+            try:
+                self.ex.find(self._locator_chain(w.target))
+                time.sleep(self.TAP_SETTLE_SECONDS)  # 手势层就绪缓冲，见 TAP_SETTLE_SECONDS
+                return
+            except (ElementNotFound, AmbiguousElement) as e:
+                last_err = e
+                time.sleep(interval)
+        raise TestFailure(
+            f"wait_for {w.target.id!r} condition={w.condition!r} "
+            f"timeout after {w.timeout}s: {last_err}"
+        )
+
+    def _do_assertion(self, step) -> None:
+        """Task 1.6 最小 assertion：exists 轮询复用 wait 路径。
+        其余条件（text_equals 等）Task 2.2 Assertion Engine 落地。"""
+        a = step.assertion
+        if a.condition not in ("exists",):
+            raise TestFailure(
+                f"assertion condition {a.condition!r} not supported until Task 2.2"
+            )
+        deadline = time.time() + a.timeout
+        last_err: Exception | None = None
+        while time.time() < deadline:
+            try:
+                self.ex.find(self._locator_chain(a.target))
+                return
+            except (ElementNotFound, AmbiguousElement) as e:
+                last_err = e
+                time.sleep(0.5)
+        raise TestFailure(
+            f"assertion {a.target.id!r} condition={a.condition!r} "
+            f"timeout after {a.timeout}s: {last_err}"
+        )
+
     def _do_tap(self, step) -> None:
         self.ex.tap(self._locator_chain(step.target))
 
@@ -148,12 +235,24 @@ class TestcaseRunner:
         self.ex.input(self._locator_chain(step.target),
                       self._resolve(step.value))
 
-    def _locator_chain(self, target: str) -> Locator:
-        """Phase 1 改造：id 失效时降级为 ObjC 常见可达锚点。
+    def _locator_chain(self, target) -> Locator:
+        """Task 1.6：有 Repository 时按 4.1 语义解析（TargetRef/短名/限定名/
+        screen: 语法）→ EffectiveElement.strategies 顺序即尝试顺序；
+        无 Repository 回落 P0 硬编码链（id 失效降级 ObjC 锚点）。
 
-        真实 App 靠文案（label=中文标题）可达；name 属性同时承载
-        accessibility id 与 label，故 predicate `name == X` 天然兜底两者。
+        screen target（wait_for active）返回 marker accessibility_id 单策略。
         """
+        if self.repo is not None:
+            ref = target if not isinstance(target, str) else _str_target(target)
+            eff = self.repo.resolve(ref, build="local")
+            if hasattr(eff, "marker"):  # EffectiveScreen
+                return [{"type": "accessibility_id", "value": eff.marker}]
+            return [
+                {"type": s.type, "value": s.value}
+                for s in eff.strategies
+                if s.type in ("accessibility_id", "predicate", "class_chain")
+            ]
+        # P0 路径：target 是裸字符串
         return [
             {"type": "accessibility_id", "value": target},
             {"type": "predicate", "value": f"name == '{target}'"},

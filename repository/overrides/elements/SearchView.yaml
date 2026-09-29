@@ -1,0 +1,52 @@
+# overrides/elements/SearchView.yaml — Demo App 搜索页元素（Task 1.6 / P1-04）
+schema_version: "1.0"
+kind: element
+id: search_title
+screen: SearchView
+type: text
+strategies:
+  - {type: accessibility_id, value: search_title, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 130}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: search_field
+screen: SearchView
+type: textfield
+strategies:
+  - {type: accessibility_id, value: search_field, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 134}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: INTERNAL
+---
+schema_version: "1.0"
+kind: element
+id: search_results
+screen: SearchView
+type: other
+strategies:
+  - {type: accessibility_id, value: search_results, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 141}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: cell_beta
+screen: SearchView
+type: cell
+strategies:
+  - {type: accessibility_id, value: cell_beta, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 140}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC

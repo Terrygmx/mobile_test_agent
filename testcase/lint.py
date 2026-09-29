@@ -58,10 +58,13 @@ def _check_active_scope(steps: list[dict], tc_id: str, issues: list[LintIssue]) 
         if not isinstance(wait, dict) or wait.get("condition") != "active":
             continue
         target = wait.get("target")
-        # str 语法糖 / 显式 dict 都可能是 element
-        is_element = isinstance(target, str) or (
-            isinstance(target, dict) and target.get("type") != "screen"
-        )
+        # str 语法糖：screen:<Name> 是 screen，其余是 element（6.3 TargetRef 语法）
+        if isinstance(target, str):
+            is_element = not target.startswith("screen:")
+        elif isinstance(target, dict):
+            is_element = target.get("type") != "screen"
+        else:
+            is_element = True  # 缺 target 的 active 本身就不合法
         if is_element:
             issues.append(LintIssue(
                 "active_on_element",

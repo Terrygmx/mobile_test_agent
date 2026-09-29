@@ -1,0 +1,37 @@
+# suites/smoke/logout_001.yaml — P1-04：退出登录（前置：已登录）
+schema_version: "0.2"
+id: logout_001
+name: 退出登录
+suite: smoke
+tags: [smoke, logout]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - action: input
+    target: LoginView.username_field
+    value: ${TEST_USERNAME}
+  - action: input
+    target: LoginView.password_field
+    value: ${TEST_PASSWORD}
+    sensitive: true
+  - action: tap
+    target: LoginView.login_button
+    idempotency: IDEMPOTENT
+  - wait_for:
+      target: screen:HomeView
+      condition: active
+      timeout: 10
+  - action: tap
+    target: HomeView.go_profile
+  - wait_for:
+      target: screen:ProfileView
+      condition: active
+      timeout: 10
+  - action: tap
+    target: ProfileView.logout_button
+    idempotency: NON_IDEMPOTENT
+    postcondition:
+      target: screen:LoginView
+      condition: active
+      timeout: 10

@@ -12,8 +12,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SCHEMA_VERSION = "0.1"
-SUPPORTED_SCHEMA_VERSIONS = ("0.1",)
+SCHEMA_VERSION = "0.2"
+SUPPORTED_SCHEMA_VERSIONS = ("0.2",)
 
 
 class Idempotency(str, enum.Enum):
@@ -174,7 +174,7 @@ class TestCase(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["0.1"]
+    schema_version: Literal["0.2"]
     id: str
     name: str
     suite: str | None = None

@@ -7,7 +7,7 @@ from cli.main import main
 
 
 VALID_TC = """\
-schema_version: "0.1"
+schema_version: "0.2"
 id: t_ok
 name: ok
 steps:
@@ -17,7 +17,7 @@ steps:
 """
 
 WARNING_TC = """\
-schema_version: "0.1"
+schema_version: "0.2"
 id: t_warn
 name: warn
 steps:
@@ -27,7 +27,7 @@ steps:
 """
 
 UNKNOWN_TARGET_TC = """\
-schema_version: "0.1"
+schema_version: "0.2"
 id: t_bad
 name: bad
 steps:

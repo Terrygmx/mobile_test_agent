@@ -1,0 +1,34 @@
+# suites/smoke/profile_001.yaml — P1-04：进入个人页
+schema_version: "0.2"
+id: profile_001
+name: 进入个人页
+suite: smoke
+tags: [smoke, profile]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - action: input
+    target: LoginView.username_field
+    value: ${TEST_USERNAME}
+  - action: input
+    target: LoginView.password_field
+    value: ${TEST_PASSWORD}
+    sensitive: true
+  - action: tap
+    target: LoginView.login_button
+    idempotency: IDEMPOTENT
+  - wait_for:
+      target: screen:HomeView
+      condition: active
+      timeout: 10
+  - action: tap
+    target: HomeView.go_profile
+  - wait_for:
+      target: screen:ProfileView
+      condition: active
+      timeout: 10
+  - assertion:
+      target: ProfileView.logout_button
+      condition: exists
+      timeout: 5

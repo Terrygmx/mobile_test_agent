@@ -64,7 +64,7 @@ def _repo() -> Repository:
 
 def _tc(**overrides):
     base = {
-        "schema_version": "0.1",
+        "schema_version": "0.2",
         "id": "t1",
         "name": "t",
         "steps": [{"action": "tap", "target": "login_button"}],
@@ -76,7 +76,7 @@ def _tc(**overrides):
 # --- 6.4：schema 非法 → ERROR ---
 
 def test_schema_invalid_yaml_reports_error():
-    issues = lint([{"schema_version": "0.1", "id": "t", "steps": "not-a-list"}], _repo(),
+    issues = lint([{"schema_version": "0.2", "id": "t", "steps": "not-a-list"}], _repo(),
                   DictSecrets())
     assert any(i.code == "schema_invalid" and i.severity is Severity.ERROR for i in issues)
 
@@ -188,6 +188,20 @@ def test_active_on_element_reports_error():
     with pytest.raises(Exception):
         parse_testcase_dict(_tc(steps=[{"wait_for": {"target": "login_button",
                                                      "condition": "active"}}]))
+
+
+def test_active_on_screen_sugar_ok():
+    """Task 1.6 回归：`screen:HomeView` 字符串语法糖是 screen target，
+    不得误报 active_on_element（原实现 isinstance(str) 一刀切误拦真实用例）。"""
+    from testcase.lint import _check_active_scope
+    issues: list[LintIssue] = []
+    _check_active_scope([{"wait_for": {"target": "screen:HomeView",
+                                       "condition": "active"}}], "t1", issues)
+    assert not any(i.code == "active_on_element" for i in issues)
+    # 显式 dict 形式同样放行
+    _check_active_scope([{"wait_for": {"target": {"type": "screen", "id": "HomeView"},
+                                       "condition": "active"}}], "t1", issues)
+    assert not any(i.code == "active_on_element" for i in issues)
 
 
 # --- 6.4：非幂等缺 postcondition → WARNING ---

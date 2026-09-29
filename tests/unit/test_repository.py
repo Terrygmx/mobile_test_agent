@@ -249,7 +249,7 @@ def test_lint_reports_ambiguous_and_unknown():
         extra_generated_elements=GENERATED_ELEMENTS_CONFIRM_SETTINGS,
     )
     tc = TestCase(
-        schema_version="0.1", id="t1", name="t",
+        schema_version="0.2", id="t1", name="t",
         steps=[ActionStep(action="tap", target=TargetRef(id="confirm_button"))],
     )
     issues = repo.lint([tc])
@@ -259,7 +259,7 @@ def test_lint_reports_ambiguous_and_unknown():
 def test_lint_unknown_target_reported():
     repo = _repo()
     tc = TestCase(
-        schema_version="0.1", id="t3", name="t",
+        schema_version="0.2", id="t3", name="t",
         steps=[ActionStep(action="tap", target=TargetRef(id="ghost_button"))],
     )
     assert "unknown_target" in {i.code for i in repo.lint([tc])}
@@ -268,7 +268,7 @@ def test_lint_unknown_target_reported():
 def test_lint_clean_case_no_issues():
     repo = _repo()
     tc = TestCase(
-        schema_version="0.1", id="t2", name="t",
+        schema_version="0.2", id="t2", name="t",
         steps=[ActionStep(action="tap", target=TargetRef(id="login_button")), ActionStep(action="launch_app")],
     )
     assert repo.lint([tc]) == []

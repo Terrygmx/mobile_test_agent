@@ -1,0 +1,53 @@
+# overrides/elements/DetailView.yaml + ProfileView.yaml — Task 1.6 / P1-04
+schema_version: "1.0"
+kind: element
+id: detail_title
+screen: DetailView
+type: text
+strategies:
+  - {type: accessibility_id, value: detail_title, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 155}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: detail_item_key
+screen: DetailView
+type: text
+strategies:
+  - {type: accessibility_id, value: detail_item_key, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 158}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: profile_title
+screen: ProfileView
+type: text
+strategies:
+  - {type: accessibility_id, value: profile_title, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 180}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: logout_button
+screen: ProfileView
+type: button
+strategies:
+  - {type: accessibility_id, value: logout_button, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 189}
+metadata:
+  # 退出登录：改变登录态（A7：外部副作用元素标 risk/idempotency）
+  risk: MEDIUM
+  idempotency: NON_IDEMPOTENT
+  data_class: PUBLIC

@@ -287,6 +287,17 @@ class Repository:
         if isinstance(ref, TargetRef):
             if ref.type == "screen":
                 return self._screen(ref.id)
+            # element：限定名 `Screen.elem`（ref.id 含 "."）→ 显式 screen；
+            # 与 _lint_ref 同规则（lint 认为可解析的，运行时必须可解析）。
+            if "." in ref.id:
+                screen, _, element_id = ref.id.partition(".")
+                eff = self._element(element_id, screen=screen)
+                if eff.screen != screen:
+                    raise UnknownReferenceError(
+                        f"{ref.id!r}: element {element_id!r} lives on screen "
+                        f"{eff.screen!r}, not {screen!r}"
+                    )
+                return eff
             return self._element(ref.id)
 
         text = ref

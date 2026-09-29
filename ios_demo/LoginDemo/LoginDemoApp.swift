@@ -86,11 +86,15 @@ struct HomeView: View {
                     .accessibilityIdentifier("welcome_label")
 
                 // 最小业务：列表 3 个 cell → Search 页 → Detail 页
+                // Task 1.6 实测坑：id 挂内部 Text 时，NavigationLink Button 与
+                // Text 各暴露一个同名 accessibility 节点 → find fail-closed 判
+                // Ambiguous。id 直接挂 NavigationLink（Button name=id，Text
+                // name=label 文本），全树恰好 1 个 cell_<key> 节点。
                 List(items, id: \.key) { item in
                     NavigationLink(value: item.key) {
                         Text(item.title)
-                            .accessibilityIdentifier("cell_\(item.key)")
                     }
+                    .accessibilityIdentifier("cell_\(item.key)")
                 }
                 .accessibilityIdentifier("home_list")
 
@@ -146,8 +150,8 @@ struct SearchView: View {
             List(results, id: \.key) { item in
                 NavigationLink(value: item.key) {
                     Text(item.title)
-                        .accessibilityIdentifier("cell_\(item.key)")
                 }
+                .accessibilityIdentifier("cell_\(item.key)")
             }
             .accessibilityIdentifier("search_results")
 
