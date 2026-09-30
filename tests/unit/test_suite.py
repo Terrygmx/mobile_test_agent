@@ -205,3 +205,48 @@ def test_run_one_required():
     """不注入 run_one 直接报错——套件语义不管「怎么跑一条」。"""
     with pytest.raises(ValueError, match="run_one"):
         SuiteRunner(env=FakeEnv(), run_one=None)
+
+
+# --- Task 2.7：run_one 返回值的消费（H10 注入验证实锤的 bug） ---
+
+def test_run_one_return_value_is_the_result():
+    """2.7 H10 注入验证实锤：原实现丢弃 run_one 返回值、只用开头构造的
+    空 PASS result——新管线产出的真实状态（failure_type/duration/detail）
+    全被抹掉。这里钉住「run_one 的 TestcaseResult 就是最终结果」。"""
+    from runner.result import TestcaseResult
+
+    env = FakeEnv()
+    s = _suite(env)
+
+    def run_one(tc):
+        return TestcaseResult(
+            testcase_id=tc.id, status="FAIL",
+            failure_type="ELEMENT_NOT_FOUND",
+            failure_phase="PRE_DISPATCH",
+            duration_ms=1234,
+            detail={"error": "boom"})
+
+    s.run_one = run_one
+    r = s.run_testcase(FakeTC("a"))
+    assert r.status == "FAIL"
+    assert r.failure_type == "ELEMENT_NOT_FOUND"
+    assert r.failure_phase == "PRE_DISPATCH"
+    assert r.duration_ms == 1234
+    assert r.detail == {"error": "boom"}
+
+
+def test_run_one_exception_still_classified():
+    """run_one 抛异常（而非返回）时维持旧行为：异常 → _classify 终态。"""
+    from executor.executor import ElementNotFound
+
+    env = FakeEnv()
+    s = _suite(env)
+
+    def run_one(tc):
+        raise ElementNotFound("gone")
+
+    s.run_one = run_one
+    r = s.run_testcase(FakeTC("a"))
+    assert r.status == "FAIL"
+    assert r.failure_type == "ELEMENT_NOT_FOUND"
+    assert r.cleanup_status == "OK"

@@ -334,9 +334,23 @@ class SessionPipeline:
                 suite_run = suite_runner.run_suite(cases)
                 run.results.extend(suite_run.results)
             except SuiteAborted:
-                # H10 中止：已跑结果保留（run_suite 已标 aborted_suite/
-                # remaining detail），异常不上冒——CLI 要的是退出码不是栈。
-                pass
+                # H10 中止：SuiteRunner 把已跑结果留在自己的 RunResult 里，
+                # 但 **run_suite 中途 raise 时那个对象拿不到**（返回值没到）。
+                # 从 SuiteRunner 实例的累积列表取回——已跑结果必须保留：
+                # 「跑到哪因环境问题停了」是报告要展示的事实，清掉等于
+                # 伪造「没跑过」。
+                run.results.extend(suite_runner.results)
+                # 中止标记（aborted_suite/remaining）补在最后一条上：
+                # run_suite 是在 raise 前一刻写进它自己的 result dict 的，
+                # 经上面 extend 回来的对象同一身份，直接读。
+                if run.results:
+                    last = run.results[-1]
+                    last.detail.setdefault(
+                        "aborted_suite",
+                        last.detail.get("aborted_suite", True))
+                    last.detail.setdefault(
+                        "remaining",
+                        len(cases) - len(run.results))
         finally:
             if self.store is not None:
                 self.store.end_run(run_id, status=_run_status(run),

@@ -71,7 +71,14 @@ class SuiteRunner:
         result = TestcaseResult(testcase_id=tc.id, status="PASS")
         self.env.prepare(tc)
         try:
-            self.run_one(tc)
+            # run_one 的返回值是**真实结果**（新管线 run_case 产出的
+            # TestcaseResult：failure_type/duration/detail 都在里面）。
+            # 2.7 H10 注入验证实锤：原实现丢弃返回值只用开头构造的空
+            # PASS result——_suite_run_one 的真实状态被抹掉，H10 的
+            # ENVIRONMENT_FAILURE/CLEANUP_FAILED 永远看不到。
+            outcome = self.run_one(tc)
+            if isinstance(outcome, TestcaseResult):
+                result = outcome
         except Exception as e:
             status, failure_type = _classify(e)
             result.status = status
