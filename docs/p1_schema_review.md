@@ -110,3 +110,39 @@ R12-4 记入 **M4 漂移 build 验收口径**：
 - 断言漂移恢复 = tap 重定位，恢复后**不重验断言值**（text_contains 类断言的值
   从未对新元素验证）。故障矩阵 #15 的验收就是步骤 RECOVERED，但报告口径必须写明
   **RECOVERED ≠ 断言通过**，避免被误读为该步断言成功。
+
+## 8. Task 2.3 Review（R13）记账 — 2026-09-30
+
+处置结果：
+
+- **R13-1（P1）reset 矩阵双源分叉 —— 已修**（未留到 2.5）。
+  正解就是 review 建议的「runner 切 ResetExecutor」，改动小且 review 已指明，
+  提前做比在 2.5 里混着做更容易验证：`runner/testcase_runner.py` 新增
+  `device_type` 构造参数 + `self._reset_executor`，`run()` 的 reset 分支
+  从 `self.app.reset_state(...)` 改为 `self._reset_executor.reset(...)`。
+  跨源一致性测试 12 条钉住（R13-1 的空头支票：capabilities.py 注释曾声称
+  「有单测钉住」而实际没有）：矩阵声称支持 × 可执行、runner 源码级断言
+  禁止直调 P0 matrix、RESET_STATE/RELAUNCH 经 runner.run 全链路不抛。
+  其中 `_coerce` 静默归一那条做了**反向验证**（改回静默 → 测试 FAIL），
+  确认测试非空过。
+- **R13-2（P2）EnvironmentManager 零消费 —— 部分修，剩余记账到 Task 2.5**。
+  reset 分支已接线（R13-1 一并消掉）；但 `prepare()` / `cleanup()` 仍无调用方，
+  `CleanupError` 的 H10/ABORT_SUITE 语义无人能触发。**Task 2.5 验收清单必须
+  显式列入**「EnvironmentManager.cleanup 接线 + CleanupError → H10
+  ENVIRONMENT_FAILURE/ABORT_SUITE 落 suite 层」，否则又是「实现存在、链路不通」。
+- **R13-3（P2）LOGOUT App 侧 hook 未实现 —— 已修**。`MTAResetHook.performLogout()`
+  + `LoginDemoApp` 的 `-UITestLogout` 消费点（同样 `#if DEBUG` 门 + release
+  fatalError）。设备实测日志 `MTA_LOGOUT_HOOK executed`。语义粒度与 RESET_STATE
+  有别（只清登录态，不清缓存/UserDefaults），并由 verify V3 在设备上证明差异真实
+  （LOGOUT 保留 marker / RESET_STATE 清掉）。
+- **R13-4（P3）验证证据未落盘 —— 已修**。`phase0/verify_p1_task23.py`（V1~V5 五组
+  探针）落 `out/p1_task23/verify_summary.json`，当前 7/7 ALL PASS。脚本内注释
+  记录了两个探针坑：marker 必须由 App 自己写（simctl spawn defaults 写的是设备级
+  domain）、读 plist 前必须 quiesce（UserDefaults 运行期只在内存）。附带收益：
+  V5 成为「矩阵 ↔ 执行路径」跨源一致性的可执行版本。
+- **R13-5（P3）卫生项 —— 已修**。`cleanup(tc=None)` 的 `tc` 参数补注释说明是为
+  0.3 EnvSpec 签名稳定而保留（非死代码漏删）并加测试；`_coerce` 保留拼写容错
+  （大小写/空格/连字符）但对真正未知的 device_type 改为抛 `UnsupportedResetError`
+  ——此前静默归一为 REAL_DEVICE，`emulator` 这种值会被当「真机」继续跑。
+
+commit `dc9b64a` / tag `checkpoint-p1-task2.3-r13`；测试 197 → 214。

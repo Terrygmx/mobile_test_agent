@@ -27,6 +27,18 @@ struct LoginView: View {
             fatalError("MTA: -UITestReset requires a Debug build (A4)")
             #endif
         }
+        // R13-3：`-UITestLogout` 消费点（11.1：LOGOUT 走 App 内 hook）。
+        // 与 -UITestReset 的区别是清理粒度：LOGOUT 只清登录态，不清缓存/
+        // Keychain 通用项。当前登录态是内存 @State（进程重启即复位），
+        // 这里显式记录契约 + 日志，不留「碰巧等价」的静默缺口——将来引入
+        // 持久化 session 时这里是唯一需要补删的地方。
+        if ProcessInfo.processInfo.arguments.contains("-UITestLogout") {
+            #if DEBUG
+            MTAResetHook.performLogout()
+            #else
+            fatalError("MTA: -UITestLogout requires a Debug build (11.1 App hook)")
+            #endif
+        }
         // Task 2.3 验证辅助（仅 DEBUG）：写标记 key，供「写→reset→读回」端到端
         // 验证 hook 清 domain 生效。与 hook 分开：写了标记的 launch 不清。
         if ProcessInfo.processInfo.arguments.contains("-UITestWriteMarker") {

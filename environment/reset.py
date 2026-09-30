@@ -35,6 +35,8 @@ class ResetExecutor:
             self.app.launch(arguments=["-UITestReset"])
             return
         if strategy == "LOGOUT":
+            # R13-3：App 侧已实现 -UITestLogout 消费（登录态登出而非全量清理）。
+            # 与 RESET_STATE 的区别是语义粒度，不是「碰巧进程重启回未登录」。
             self.app.terminate()
             self.app.launch(arguments=["-UITestLogout"])
             return

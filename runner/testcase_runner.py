@@ -14,6 +14,7 @@ import re
 import time
 from pathlib import Path
 
+from environment.reset import ResetExecutor
 from environment.secrets import SecretProvider
 from executor.assertion import AssertionEngine, AssertionTargetDrift, AssertionValueMismatch
 from executor.executor import AmbiguousElement, ElementNotFound, Executor, Locator
@@ -54,7 +55,8 @@ class TestcaseRunner:
                  recorder: Recorder, secrets: SecretProvider,
                  recovery_context: dict | None = None,
                  repository: "Repository | None" = None,
-                 wait_config: WaitConfig | None = None):
+                 wait_config: WaitConfig | None = None,
+                 device_type: str = "simulator"):
         self.ex = executor
         self.app = app
         self.rec = recorder
@@ -66,6 +68,13 @@ class TestcaseRunner:
         self.repo = repository
         # Task 2.1：等待参数来自配置（`mta.yaml` wait: 段），不在代码里写死
         self.wait_config = wait_config or WaitConfig()
+        # R13-1：reset 执行路径切到 ResetExecutor（不再直调 P0
+        # app.reset_state）。原因：lint 11.2 预检按 11.1 新矩阵放行
+        # RESET_STATE/LOGOUT，而 P0 SUPPORTED_STRATEGIES 不含这两者——
+        # 不接线就是「lint 放行、运行时炸」，正好击穿 11.2 承诺。两条路径
+        # 并存期间 lint 与执行可能分叉，禁止绕过 ResetExecutor 直调。
+        self._reset_executor = ResetExecutor(app, device_type=device_type)
+        self._device_type = device_type
         self._wait_engine_cached: WaitEngine | None = None
         self._assertion_engine_cached: AssertionEngine | None = None
         # R11-2：settle 放行记录（每 run 重置），供 trace / 事后区分「放行过」
@@ -85,7 +94,10 @@ class TestcaseRunner:
         try:
             reset = tc.precondition.get("reset")
             if reset:
-                self.app.reset_state(reset, app_path=tc.precondition.get("app_path"))
+                # R13-1：走 ResetExecutor（11.1 矩阵 + A4 hook 路径），不再
+                # 直调 P0 app.reset_state。app_path 仅 REINSTALL 需要。
+                self._reset_executor.reset(
+                    reset, app_path=tc.precondition.get("app_path"))
             for i, step in enumerate(tc.steps):
                 self._run_step(run_id, i, step)
             self.rec.end_run(run_id, "PASS")

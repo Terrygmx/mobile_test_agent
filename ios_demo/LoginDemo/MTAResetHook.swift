@@ -30,4 +30,17 @@ enum MTAResetHook {
         // 4. 登录态：isLoggedIn 是内存 @State，进程重启即复位；
         //    将来引入持久化会话（如 Keychain 的 session token）时在此补删。
     }
+
+    /// 11.1 LOGOUT 的 App 内 hook（R13-3）：只清登录态，保留缓存与
+    /// UserDefaults 非认证项。与 performReset 的区别是粒度，不是「同一件事
+    /// 做两遍」——LOGOUT 后 App 仍可保留列表缓存等加速数据。
+    static func performLogout() {
+        NSLog("MTA_LOGOUT_HOOK executed (bundle=%@)", Bundle.main.bundleIdentifier ?? "?")
+        // 1. 会话 token：当前无持久化会话（登录态是内存 @State），无需删。
+        //    将来引入 Keychain session token 时在此显式 SecItemDelete——
+        //    不能靠「重启会回未登录」，那是 P1 的巧合不是契约。
+        // 2. 认证相关 UserDefaults：当前无（App 不持久化登录标记），
+        //    将来引入时只删认证 key，不整个 domain（那是 RESET_STATE 的职责）。
+        // 3. 缓存与通用 Keychain 项：**故意保留**——LOGOUT 不清这些。
+    }
 }

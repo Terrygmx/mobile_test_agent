@@ -35,14 +35,23 @@ RESET_CAPABILITIES: dict[str, set[DeviceType]] = {
 
 
 def _coerce(device: DeviceType | str) -> DeviceType:
+    """归一设备描述。R13-5：容忍拼写差异（大小写/空格/下划线），但**拒绝**
+    未知值并抛错——之前静默归一为 REAL_DEVICE，`real-device` 这种 typo 会
+    被当「真机」继续跑，错误延后到别处爆。
+
+    仍保「最受限」兜底的价值只在**已知 DeviceType 之外的**输入上无意义：
+    拼写容错之后剩下的就是真的不认识，那必须响。
+    """
     if isinstance(device, DeviceType):
         return device
-    text = str(device).strip().lower()
+    text = str(device).strip().lower().replace("-", "_")
     try:
         return DeviceType(text)
     except ValueError:
-        # 未知设备描述按「最受限」处理：查 simulator ∩ real_device 的交集成员
-        return DeviceType.REAL_DEVICE  # SNAPSHOT 等在真机侧不支持 → 更早暴露
+        known = [d.value for d in DeviceType]
+        raise UnsupportedResetError(
+            f"unknown device_type {device!r}: expected one of {known}"
+        ) from None
 
 
 class CapabilityResolver:

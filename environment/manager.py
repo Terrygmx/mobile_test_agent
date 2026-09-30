@@ -44,7 +44,11 @@ class EnvironmentManager:
             self.reset(reset)
 
     def cleanup(self, tc=None) -> None:
-        """11.2：普通失败也执行 cleanup；失败 → CleanupError（不静默）。"""
+        """11.2：普通失败也执行 cleanup；失败 → CleanupError（不静默）。
+
+        `tc` 目前未用（P1 无按用例分化的 cleanup 动作，EnvSpec 顺延 0.3）。
+        保留参数是为了 0.3 定型 EnvSpec 后签名不变——不是「忘了删」。
+        """
         if self.on_cleanup is None:
             return
         try:
