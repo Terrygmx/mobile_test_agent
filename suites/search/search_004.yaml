@@ -1,0 +1,35 @@
+# suites/search/search_004.yaml — P1-08：断言各 type——element_count（7.3：
+# 精确计数）。空查询 → catalog 3 项 → search_results 容器计数为 3。
+schema_version: "0.2"
+id: search_004
+name: 搜索结果计数
+suite: search
+tags: [search, assertion]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - action: input
+    target: LoginView.username_field
+    value: ${TEST_USERNAME}
+  - action: input
+    target: LoginView.password_field
+    value: ${TEST_PASSWORD}
+    sensitive: true
+  - action: tap
+    target: LoginView.login_button
+    idempotency: IDEMPOTENT
+  - wait_for:
+      target: screen:HomeView
+      condition: active
+      timeout: 10
+  - action: tap
+    target: HomeView.go_search
+  - wait_for:
+      target: screen:SearchView
+      condition: active
+      timeout: 10
+  - wait_for:
+      target: SearchView.search_results
+      condition: exists
+      timeout: 5

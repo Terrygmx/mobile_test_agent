@@ -1,0 +1,39 @@
+# suites/account/profile_view_001.yaml — P1-08：profile 页元素断言
+# （profile_title exists + logout_button enabled——断言条件矩阵另一半）
+schema_version: "0.2"
+id: profile_view_001
+name: 个人页元素
+suite: account
+tags: [account, profile, assertion]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - action: input
+    target: LoginView.username_field
+    value: ${TEST_USERNAME}
+  - action: input
+    target: LoginView.password_field
+    value: ${TEST_PASSWORD}
+    sensitive: true
+  - action: tap
+    target: LoginView.login_button
+    idempotency: IDEMPOTENT
+  - wait_for:
+      target: screen:HomeView
+      condition: active
+      timeout: 10
+  - action: tap
+    target: HomeView.go_profile
+  - wait_for:
+      target: screen:ProfileView
+      condition: active
+      timeout: 10
+  - assertion:
+      target: ProfileView.profile_title
+      condition: exists
+      timeout: 5
+  - assertion:
+      target: ProfileView.logout_button
+      condition: enabled
+      timeout: 5

@@ -1,0 +1,37 @@
+# suites/search/search_filter_001.yaml — P1-08：搜索过滤（文本 contains 真值）
+schema_version: "0.2"
+id: search_filter_001
+name: 搜索过滤
+suite: search
+tags: [search, smoke]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - action: input
+    target: LoginView.username_field
+    value: ${TEST_USERNAME}
+  - action: input
+    target: LoginView.password_field
+    value: ${TEST_PASSWORD}
+    sensitive: true
+  - action: tap
+    target: LoginView.login_button
+    idempotency: IDEMPOTENT
+  - wait_for:
+      target: screen:HomeView
+      condition: active
+      timeout: 10
+  - action: tap
+    target: HomeView.go_search
+  - wait_for:
+      target: screen:SearchView
+      condition: active
+      timeout: 10
+  - action: input
+    target: SearchView.search_field
+    value: Beta
+  - assertion:
+      target: SearchView.cell_beta
+      condition: exists
+      timeout: 5

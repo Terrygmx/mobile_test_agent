@@ -25,9 +25,9 @@ import yaml
 from runner.lifecycle import Lifecycle
 from runner.result import RunResult, TestcaseResult
 from runner.runner import RunStepContext, StepOutcome, StepRunner
-from testcase.schema import ActionStep, AssertionStep, TestCase, WaitStep
+from testcase.schema import ActionStep, AssertionStep, TestCase, WaitSpec, WaitStep
 
-__all__ = ["SessionPipeline", "PipelineDeps"]
+__all__ = ["SessionPipeline", "PipelineDeps", "make_postcondition_checker"]
 
 
 @dataclass
@@ -268,6 +268,9 @@ class SessionPipeline:
             strategies=strategies, action=step.action, value=step.value,
             risk=risk, idempotency=idem,
             has_postcondition=step.postcondition is not None,
+            # H7 闭环：spec 也传下去（不只布尔）——执行端见
+            # make_postcondition_checker / StepRunner.postcondition_checker
+            postcondition_spec=step.postcondition,
             step_index=idx)
         return runner.run_step(ctx)
 
@@ -349,6 +352,11 @@ class SessionPipeline:
             raise self.PreflightError(
                 "执行组件未装配（StepRunner 为 None）——真机装配在 Task 2.7，"
                 "当前请使用 --fake-driver")
+        # H7 闭环：postcondition 执行端注入（Task 2.7）。只在没注入过时建——
+        # 每次建新 checker 会丢掉上层对同一 checker 的复用/计数语义。
+        if runner.postcondition_checker is None:
+            runner.postcondition_checker = make_postcondition_checker(
+                self, runner)
         lifecycle = self._lifecycle or Lifecycle(store=self.store)
         return self.run_case(runner, lifecycle, tc, run_id=self._run_id,
                              manage_env=False)
@@ -419,6 +427,36 @@ def _jsonable(v):
     if v is None or isinstance(v, (str, int, float, bool)):
         return v
     return str(v)
+
+
+def make_postcondition_checker(pipeline: "SessionPipeline",
+                               runner: StepRunner):
+    """Task 2.7：postcondition 执行端。复用 WaitEngine 的条件矩阵
+    （同一套 wait_for 语义：满足即真、超时即假）——不为 postcondition
+    另造一套判定，避免两套真相漂移。
+
+    `spec` 是 testcase.schema.Postcondition（target/condition/timeout）：
+    转成 WaitSpec 跑一次 wait_for。这是 H7 的最后一步闭环——此前
+    StepRunner 只把 has_postcondition 用于重试决策，从不执行检查。
+    """
+    from executor.wait import WaitEngine, WaitTimeout
+
+    locator_for = pipeline._locator_for(runner)
+
+    def _check(spec) -> bool:
+        kwargs = dict(target=spec.target, condition=spec.condition,
+                      timeout=getattr(spec, "timeout", 10) or 10,
+                      polling_interval=None)
+        if "expected" in WaitSpec.model_fields:
+            kwargs["expected"] = getattr(spec, "expected", None)
+        engine = WaitEngine(runner.ex, locator_for)
+        try:
+            engine.wait_for(WaitSpec(**kwargs))
+        except WaitTimeout:
+            return False
+        return True
+
+    return _check
 
 
 def _target_label(target) -> str:

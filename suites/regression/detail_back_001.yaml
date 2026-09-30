@@ -1,0 +1,40 @@
+# suites/regression/detail_back_001.yaml — P1-08：详情页 back 回列表
+# 覆盖 action: back（6.2 全部 action 类型中的导航动作）
+schema_version: "0.2"
+id: detail_back_001
+name: 详情页返回列表
+suite: regression
+tags: [regression, navigation]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - action: input
+    target: LoginView.username_field
+    value: ${TEST_USERNAME}
+  - action: input
+    target: LoginView.password_field
+    value: ${TEST_PASSWORD}
+    sensitive: true
+  - action: tap
+    target: LoginView.login_button
+    idempotency: IDEMPOTENT
+  - wait_for:
+      target: screen:HomeView
+      condition: active
+      timeout: 10
+  - action: tap
+    target: HomeView.cell_alpha
+  - wait_for:
+      target: screen:DetailView
+      condition: active
+      timeout: 10
+  - action: back
+  - wait_for:
+      target: screen:HomeView
+      condition: active
+      timeout: 10
+  - assertion:
+      target: HomeView.welcome_label
+      condition: exists
+      timeout: 5

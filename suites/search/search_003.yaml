@@ -1,0 +1,38 @@
+# suites/search/search_003.yaml — P1-08：搜索无命中 → not_exists（7.3：找不到
+# 即满足；not_exists 不能被 implicit wait 拖慢）
+schema_version: "0.2"
+id: search_003
+name: 搜索无命中
+suite: search
+tags: [search, negative]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - action: input
+    target: LoginView.username_field
+    value: ${TEST_USERNAME}
+  - action: input
+    target: LoginView.password_field
+    value: ${TEST_PASSWORD}
+    sensitive: true
+  - action: tap
+    target: LoginView.login_button
+    idempotency: IDEMPOTENT
+  - wait_for:
+      target: screen:HomeView
+      condition: active
+      timeout: 10
+  - action: tap
+    target: HomeView.go_search
+  - wait_for:
+      target: screen:SearchView
+      condition: active
+      timeout: 10
+  - action: input
+    target: SearchView.search_field
+    value: 不存在的关键词XYZ
+  - wait_for:
+      target: SearchView.cell_beta
+      condition: not_exists
+      timeout: 5

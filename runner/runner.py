@@ -59,6 +59,8 @@ class RunStepContext:
     risk: Risk | None = None
     idempotency: Idempotency | None = None   # None = 未声明 → 按 7.4 推导
     has_postcondition: bool = False
+    # Task 2.7：postcondition 具体 spec（不只布尔）。None = 未声明。
+    postcondition_spec: object | None = None
     step_index: int = 0
 
 
@@ -94,13 +96,17 @@ class StepRunner:
 
     def __init__(self, executor, device_session, guard: Guard,
                  recorder=None, run_id: str | None = None,
-                 tc_run_id: int | None = None):
+                 tc_run_id: int | None = None,
+                 postcondition_checker=None):
         self.ex = executor
         self.ds = device_session
         self.guard = guard
         self.rec = recorder
         self.run_id = run_id
         self.tc_run_id = tc_run_id
+        # Task 2.7：postcondition 执行端（H7 的最后一步）。签名单参
+        # (spec) -> bool（满足=True）；None = 不执行（旧调用方不受影响）。
+        self.postcondition_checker = postcondition_checker
         # R15-1：recorder 首参必填时必须在**构造期**就要求对应 id——放到运行期
         # 才发现的后果是每步 trace 写失败，报告上只表现为「步骤失败但 trace
         # 空」，看不出是配置错。判据用签名探测，不用 try/except。
@@ -229,9 +235,41 @@ class StepRunner:
                              FailurePhase.POST_DISPATCH, ctx.idempotency,
                              ctx.has_postcondition))
 
+        # 5. postcondition 检查（Task 2.7 / H7 闭环）：非幂等步骤动作已发出
+        #    但结果未知时，postcondition 是**唯一**可判定途径。语义：
+        #    - 满足 → 动作成功（ok=True）
+        #    - 不满足 → RECOVERED 候选（kind=postcondition），不是 FAIL——
+        #      恢复判定归 RecoveryEngine（7.3），这里只如实报告。
+        post_detail: dict = {}
+        if (ctx.postcondition_spec is not None
+                and self.postcondition_checker is not None):
+            try:
+                ok_post = bool(self.postcondition_checker(
+                    ctx.postcondition_spec))
+            except Exception as e:  # noqa: BLE001 — 检查器故障不是动作失败
+                # checker 自身炸了 → 如实记 UNKNOWN，不当成功也不当失败
+                # （把观测故障伪装成判定结果是 8.2 反模式）
+                ok_post = None
+                post_detail["postcondition_error"] = (
+                    f"{type(e).__name__}: {e}")
+            else:
+                post_detail["postcondition_satisfied"] = ok_post
+            if ok_post is False:
+                return _done(ok=False, phase=FailurePhase.POST_DISPATCH,
+                             failure_type="ACTION_OUTCOME_UNKNOWN",
+                             error="postcondition not satisfied",
+                             non_idempotent_dispatched=non_idem_dispatched,
+                             retry_decision=retry_decision(
+                                 FailurePhase.POST_DISPATCH, ctx.idempotency,
+                                 ctx.has_postcondition),
+                             detail=post_detail)
+        elif ctx.postcondition_spec is not None:
+            post_detail["postcondition_skipped"] = "no checker injected"
+
         return _done(ok=True, non_idempotent_dispatched=non_idem_dispatched,
                      locator_strategy=(ctx.strategies[0][0]
-                                       if ctx.strategies else None))
+                                       if ctx.strategies else None),
+                     detail=post_detail)
 
     # --- trace ---
 

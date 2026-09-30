@@ -1,0 +1,31 @@
+# suites/regression/terminate_relaunch_001.yaml — P1-08：terminate_app 后重启
+# 覆盖 action: terminate_app + 冷启动路径（6.2 action 全集收尾）
+schema_version: "0.2"
+id: terminate_relaunch_001
+name: 终止后重启登录
+suite: regression
+tags: [regression, environment]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - action: terminate_app
+  - action: launch_app
+  - action: input
+    target: LoginView.username_field
+    value: ${TEST_USERNAME}
+  - action: input
+    target: LoginView.password_field
+    value: ${TEST_PASSWORD}
+    sensitive: true
+  - action: tap
+    target: LoginView.login_button
+    idempotency: IDEMPOTENT
+  - wait_for:
+      target: screen:HomeView
+      condition: active
+      timeout: 10
+  - assertion:
+      target: HomeView.home_page
+      condition: exists
+      timeout: 5

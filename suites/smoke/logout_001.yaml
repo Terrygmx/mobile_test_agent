@@ -31,6 +31,11 @@ steps:
   - action: tap
     target: ProfileView.logout_button
     idempotency: NON_IDEMPOTENT
-    # postcondition（screen:LoginView active）待 M2 postcondition 引擎落地后
-    # 加回——当前 runner 不消费（R10-2 lint declaration_not_consumed 会拦）。
-    # 终态回 Login 由 Gate 脚本的 marker 精确断言覆盖。
+    # Task 2.7/H7 闭环：postcondition 现在真实执行（StepRunner 注
+    # postcondition_checker → WaitEngine 条件矩阵，同 wait_for 语义）。
+    # 非幂等动作发出后结果未知，这是唯一判定途径；不满足 →
+    # ACTION_OUTCOME_UNKNOWN，恢复判定归 RecoveryEngine（7.3）。
+    postcondition:
+      target: screen:LoginView
+      condition: active
+      timeout: 10

@@ -248,16 +248,18 @@ def test_idempotent_step_no_postcondition_check():
                    for i in lint([_tc()], _repo(), DictSecrets()))
 
 
-# --- R10-2：runner 未消费的声明 fail-loud ---
+# --- R10-2：runner 未消费的声明 fail-loud（Task 2.7 翻正记录）---
 
-def test_r10_2_declared_postcondition_reports_not_consumed():
-    """postcondition 当前 runner 不执行 → lint ERROR（防作者以为生效）。"""
+def test_r10_2_declared_postcondition_now_consumed():
+    """Task 2.7 翻正：postcondition 已由 StepRunner.postcondition_checker
+    真实执行（H7 闭环），declaration_not_consumed 不再拦。lint 现在只拦
+    RUNNER_UNCONSUMED 里未来的新键——保持空集但保留机制。
+    """
     issues = lint([_tc(steps=[{"action": "tap", "target": "login_button",
                                "postcondition": {"target": "screen:LoginView",
                                                  "condition": "active"}}])],
                   _repo(), DictSecrets())
-    hits = [i for i in issues if i.code == "declaration_not_consumed"]
-    assert hits and hits[0].severity is Severity.ERROR
+    assert not any(i.code == "declaration_not_consumed" for i in issues)
 
 
 def test_r10_2_no_declaration_no_issue():

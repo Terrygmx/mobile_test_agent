@@ -1,0 +1,27 @@
+# suites/regression/reset_matrix_001.yaml — P1-08：RELAUNCH 之外的 reset 策略
+# 覆盖 environment capabilities 矩阵的 RELAUNCH/REINSTALL 差异（11.1）：
+# LOGOUT 走 App hook（-UITestLogout）。本用例显式走 LOGOUT 入口，
+# 与 smoke 套件的 RELAUNCH 形成对照。
+schema_version: "0.2"
+id: reset_logout_001
+name: LOGOUT 重置后登录
+suite: regression
+tags: [regression, reset, environment]
+precondition:
+  reset: LOGOUT
+steps:
+  - action: launch_app
+  - action: input
+    target: LoginView.username_field
+    value: ${TEST_USERNAME}
+  - action: input
+    target: LoginView.password_field
+    value: ${TEST_PASSWORD}
+    sensitive: true
+  - action: tap
+    target: LoginView.login_button
+    idempotency: IDEMPOTENT
+  - wait_for:
+      target: screen:HomeView
+      condition: active
+      timeout: 10

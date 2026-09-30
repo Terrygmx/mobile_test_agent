@@ -1,0 +1,25 @@
+# suites/account/login_negative_002.yaml — P1-08：空密码登录失败 + 失败态
+# 不进 Home（not_exists screen 的否定判定走 wait not_exists）
+schema_version: "0.2"
+id: login_negative_002
+name: 空密码登录失败
+suite: account
+tags: [account, login, negative]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - action: input
+    target: LoginView.username_field
+    value: ${TEST_USERNAME}
+  - action: tap
+    target: LoginView.login_button
+    idempotency: IDEMPOTENT
+  - assertion:
+      target: LoginView.error_message
+      condition: exists
+      timeout: 5
+  - wait_for:
+      target: screen:HomeView
+      condition: not_exists
+      timeout: 3

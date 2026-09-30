@@ -1,0 +1,41 @@
+# suites/regression/chain_nav_001.yaml — P1-08：Home→Search→Detail 链式导航
+# 全 action+wiat+assertion 混合：最长链路回归（3 屏状态机）
+schema_version: "0.2"
+id: chain_nav_001
+name: 链式导航回归
+suite: regression
+tags: [regression, navigation, smoke]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - action: input
+    target: LoginView.username_field
+    value: ${TEST_USERNAME}
+  - action: input
+    target: LoginView.password_field
+    value: ${TEST_PASSWORD}
+    sensitive: true
+  - action: tap
+    target: LoginView.login_button
+    idempotency: IDEMPOTENT
+  - wait_for:
+      target: screen:HomeView
+      condition: active
+      timeout: 10
+  - action: tap
+    target: HomeView.go_search
+  - wait_for:
+      target: screen:SearchView
+      condition: active
+      timeout: 10
+  - action: tap
+    target: SearchView.cell_beta
+  - wait_for:
+      target: screen:DetailView
+      condition: active
+      timeout: 10
+  - assertion:
+      target: DetailView.detail_item_key
+      condition: exists
+      timeout: 5

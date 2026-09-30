@@ -1,0 +1,26 @@
+# suites/account/login_field_clear_001.yaml — P1-08：input 空串清空用户名
+# （敏感字段输入 + 清空；wait text_equals "" 覆盖文本判定）
+schema_version: "0.2"
+id: login_field_clear_001
+name: 登录页字段清空
+suite: account
+tags: [account, login]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - action: input
+    target: LoginView.username_field
+    value: ${TEST_USERNAME}
+  - action: input
+    target: LoginView.username_field
+    value: ""
+  - wait_for:
+      target: LoginView.username_field
+      condition: text_equals
+      expected: ""
+      timeout: 5
+  - wait_for:
+      target: LoginView.username_field
+      condition: enabled
+      timeout: 5

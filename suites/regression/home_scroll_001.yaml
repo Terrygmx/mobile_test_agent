@@ -1,0 +1,33 @@
+# suites/regression/home_scroll_001.yaml — P1-08：首页列表 swipe 滚动
+# 覆盖 action: swipe（direction 参数）+ 滚动后 cell 仍可见
+schema_version: "0.2"
+id: home_scroll_001
+name: 首页列表滚动
+suite: regression
+tags: [regression, scroll]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - action: input
+    target: LoginView.username_field
+    value: ${TEST_USERNAME}
+  - action: input
+    target: LoginView.password_field
+    value: ${TEST_PASSWORD}
+    sensitive: true
+  - action: tap
+    target: LoginView.login_button
+    idempotency: IDEMPOTENT
+  - wait_for:
+      target: screen:HomeView
+      condition: active
+      timeout: 10
+  - action: swipe
+    direction: up
+  - action: swipe
+    direction: down
+  - wait_for:
+      target: HomeView.cell_beta
+      condition: visible
+      timeout: 5

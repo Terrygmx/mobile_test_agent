@@ -1,0 +1,26 @@
+# suites/account/login_negative_001.yaml — P1-08：空用户名登录失败
+# （error_message 断言 exists；负路径覆盖 App login() 的空校验分支）
+schema_version: "0.2"
+id: login_negative_001
+name: 空用户名登录失败
+suite: account
+tags: [account, login, negative]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - action: input
+    target: LoginView.password_field
+    value: ${TEST_PASSWORD}
+    sensitive: true
+  - action: tap
+    target: LoginView.login_button
+    idempotency: IDEMPOTENT
+  - assertion:
+      target: LoginView.error_message
+      condition: exists
+      timeout: 5
+  - wait_for:
+      target: LoginView.username_field
+      condition: enabled
+      timeout: 5

@@ -148,13 +148,18 @@ def _schema_error_issue(data: dict, exc: Exception) -> LintIssue:
 def _check_unconsumed_declarations(
     raw_steps: list[dict], tc_id: str, issues: list[LintIssue]
 ) -> None:
-    """R10-2（fail-loud）：runner 尚未消费的声明报 ERROR，防止作者以为生效。
+    """R10-2（fail-loud）：runner 尚未消费的声明报 ERROR，防作者以为生效。
 
-    - postcondition：当前最小 runner 不执行（M2 第一批实现 + 失败语义定型）；
-    - cleanup：同上（M2 Gate「cleanup 失败终止套件」依赖它）。
-    M2 实现翻正时，从 RUNNER_UNCONSUMED 中删除对应键即可。
+    M2 翻正（Task 2.7）：
+    - postcondition：StepRunner.postcondition_checker 现在**真实执行**
+      检查（H7 闭环，复用 WaitEngine 条件矩阵）；
+    - cleanup：EnvironmentManager.cleanup 消费（SuiteRunner/run_case 的
+      H10 路径），用例级 cleanup dict 经 env 回调执行——但**语义仍是
+      EnvSpec 顺延 0.3 的形状**（dict 自由键），lint 只查 runner 是否接线。
+
+    M3 起若新增未消费声明键，继续加进 RUNNER_UNCONSUMED。
     """
-    RUNNER_UNCONSUMED = ("postcondition", "cleanup")
+    RUNNER_UNCONSUMED: tuple[str, ...] = ()
     for idx, step in enumerate(raw_steps):
         if not isinstance(step, dict) or step.get("action") is None:
             continue
@@ -163,8 +168,8 @@ def _check_unconsumed_declarations(
                 issues.append(LintIssue(
                     "declaration_not_consumed",
                     f"testcase {tc_id!r} step {idx}: {key!r} is declared but the "
-                    f"runner does not consume it yet (M2 implements postcondition/"
-                    f"cleanup semantics); remove it or accept it is inert",
+                    f"runner does not consume it yet; remove it or accept it "
+                    f"is inert",
                     tc_id, idx, Severity.ERROR,
                 ))
 

@@ -90,7 +90,8 @@ class FakeRecorder:
 
 
 def _ctx(driver, element_id="login_button", risk="LOW", idem=None,
-         action="tap", value=None, has_postcondition=False):
+         action="tap", value=None, has_postcondition=False,
+         postcondition_spec=None):
     return RunStepContext(
         element_id=element_id,
         screen_id="LoginView",
@@ -99,7 +100,8 @@ def _ctx(driver, element_id="login_button", risk="LOW", idem=None,
         value=value,
         risk=Risk[risk] if isinstance(risk, str) else risk,
         idempotency=(Idem[idem] if isinstance(idem, str) else idem),
-        has_postcondition=has_postcondition,
+        has_postcondition=has_postcondition or postcondition_spec is not None,
+        postcondition_spec=postcondition_spec,
     )
 
 
@@ -388,3 +390,120 @@ def test_input_action_passes_value():
                           action="input", value="qa_agent"))
     assert out.ok is True
     assert ACT_LOG == [("input", "username_field", "qa_agent")]
+
+
+# ------------------------------------------------------------ Task 2.7
+# postcondition 执行端（H7 闭环）：此前 StepRunner 只把 has_postcondition
+# 用于重试决策，从不执行检查——`RECOVERED(kind=postcondition)` 无判定源。
+
+class _PostSpec:
+    """测试替身：形状对齐 testcase.schema.Postcondition。"""
+
+    def __init__(self, target="screen:LoginView", condition="active",
+                 timeout=10):
+        from testcase.schema import TargetRef
+        self.target = TargetRef(**({"id": target.split(":", 1)[1],
+                                    "type": "screen"} if ":" in target
+                                   else {"id": target, "type": "element"}))
+        self.condition = condition
+        self.timeout = timeout
+        self.expected = None
+
+
+def _ctx_with_post(driver, *, checker_result=True, idem="NON_IDEMPOTENT"):
+    class _CheckerProbe:
+        def __init__(self, result):
+            self.result = result
+            self.calls = []
+
+        def check(self, spec):
+            self.calls.append(spec)
+            return self.result
+
+    probe = _CheckerProbe(checker_result)
+    r = StepRunner(
+        executor=_FakeExecutor(driver).__class__(driver)
+        if False else _FakeExecutor(driver),
+        device_session=FakeDeviceSession(driver),
+        guard=Guard(env_kind=EnvKind.SANDBOX), recorder=FakeRecorder(),
+        postcondition_checker=probe.check)
+    return r, probe
+
+
+def test_postcondition_satisfied_marks_success():
+    """满足 → 动作成功，detail 如实记录（可观测）。"""
+    driver = FakeDriver()
+    r, probe = _ctx_with_post(driver, checker_result=True)
+    out = r.run_step(_ctx(driver, idem="NON_IDEMPOTENT",
+                          postcondition_spec=_PostSpec()))
+    assert out.ok is True
+    assert out.detail.get("postcondition_satisfied") is True
+    assert len(probe.calls) == 1
+
+
+def test_postcondition_not_satisfied_is_outcome_unknown():
+    """不满足 → ACTION_OUTCOME_UNKNOWN（不是 PASS——那会把「没做到」当成功）；
+    也不是直接 FAIL——恢复判定归 RecoveryEngine，这里只如实报告。"""
+    driver = FakeDriver()
+    r, probe = _ctx_with_post(driver, checker_result=False)
+    out = r.run_step(_ctx(driver, idem="NON_IDEMPOTENT",
+                          postcondition_spec=_PostSpec()))
+    assert out.ok is False
+    assert out.failure_type == "ACTION_OUTCOME_UNKNOWN"
+    assert out.phase is FailurePhase.POST_DISPATCH
+    assert out.detail.get("postcondition_satisfied") is False
+    # 非幂等 + 不满足：重试仍禁止（H7），postcondition 已查过
+    assert out.retry_decision.allowed is False
+    assert out.retry_decision.check_postcondition is True
+
+
+def test_postcondition_checker_error_is_not_success_nor_fail():
+    """checker 自身故障 → UNKNOWN：记 postcondition_error，不当成功也不当
+    失败（把观测故障伪装成判定结果是 8.2 反模式）。"""
+    driver = FakeDriver()
+
+    def _boom(spec):
+        raise RuntimeError("checker exploded")
+
+    r = StepRunner(executor=_FakeExecutor(driver),
+                   device_session=FakeDeviceSession(driver),
+                   guard=Guard(env_kind=EnvKind.SANDBOX), recorder=FakeRecorder(),
+                   postcondition_checker=_boom)
+    out = r.run_step(_ctx(driver, idem="NON_IDEMPOTENT",
+                          postcondition_spec=_PostSpec()))
+    # 动作本身成功发出 → ok 保持 True，但 detail 如实暴露故障
+    assert out.ok is True
+    assert "postcondition_error" in out.detail
+    assert "RuntimeError" in out.detail["postcondition_error"]
+    assert "postcondition_satisfied" not in out.detail
+
+
+def test_postcondition_spec_without_checker_is_skipped_loudly():
+    """有 spec 但未注入 checker → detail 记 postcondition_skipped，
+    不静默当成功——「参数给了但没执行」必须可见。"""
+    driver = FakeDriver()
+    r = _runner(driver)
+    out = r.run_step(_ctx(driver, idem="NON_IDEMPOTENT",
+                          postcondition_spec=_PostSpec()))
+    assert out.ok is True
+    assert out.detail.get("postcondition_skipped") == "no checker injected"
+
+
+def test_no_postcondition_no_checker_calls():
+    """未声明 postcondition → 绝不调 checker（无谓轮询 + 拖慢用例）。"""
+    driver = FakeDriver()
+    calls = []
+
+    class _Probe:
+        def check(self, spec):
+            calls.append(spec)
+            return True
+
+    r = StepRunner(executor=_FakeExecutor(driver),
+                   device_session=FakeDeviceSession(driver),
+                   guard=Guard(env_kind=EnvKind.SANDBOX), recorder=FakeRecorder(),
+                   postcondition_checker=_Probe().check)
+    out = r.run_step(_ctx(driver, idem="IDEMPOTENT"))
+    assert out.ok is True
+    assert calls == []
+    assert out.detail == {}
