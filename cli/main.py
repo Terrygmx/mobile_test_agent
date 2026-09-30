@@ -167,6 +167,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             def perform(self, action, element, value=None):
                 pass
 
+            def swipe(self, direction):
+                pass
+
         class _StubElement:
             """wait/assertion 引擎对元素的最小契约：可见、可用。"""
 
@@ -187,7 +190,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             def ensure_alive(self):
                 pass
 
-        runner = StepRunner(_StubEx(), _StubDS(),
+        ex = _StubEx()
+        runner = StepRunner(ex, _StubDS(),
                             Guard(EnvKind.SANDBOX), run_id=run_id)
     else:
         # R16-2：真机组件未装配是前置配置错误 → exit 3，fail-loud。
@@ -200,7 +204,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 3
 
     pipeline.store = store
-    pipeline.deps = PipelineDeps(env=None)  # env 接线在 2.7（fake 桩无需）
+    pipeline.deps = PipelineDeps(env=None)  # app 级动作走 pipeline 内建桩
     pipeline._step_runner = runner
     pipeline._lifecycle = Lifecycle(store=store)
     pipeline._run_id = run_id

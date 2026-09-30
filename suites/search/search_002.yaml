@@ -35,8 +35,12 @@ steps:
   - action: input
     target: SearchView.search_field
     value: ""
+  # XCUITest 实测：SwiftUI TextField 的 .text 清空后回到 **placeholder**
+  # （原 probe_text 探针实锤：输入 'Gamma' → 'Gamma'，clear → '关键词'）。
+  # 等 placeholder 即证明输入框已被清空——text_equals: "" 恒假（App 行为
+  # 如此，非缺陷），这是可观测的等价判据。
   - wait_for:
       target: SearchView.search_field
       condition: text_equals
-      expected: ""
+      expected: 关键词
       timeout: 5

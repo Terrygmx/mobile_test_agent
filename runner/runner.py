@@ -223,7 +223,12 @@ class StepRunner:
         non_idem_dispatched = ctx.idempotency in (
             Idempotency.NON_IDEMPOTENT, Idempotency.UNKNOWN)
         try:
-            self.ex.perform(ctx.action, element, ctx.value)
+            # 2.7 M2 Gate 真机实锤（第三处契约断层）：生产 Executor 没有
+            # 统一 `perform(action, element, value)`——它按动作分派
+            # tap(locator)/input(locator, value)。StepRunner 此前按
+            # perform 契约调，接真实 Executor 必 AttributeError。这里按
+            # action 分派；测试替身若提供 perform 仍优先（兼容旧测试）。
+            self._dispatch_action(ctx, element)
         except InfraError:
             raise  # 设备层故障：动作可能已发出 → 标记置位后上抛
         except Exception as e:
@@ -267,9 +272,44 @@ class StepRunner:
             post_detail["postcondition_skipped"] = "no checker injected"
 
         return _done(ok=True, non_idempotent_dispatched=non_idem_dispatched,
-                     locator_strategy=(ctx.strategies[0][0]
-                                       if ctx.strategies else None),
+                     locator_strategy=self._first_strategy_type(ctx),
                      detail=post_detail)
+
+    def _dispatch_action(self, ctx: RunStepContext, element) -> None:
+        """POST_DISPATCH 动作分派（2.7 M2 Gate 契约修正）。
+
+        生产 Executor 的契约是**按动作分派的方法**：
+        tap(locator) / input(locator, value) —— 没有统一 perform()。
+        测试替身若自带 perform(action, element, value) 仍优先（旧测试
+        不断裂）。未知 action fail-loud（不静默跳过）。
+        """
+        perform = getattr(self.ex, "perform", None)
+        if callable(perform):
+            perform(ctx.action, element, ctx.value)
+            return
+        if ctx.action == "tap":
+            self.ex.tap(ctx.strategies)
+        elif ctx.action == "input":
+            self.ex.input(ctx.strategies, ctx.value or "")
+        else:
+            raise ValueError(
+                f"action {ctx.action!r} has no dispatch: Executor exposes "
+                f"tap(locator)/input(locator, value) only")
+
+    @staticmethod
+    def _first_strategy_type(ctx: RunStepContext) -> str | None:
+        """首条策略的 type（trace 落 locator_strategy 列）。
+
+        两种策略形态都兼容：Executor Locator 契约的 `{"type","value"}`
+        dict（2.7 M2 Gate 起生产用这个）与历史 `("type","value")` 元组
+        （测试替身/旧调用方）——normalize 到 dict 判定，不猜。
+        """
+        if not ctx.strategies:
+            return None
+        first = ctx.strategies[0]
+        if isinstance(first, dict):
+            return first.get("type")
+        return first[0]
 
     # --- trace ---
 

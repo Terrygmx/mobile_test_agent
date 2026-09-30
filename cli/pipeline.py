@@ -29,6 +29,32 @@ from testcase.schema import ActionStep, AssertionStep, TestCase, WaitSpec, WaitS
 
 __all__ = ["SessionPipeline", "PipelineDeps", "make_postcondition_checker"]
 
+# App/driver 级动作（6.2 action 里的三种非元素动作）：不走 7.1 的
+# find/perform 元素管线。launch/terminate 归 AppSession，back 归 driver，
+# swipe 归 Executor——旧 runner（testcase_runner._do_*）同款分流。
+_APP_LEVEL_ACTIONS = frozenset(
+    {"launch_app", "terminate_app", "back", "swipe"})
+
+
+class _NoopApp:
+    """fake-driver 的 AppSession 桩（pipeline 内建，调用方无需注入）。"""
+
+    def launch(self, arguments=None):
+        pass
+
+    def terminate(self):
+        pass
+
+
+class _NoopDeviceSession:
+    """fake-driver 的 device session 桩：ensure_alive 返回自身，back no-op。"""
+
+    def ensure_alive(self):
+        return self
+
+    def back(self):
+        pass
+
 
 @dataclass
 class PipelineDeps:
@@ -139,6 +165,28 @@ class SessionPipeline:
             for idx, step in enumerate(tc.steps):
                 try:
                     if isinstance(step, ActionStep):
+                        # app/driver 级动作不走 find/perform 管线（7.1 只管
+                        # 元素动作）：launch/terminate/back/swipe 在 P0 旧
+                        # runner 也是分派到 AppSession/driver 的。2.7 M2 Gate
+                        # 真机首跑实锤：当普通元素动作跑会 find(()) 空 →
+                        # ELEMENT_NOT_FOUND（App 级动作压根没有 target）。
+                        if step.action in _APP_LEVEL_ACTIONS:
+                            t1 = time.time()
+                            ok, err = self._run_app_level_action(
+                                runner, step.action, step)
+                            self._record_aux_step(
+                                lifecycle, idx, step.action, "",
+                                latency_ms=int((time.time() - t1) * 1000),
+                                ok=ok,
+                                failure_type=(None if ok
+                                              else "ACTION_FAILED"),
+                                detail=({"error": err} if err else None))
+                            if not ok:
+                                status = "FAIL"
+                                failure_type = "ACTION_FAILED"
+                                detail["error"] = err or ""
+                                break
+                            continue
                         outcome = self._run_action_step(runner, step, idx)
                         # 失败步骤也落 steps 表——只记成功会让 trace
                         # 「看起来跑到一半就没了」，排障无从下手
@@ -231,6 +279,72 @@ class SessionPipeline:
                 cleanup_status=cleanup_status)
         return result
 
+    def _run_app_level_action(self, runner: StepRunner, action: str,
+                              step: ActionStep) -> tuple[bool, str | None]:
+        """App/driver 级动作执行（M2 Gate 真机实锤后新增）。
+
+        分流（与 P0 testcase_runner._do_* 一致）：
+          launch_app    → deps.app.launch()
+          terminate_app → deps.app.terminate()
+          back          → device session 的 driver.back()
+          swipe         → executor.swipe(step.direction)
+
+        返回 (ok, error)。FAIL 语义：普通 FAIL + ACTION_FAILED（8.4 exit 1）
+        ——这是用例动作执行失败，不是环境问题。
+        """
+        try:
+            if action == "launch_app":
+                self._app_or_stub(_NoopApp).launch()
+            elif action == "terminate_app":
+                self._app_or_stub(_NoopApp).terminate()
+            elif action == "back":
+                self._device_session_or_stub(runner).ensure_alive().back()
+            elif action == "swipe":
+                if hasattr(runner.ex, "swipe"):
+                    runner.ex.swipe(step.direction or "up")
+                else:
+                    return False, "executor has no swipe()"
+            else:
+                return False, f"unknown app-level action {action!r}"
+        except SessionPipeline.PreflightError:
+            raise
+        except Exception as e:  # noqa: BLE001 — 步骤失败如实上报
+            return False, f"{type(e).__name__}: {e}"
+        return True, None
+
+    def _app_or_stub(self, stub_cls):
+        """deps.app 存在用之；否则走 no-op 桩（fake-driver 模式）。
+
+        桩的语义是「调用成功」——fake-driver 的定位本来就是跑通管线，
+        不验证设备侧效果（那是真机 Gate 的职责）。
+        """
+        if self.deps is not None and self.deps.app is not None:
+            return self.deps.app
+        return stub_cls()
+
+    def _device_session_or_stub(self, runner: StepRunner):
+        """取 device session：deps → runner.ds → no-op 桩。
+
+        测试替身常把 `ensure_alive` 写成 `pass`（返回 None）——直接拿
+        runner.ds 去 `.ensure_alive().back()` 会 NoneType 崩。这里只要
+        ensure_alive 拿不到真 driver 就回落 no-op 桩（back 是 no-op，
+        fake-driver 不验证设备侧效果）。
+        """
+        ds = None
+        if self.deps is not None and self.deps.device_session is not None:
+            ds = self.deps.device_session
+        elif runner is not None and getattr(runner, "ds", None) is not None:
+            ds = runner.ds
+        else:
+            return _NoopDeviceSession()
+        try:
+            alive = ds.ensure_alive()
+        except Exception:  # noqa: BLE001 — 探测失败回落桩
+            return _NoopDeviceSession()
+        if alive is None:
+            return _NoopDeviceSession()
+        return ds
+
     def _run_action_step(self, runner: StepRunner, step: ActionStep,
                          idx: int) -> StepOutcome:
         # R16-1：7.4「取更严格」只能由 policy 纯函数裁决——step 声明与
@@ -241,16 +355,20 @@ class SessionPipeline:
         ref = step.target
         element_id = ref.id if ref is not None else ""
         # screen 引用不进 find/perform 管线（它是 wait/assert 的目标）
+        # Executor.find 的 Locator 契约是 list[dict]（strat["type"] 下标
+        # 访问）——2.7 M2 Gate 真机实锤：传 (type, value) 元组会 TypeError。
         strategies: tuple = tuple()
         if ref is not None and getattr(ref, "type", "element") == "element":
             if self.deps and self.deps.repo is not None:
                 eff = self.deps.repo.resolve(ref, build="local")
-                strategies = tuple((s.type, s.value) for s in eff.strategies)
+                strategies = tuple({"type": s.type, "value": s.value}
+                                   for s in eff.strategies)
                 meta_risk = getattr(eff, "risk", None)
                 meta_idem = getattr(eff, "idempotency", None)
                 screen_id = eff.screen
             else:
-                strategies = (("accessibility_id", element_id),)
+                strategies = ({"type": "accessibility_id",
+                               "value": element_id},)
                 meta_risk = None
                 meta_idem = None
                 screen_id = ""
@@ -273,7 +391,6 @@ class SessionPipeline:
             postcondition_spec=step.postcondition,
             step_index=idx)
         return runner.run_step(ctx)
-
     def _record_aux_step(self, lifecycle: Lifecycle, idx: int, step_type: str,
                          target_id: str, *, ok: bool = True,
                          failure_type: str | None = None,

@@ -362,6 +362,9 @@ class _StubOKExecutor:
     def perform(self, action, element, value=None):
         pass
 
+    def swipe(self, direction):
+        pass
+
 
 class _StubOKElement:
     def is_displayed(self):
@@ -501,3 +504,200 @@ steps:
     rows = [tuple(r) for r in store.conn.execute(
         "SELECT step_type, status FROM steps").fetchall()]
     assert ("wait_for", "SUCCESS") in rows, f"wait 步骤未落库：{rows}"
+
+
+# --- Task 2.7：app/driver 级动作分流（M2 Gate 真机首跑实锤） ---
+
+def test_app_level_actions_bypass_find_pipeline(tmp_path):
+    """launch_app/terminate_app/back/swipe 不走 find/perform 元素管线——
+    当普通元素动作跑会 find(()) 空 → ELEMENT_NOT_FOUND（App 级动作没有
+    target）。真机 Gate 首跑 20/20 挂在这个点。"""
+    from executor.guard import EnvKind, Guard
+    from runner.lifecycle import Lifecycle
+    from runner.runner import StepRunner
+    from tracer.storage import TraceStore
+
+    launched = []
+    store = TraceStore(tmp_path / "trace.db")
+    store.start_run("run_applevel")
+
+    class _App:
+        def launch(self, arguments=None):
+            launched.append("launch")
+
+        def terminate(self):
+            launched.append("terminate")
+
+    from cli.pipeline import PipelineDeps
+    pipe = SessionPipeline(suites_root=None, store=store,
+                           deps=PipelineDeps(app=_App()))
+    case = _load_case("""\
+schema_version: "0.2"
+id: app_level
+name: app level actions
+steps:
+  - action: launch_app
+  - action: terminate_app
+  - action: launch_app
+""")
+    runner = StepRunner(_StubOKExecutor(), _FakeDS(), Guard(EnvKind.SANDBOX))
+    result = pipe.run_case(runner, Lifecycle(store=store), case,
+                           run_id="run_applevel")
+    assert result.status == "PASS", result.detail
+    assert launched == ["launch", "terminate", "launch"]
+    rows = [tuple(r) for r in store.conn.execute(
+        "SELECT step_type, status FROM steps ORDER BY step_index").fetchall()]
+    assert rows == [("launch_app", "SUCCESS"), ("terminate_app", "SUCCESS"),
+                    ("launch_app", "SUCCESS")]
+
+
+def test_app_level_action_failure_is_fail_not_find_error(tmp_path):
+    """app 级动作失败 → ACTION_FAILED（8.2：真实失败类型，不伪装成
+    ELEMENT_NOT_FOUND）。"""
+    from executor.guard import EnvKind, Guard
+    from runner.lifecycle import Lifecycle
+    from runner.runner import StepRunner
+    from tracer.storage import TraceStore
+
+    from cli.pipeline import PipelineDeps
+
+    class _BadApp:
+        def launch(self, arguments=None):
+            raise RuntimeError("simctl failed")
+
+        def terminate(self):
+            pass
+
+    store = TraceStore(tmp_path / "trace.db")
+    store.start_run("run_badapp")
+    pipe = SessionPipeline(suites_root=None, store=store,
+                           deps=PipelineDeps(app=_BadApp()))
+    case = _load_case("""\
+schema_version: "0.2"
+id: bad_launch
+name: bad launch
+steps:
+  - action: launch_app
+""")
+    runner = StepRunner(_StubOKExecutor(), _FakeDS(), Guard(EnvKind.SANDBOX))
+    result = pipe.run_case(runner, Lifecycle(store=store), case,
+                           run_id="run_badapp")
+    assert result.status == "FAIL"
+    assert result.failure_type == "ACTION_FAILED"
+    assert "simctl failed" in result.detail.get("error", "")
+
+
+def test_back_and_swipe_use_stubs_when_no_device_injected(tmp_path):
+    """back/swipe 在 fake 模式走 pipeline 内建 no-op 桩（不 PreflightError）——
+    fake-driver 的定位是跑通管线，设备侧效果归真机 Gate。"""
+    from executor.guard import EnvKind, Guard
+    from runner.lifecycle import Lifecycle
+    from runner.runner import StepRunner
+    from tracer.storage import TraceStore
+
+    store = TraceStore(tmp_path / "trace.db")
+    store.start_run("run_back")
+    pipe = SessionPipeline(suites_root=None, store=store)
+    case = _load_case("""\
+schema_version: "0.2"
+id: back_swipe
+name: back and swipe
+steps:
+  - action: back
+  - action: swipe
+    direction: up
+""")
+    runner = StepRunner(_StubOKExecutor(), _FakeDS(), Guard(EnvKind.SANDBOX))
+    result = pipe.run_case(runner, Lifecycle(store=store), case,
+                           run_id="run_back")
+    assert result.status == "PASS", result.detail
+
+
+def test_strategies_are_dict_locator_contract(tmp_path):
+    """2.7 M2 Gate 真机实锤：Executor.find 的 Locator 契约是
+    list[dict]（strat["type"] 下标访问）。pipeline 过去传
+    ("type","value") 元组 → TypeError 伪装成 FIND_ERROR。这里钉住
+    传给 StepRunner 的 strategies 元素必须是 dict。"""
+    from executor.guard import EnvKind, Guard
+    from runner.lifecycle import Lifecycle
+    from runner.runner import StepRunner
+    from tracer.storage import TraceStore
+
+    seen = {}
+
+    class _ProbeEx:
+        def find(self, strategies):
+            seen["strategies"] = strategies
+            return _StubOKElement()
+
+        def perform(self, action, element, value=None):
+            pass
+
+    store = TraceStore(tmp_path / "trace.db")
+    store.start_run("run_dict")
+    pipe = SessionPipeline(suites_root=None, store=store)
+    case = _load_case("""\
+schema_version: "0.2"
+id: dict_locator
+name: dict locator contract
+steps:
+  - action: tap
+    target: LoginView.login_button
+""")
+    runner = StepRunner(_ProbeEx(), _FakeDS(), Guard(EnvKind.SANDBOX))
+    result = pipe.run_case(runner, Lifecycle(store=store), case,
+                           run_id="run_dict")
+    assert result.status == "PASS"
+    strategies = seen["strategies"]
+    assert isinstance(strategies, (list, tuple))
+    assert strategies and all(
+        isinstance(s, dict) and "type" in s and "value" in s
+        for s in strategies), f"strategies 必须是 Locator dict 契约：{strategies}"
+
+
+def test_dispatch_action_uses_executor_tap_input(tmp_path):
+    """2.7 M2 Gate 真机实锤（第三处契约断层）：生产 Executor 没有
+    perform()——只有 tap(locator)/input(locator, value)。StepRunner 必须
+    按动作分派，否则接真实 Executor 必 AttributeError。"""
+    from executor.guard import EnvKind, Guard
+    from runner.lifecycle import Lifecycle
+    from runner.runner import StepRunner
+    from tracer.storage import TraceStore
+
+    calls = []
+
+    class _RealContractEx:
+        """对齐生产 Executor 的方法面：find/tap/input/swipe，无 perform。"""
+
+        def find(self, locator):
+            return _StubOKElement()
+
+        def tap(self, locator):
+            calls.append(("tap", tuple(locator)))
+
+        def input(self, locator, value):
+            calls.append(("input", tuple(locator), value))
+
+    store = TraceStore(tmp_path / "trace.db")
+    store.start_run("run_dispatch")
+    pipe = SessionPipeline(suites_root=None, store=store)
+    case = _load_case("""\
+schema_version: "0.2"
+id: dispatch
+name: dispatch
+steps:
+  - action: input
+    target: LoginView.username_field
+    value: qa_user
+  - action: tap
+    target: LoginView.login_button
+""")
+    runner = StepRunner(_RealContractEx(), _FakeDS(), Guard(EnvKind.SANDBOX))
+    result = pipe.run_case(runner, Lifecycle(store=store), case,
+                           run_id="run_dispatch")
+    assert result.status == "PASS", result.detail
+    assert calls[0][0] == "input" and calls[0][2] == "qa_user"
+    assert calls[1][0] == "tap"
+    # locator 契约：list[dict]
+    for c in calls:
+        assert all(isinstance(s, dict) for s in c[1])

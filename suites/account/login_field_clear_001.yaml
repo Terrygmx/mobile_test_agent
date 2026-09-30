@@ -15,10 +15,13 @@ steps:
   - action: input
     target: LoginView.username_field
     value: ""
+  # XCUITest 实测：.text 清空后回 placeholder「用户名」（非空串）——
+  # text_equals "" 恒假。等 placeholder 即证明清空生效（探针 probe_text
+  # 实锤：send_keys→值，clear→placeholder）。
   - wait_for:
       target: LoginView.username_field
       condition: text_equals
-      expected: ""
+      expected: 用户名
       timeout: 5
   - wait_for:
       target: LoginView.username_field
