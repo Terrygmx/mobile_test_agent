@@ -41,7 +41,8 @@ BUNDLE_ID = "com.phaset0.logindemo"
 APPIUM_URL = "http://127.0.0.1:4723"
 OUT_DIR = ROOT / "out" / "p1_m2_gate"
 SUITES = ROOT / "suites"
-ROUNDS = 2  # 连续性：每套件连跑 2 轮（flake 疑点 P3-6 的工程防线）
+ROUNDS = 3  # 连续性：每套件连跑 3 轮（plan Task 2.7 Step 2 明确要求 3 轮；
+# 同时也是 flake 疑点 P3-6/R18-1 的工程防线——单轮全绿不能证明稳定）
 
 # 终态 marker：用例 cleanup 后应停在的关键屏（marker 精确断言，R9-3）
 FINAL_SCREEN = {
@@ -69,13 +70,22 @@ FINAL_SCREEN = {
 
 
 def resolve_udid() -> str:
-    """R9-2 同款：MTA_SIM_UDID 优先 → booted 自动发现 → 可读报错。"""
+    """R9-2 同款：MTA_SIM_UDID 优先 → booted 自动发现 → 可读报错。
+
+    R18-2 修复：subprocess 显式带 DEVELOPER_DIR——Xcode 27 beta 环境下
+    `xcrun` 无该变量报「unable to find utility simctl」（Gate 实测踩中：
+    交互 shell 有 DEVELOPER_DIR 但 subprocess 不继承时的表现是
+    "no booted simulator" 误导报错）。
+    """
     env = os.environ.get("MTA_SIM_UDID")
     if env:
         return env
+    child_env = dict(os.environ)
+    child_env.setdefault(
+        "DEVELOPER_DIR", "/Applications/Xcode.app/Contents/Developer")
     out = subprocess.run(
         ["xcrun", "simctl", "list", "devices", "booted"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, env=child_env,
     ).stdout
     booted = re.findall(r"\(([0-9A-Fa-f-]{36})\)", out)
     if not booted:

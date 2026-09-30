@@ -276,7 +276,11 @@ class SessionPipeline:
         if self.store is not None:
             lifecycle.end_testcase(
                 status, failure_type=failure_type,
-                cleanup_status=cleanup_status)
+                # manage_env=False（套件路径）时 cleanup 归 SuiteRunner，
+                # 这里写 PENDING——不是 OK（还没 cleanup 呢）也不是 None。
+                # 套件层成功回 OK / 失败由 R18-3 回写 ENVIRONMENT_FAILURE。
+                cleanup_status=cleanup_status or (
+                    None if manage_env else "PENDING"))
         return result
 
     def _run_app_level_action(self, runner: StepRunner, action: str,
@@ -425,6 +429,23 @@ class SessionPipeline:
         if self.deps is not None and self.deps.env is not None:
             self.deps.env.cleanup(tc)
 
+    def _write_cleanup_failure(self, result) -> None:
+        """R18-3：cleanup 失败后把该 testcase_run 的真实终态回写 trace。
+
+        run_case(manage_env=False) 已先落了 PASS 终态，suite 层 cleanup
+        失败无人回写 → testcase_runs 两行 PASS 但 runs=INFRA，矛盾。
+        这里用 lifecycle 的 end_testcase 重发终态（H10 升级后的）。
+        lifecycle 同步持有 tc_run_id 游标，Detail 幂等。
+        """
+        if self.store is None:
+            return
+        lc = self._lifecycle
+        if lc is None:
+            return
+        lc.end_testcase(
+            result.status, failure_type=result.failure_type,
+            cleanup_status=result.cleanup_status)
+
     # --- 整个 run ---
 
     def run_all(self, cases: list[TestCase], *, run_id: str,
@@ -446,7 +467,10 @@ class SessionPipeline:
                       else FailurePolicy[failure_policy])
             suite_runner = SuiteRunner(
                 env=self._suite_env(), run_one=self._suite_run_one,
-                failure_policy=policy)
+                failure_policy=policy,
+                # R18-3：cleanup 失败回写 testcase_run（否则 trace 停在
+                # run_case 落的 PASS，排障看到矛盾终态）。
+                on_cleanup_failure=self._write_cleanup_failure)
             try:
                 suite_run = suite_runner.run_suite(cases)
                 run.results.extend(suite_run.results)

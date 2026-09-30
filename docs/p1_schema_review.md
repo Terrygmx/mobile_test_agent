@@ -299,3 +299,50 @@ P3 八条处置：
    failure_type 之前拍板**（P3-4）
 3. Report 首页对 trace 写盘 warning 计数暴露「trace 丢失」（Task 2.5 遗留）
 4. `mta run` 全参数（8.4 退出码真跑一次，验 `3>2>4>1>5` 优先级）
+
+## 12. Task 2.7 + R18 记账 — 2026-09-30（文档单一事实源补齐）
+
+上轮 R17 的四条欠账中三条在本轮落地（`4d742eb` 之后的 R18 修复提交）：
+
+1. **R17-1/R18-4-1 `--no-llm` / `--allow-metadata-mismatch` 仍零读取**：
+   维持「记账不修」口径。`--no-llm` 的替代语义是 gate 的结构性断言
+   （`llm_calls=0` + `llm_calls_assert_zero`，无 Recovery 接线时零调用是
+   结构必然，不是 flag 生效）；`--allow-metadata-mismatch` 等 M3 Build
+   Identity 落地时给真实语义（metadata mismatch WARNING↔ERROR 分级）。
+   M3 开工前若两 flag 仍无消费点，考虑先从 argparse 摘除防「参数存在=
+   功能存在」。
+2. **R17-3/R18-4-2 HTML LLM rate 分母失真（已修）**：`Lifecycle.steps_recorded`
+   累计真实步骤数（record_step 无条件 +1），`cmd_run` 传它做分母；
+   `test_r18_4` 断言 steps_recorded == DB steps 行数。曾经的
+   `len(run.results)` 是**用例数**冒充步骤数，20 条套件比率放大约 7 倍。
+3. **R16-3「Recovery 接线→2.7」改口「M3/后续 task」**：Recovery/Reconciliation
+   与 ReconciliationEngine 的接线是 M3+ 语义（依赖 Repository generated，
+   因为 RECOVERED 判定要「目标是否漂移」的 source 真相）。2.7 只交付了
+   postcondition 执行端（H7 的判定闭环），未做 Recovery 编排。
+4. **Risk YAML 拍板（影响所有后续用例，本轮定案）**：`Risk` 是 int 枚举
+   （policy 按 value 取 max），YAML 写 `risk: LOW` 被 schema 拒（只能写
+   1-4）。**拍板：P1 用例不声明 `risk`**，由 element metadata + 关键词启发
+   式推导（R16-1 已把取严逻辑收口 policy 纯函数，元数据是唯一事实源）。
+   `risk` 字段保留给**需要显式覆盖 metadata 的场景**，届时写数字并注明等
+   级（或 M3 给 schema 加值别名解析，低优先级）。
+
+### Task 2.7 完成态（tag checkpoint-p1-m2 之后）
+
+- R18-1（flake 已修）：pytest.ini `filterwarnings = always`——warn 断言与
+  执行历史解耦（`__warningregistry__` 同进程去重是「隔离绿、全量红」的
+  根因）。
+- R18-2（轮数已对齐）：gate `ROUNDS=3` + subprocess 带 DEVELOPER_DIR 修复
+  （Xcode 27 beta 下 xcrun 无该变量报「unable to find utility simctl」，
+  曾伪装成 "no booted simulator"）。
+- R18-3（trace 保真已修）：`SuiteRunner.on_cleanup_failure` 回写通道 +
+  pipeline 实现；`testcase_runs` 不再出现「PASS 但套件中止」矛盾终态。
+  cleanup 成功路径补 PENDING→OK 语义（套件路径此前留 None）。
+
+### M3 开工前置清单（自本节起算）
+
+1. Recovery/Reconciliation 与新管线对接（--no-llm 消费点的前提）。
+2. `verify_p1_m2.py` 的 `from_dirs(generated_root=overrides)` 语义拆分：
+   M3 起 generated_root=<generated 目录> + overrides_root=<overrides 目录>
+   （5.3 generated+override 合并语义，TODO(M3, R10-5.2) 已记账）。
+3. M3 集成测试的替身规格直接用生产 Executor 契约（find→list[dict] /
+   tap·input / 无 perform）——2.6-2.7 四次「替身失真」的教训。

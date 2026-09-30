@@ -42,14 +42,20 @@ def build_parser() -> argparse.ArgumentParser:
     target.add_argument("--suite", metavar="NAME")
     target.add_argument("--tag", metavar="TAG")
     target.add_argument("--case", metavar="CASE_ID")
+    # R18-4：两个 flag 尚未接线（Recovery 属 M3 语义 / metadata mismatch
+    # 校验属 M3 Build Identity）。help 如实标注现状——「参数存在≠功能
+    # 存在」（R17-1/2）。不摘除：调用方（脚本/CI）传了不该报错，而应
+    # fail-loud 于 warning 并在 trace 记「flag 未生效」。
     run_p.add_argument("--no-llm", action="store_true",
-                       help="禁用 LLM recovery（调用数记 0，R15 P3-8）")
+                       help="[未接线/M3] 禁用 LLM recovery；当前管线无 "
+                            "Recovery 调用故 LLM 数恒 0")
     run_p.add_argument("--junit", metavar="PATH",
                        help="输出 JUnit XML（8.5）")
     run_p.add_argument("--html", metavar="PATH",
                        help="输出 HTML 报告（14.5）")
     run_p.add_argument("--allow-metadata-mismatch", action="store_true",
-                       help="build metadata 不匹配时放行（trace 记 override）")
+                       help="[未接线/M3] build metadata 不匹配时放行；"
+                            "metadata 校验在 M3 Build Identity 落地")
     run_p.add_argument("--allow-production", action="store_true",
                        help="允许 production 环境（10.1 总闸；HIGH/CRITICAL 仍拦）")
     run_p.add_argument("--config", metavar="PATH", default="mta.yaml",
@@ -206,16 +212,23 @@ def cmd_run(args: argparse.Namespace) -> int:
     pipeline.store = store
     pipeline.deps = PipelineDeps(env=None)  # app 级动作走 pipeline 内建桩
     pipeline._step_runner = runner
-    pipeline._lifecycle = Lifecycle(store=store)
+    lifecycle = Lifecycle(store=store)
+    pipeline._lifecycle = lifecycle
     pipeline._run_id = run_id
 
     # 2. 跑（P3-5：统一走 run_all——H10 中止语义/未执行清单只在套件层可达）
     run = pipeline.run_all(cases, run_id=run_id)
 
-    # 3. --no-llm 语义（R16-3）：Recovery 接线在 2.7；当前管线 LLM 调用
-    #    恒为 0，flag 断言这一点并让 report 如实渲染，防「参数存在=功能存在」
-    #    的假象在 2.7 接上 Recovery 后静默失效。
+    # 3. --no-llm 语义（R18-4）：Recovery 接线在 M3；当前管线 LLM 调用
+    #    恒为 0。flag 接了（不报错、如实读入）但**显式 warn 未生效语义
+    #    边界**——不留「参数存在=功能存在」的静默假象（R17-1/2）。
     llm_calls = 0
+    if args.no_llm:
+        print("note: --no-llm：当前管线无 Recovery 接线（M3），"
+              "LLM 调用数结构性为 0")
+    if args.allow_metadata_mismatch:
+        print("note: --allow-metadata-mismatch：metadata 校验在 M3 "
+              "Build Identity 落地，当前无 mismatch 可放行")
 
     # 4. 产物
     if args.junit:
@@ -226,7 +239,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         from report.html import write_run_report
         write_run_report(
             run, args.html, llm_calls=llm_calls,
-            executed_steps=len(run.results),
+            # R18-4/R17-3：分母是**步骤数**（lifecycle 累计），不是用例数
+            executed_steps=lifecycle.steps_recorded,
             wda_restarts=0)
         print(f"html: {args.html}")
 

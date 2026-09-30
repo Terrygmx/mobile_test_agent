@@ -183,6 +183,10 @@ class Lifecycle:
     run_id: str = ""
     tc_run_id: int | None = None
     attempt: int = 1
+    # R18-4/R17-3：本 run 已落库的 step 总数（LLM Invocation Rate 的
+    # 分母必须是步骤数，不是用例数——report 侧曾用 len(run.results)
+    # 冒充，比率被系统性放大 20 条套件 ~7 倍）。
+    steps_recorded: int = 0
 
     def begin_testcase(self, run_id: str, testcase_id: str,
                        attempt: int = 1) -> int:
@@ -206,6 +210,8 @@ class Lifecycle:
         self.note_dispatch(step_index, _is_non_idempotent(out))
         if self.store is None or self.tc_run_id is None:
             return
+        # R18-4/R17-3：无条件累计步骤数（LLM Invocation Rate 分母）
+        self.steps_recorded += 1
         # locator 兜底：StepOutcome.locator_strategy 只在成功路径填；失败
         # 路径（找元素就没找到）没有策略信息。此时用 target_id 兜一条
         # `target:<id>`——**不是**声称某条策略命中过，而是「本次尝试的目标

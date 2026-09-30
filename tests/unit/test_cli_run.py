@@ -701,3 +701,85 @@ steps:
     # locator 契约：list[dict]
     for c in calls:
         assert all(isinstance(s, dict) for s in c[1])
+
+
+def test_r18_3_cleanup_failure_written_to_trace(tmp_path):
+    """R18-3：cleanup 失败必须回写 testcase_run（manage_env=False 路径先落了
+    PASS，无人回写 → trace 显示「PASS 但套件中止」的矛盾终态）。"""
+    from environment.manager import CleanupError, EnvironmentManager
+    from executor.guard import EnvKind, Guard
+    from runner.lifecycle import Lifecycle
+    from runner.runner import StepRunner
+    from tracer.storage import TraceStore
+
+    from cli.pipeline import PipelineDeps
+
+    class _FailCleanupEnv(EnvironmentManager):
+        def __init__(self):
+            super().__init__(app=object())
+            self.calls = 0
+
+        def prepare(self, tc):
+            pass
+
+        def cleanup(self, tc=None):
+            raise CleanupError("boom R18-3")
+
+    store = TraceStore(tmp_path / "trace.db")
+    store.start_run("run_r18_3")
+    pipe = SessionPipeline(ROOT_SUITES(tmp_path), store=store,
+                           deps=PipelineDeps(env=_FailCleanupEnv()))
+    pipe._step_runner = StepRunner(_StubOKExecutor(), _FakeDS(),
+                                   Guard(EnvKind.SANDBOX))
+    pipe._lifecycle = Lifecycle(store=store)
+    cases = pipe.discover()
+    run = pipe.run_all(cases, run_id="run_r18_3")
+
+    rows = [tuple(r) for r in store.conn.execute(
+        "SELECT testcase_id, status, failure_type, cleanup_status "
+        "FROM testcase_runs ORDER BY id").fetchall()]
+    # 第一条：cleanup 失败 → ENVIRONMENT_FAILURE/CLEANUP_FAILED/FAILED
+    assert rows[0] == (cases[0].id, "ENVIRONMENT_FAILURE",
+                       "CLEANUP_FAILED", "FAILED"), rows
+    # 套件中止：只有 1 条跑过（FAIL 后 ABORT_SUITE 不跑后续）
+    assert len(run.results) == 1
+    assert run.exit_code == 2
+
+
+def ROOT_SUITES(tmp_path):
+    """构造 suites 目录（单条用例）供 discover 用。"""
+    sdir = tmp_path / "suites" / "smoke"
+    sdir.mkdir(parents=True)
+    (sdir / "only_001.yaml").write_text(VALID_TC, encoding="utf-8")
+    return tmp_path / "suites"
+
+
+def test_r18_4_html_rate_denominator_is_steps_not_cases(tmp_path, capsys):
+    """R18-4/R17-3：LLM Invocation Rate 的分母必须是步骤数（lifecycle
+    累计），不是用例数——len(run.results) 冒充过，比率被放大。"""
+    from report.html import render_run_report
+
+    from executor.guard import EnvKind, Guard
+    from runner.lifecycle import Lifecycle
+    from runner.result import RunResult
+    from runner.runner import StepRunner
+    from tracer.storage import TraceStore
+
+    store = TraceStore(tmp_path / "trace.db")
+    pipe = SessionPipeline(ROOT_SUITES(tmp_path), store=store)
+    runner = StepRunner(_StubOKExecutor(), _FakeDS(), Guard(EnvKind.SANDBOX))
+    lifecycle = Lifecycle(store=store)
+    store.start_run("run_rate")
+    case = pipe.discover()[0]
+    result = pipe.run_case(runner, lifecycle, case, run_id="run_rate")
+    assert result.status == "PASS"
+    # 单用例 1 step（VALID_TC 只有 launch_app），若分母是用例数则 =1（同值）
+    # —— 用两条用例跑 run_all 拉开差距：2 用例 / 3 step
+    html = render_run_report(
+        RunResult(run_id="r", suite=None), llm_calls=0,
+        executed_steps=lifecycle.steps_recorded)
+    assert "LLM Invocation Rate" in html
+    # steps_recorded 必须 > 0 且与 DB 步数一致（不是用例数 1）
+    db_steps = store.conn.execute("SELECT COUNT(*) FROM steps").fetchone()[0]
+    assert lifecycle.steps_recorded == db_steps, (
+        f"steps_recorded={lifecycle.steps_recorded} db={db_steps}")

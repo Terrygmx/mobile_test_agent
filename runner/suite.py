@@ -59,6 +59,11 @@ class SuiteRunner:
     failure_policy: FailurePolicy = FailurePolicy.ABORT_SUITE
     run_one: Callable[[object], None] | None = None
     results: list = field(default_factory=list)
+    # R18-3：cleanup 失败时回写 trace 的通道（可选）。新管线的
+    # run_case(manage_env=False) 已在本类之前落了 testcase_run，cleanup
+    # 失败无人回写 → trace 显示 PASS 但套件中止的矛盾。注入方
+    # （cli.pipeline）提供 (testcase_result) -> None，零依赖不倒挂。
+    on_cleanup_failure: Callable[[TestcaseResult], None] | None = None
 
     def __post_init__(self):
         if self.run_one is None:
@@ -93,6 +98,13 @@ class SuiteRunner:
                 result.status = "ENVIRONMENT_FAILURE"
                 result.failure_type = "CLEANUP_FAILED"
                 result.detail["cleanup_error"] = str(e)
+                # R18-3：回写 trace——否则 run_case 早先落的 testcase_run
+                # 停在 PASS，排障时看到「PASS 但套件中止」的矛盾终态。
+                if self.on_cleanup_failure is not None:
+                    try:
+                        self.on_cleanup_failure(result)
+                    except Exception:  # noqa: BLE001 — 回写失败不影响 H10 升级
+                        pass
         # 8.1 终态聚合：`cleanup` 的失败已在上面的 except 里直接改写
         # status（ENVIRONMENT_FAILURE），这里不再对单元素列表调
         # aggregate_status —— 那是恒等操作（review P3-2：原实现

@@ -40,13 +40,21 @@ CASES = ["login_001", "logout_001", "search_001", "open_detail_001", "profile_00
 
 
 def resolve_udid() -> str:
-    """R9-2 同款：MTA_SIM_UDID 优先 → booted 自动发现 → 可读报错。"""
+    """R9-2 同款：MTA_SIM_UDID 优先 → booted 自动发现 → 可读报错。
+
+    R18-2 修复（与 verify_p1_m2 同）：subprocess 显式带 DEVELOPER_DIR——
+    Xcode 27 beta 下 `xcrun` 无该变量报「unable to find utility simctl」，
+    表现为误导性的 "no booted simulator"。
+    """
     env = os.environ.get("MTA_SIM_UDID")
     if env:
         return env
+    child_env = dict(os.environ)
+    child_env.setdefault(
+        "DEVELOPER_DIR", "/Applications/Xcode.app/Contents/Developer")
     out = subprocess.run(
         ["xcrun", "simctl", "list", "devices", "booted"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, env=child_env,
     ).stdout
     booted = re.findall(r"\(([0-9A-Fa-f-]{36})\)", out)
     if not booted:
