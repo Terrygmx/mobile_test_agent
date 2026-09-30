@@ -1,0 +1,8 @@
+schema_version: '1.0'
+kind: screen
+id: SpikeTabScreen
+marker: screen.SpikeTabScreen
+kind_hint: page
+metadata:
+  risk: LOW
+  origin: source

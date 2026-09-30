@@ -1,0 +1,55 @@
+schema_version: '1.0'
+kind: element
+id: error_message
+screen: LoginView
+type: text
+strategies:
+- type: accessibility_id
+  value: error_message
+  origin: source
+  source_file: LoginDemoApp.swift
+  source_line: 75
+metadata:
+  origin: source
+---
+schema_version: '1.0'
+kind: element
+id: login_button
+screen: LoginView
+type: button
+strategies:
+- type: accessibility_id
+  value: login_button
+  origin: source
+  source_file: LoginDemoApp.swift
+  source_line: 86
+metadata:
+  origin: source
+---
+schema_version: '1.0'
+kind: element
+id: password_field
+screen: LoginView
+type: securetextfield
+strategies:
+- type: accessibility_id
+  value: password_field
+  origin: source
+  source_file: LoginDemoApp.swift
+  source_line: 70
+metadata:
+  origin: source
+---
+schema_version: '1.0'
+kind: element
+id: username_field
+screen: LoginView
+type: textfield
+strategies:
+- type: accessibility_id
+  value: username_field
+  origin: source
+  source_file: LoginDemoApp.swift
+  source_line: 66
+metadata:
+  origin: source

@@ -1,0 +1,8 @@
+schema_version: '1.0'
+kind: screen
+id: HomeView
+marker: screen.HomeView
+kind_hint: page
+metadata:
+  risk: LOW
+  origin: source

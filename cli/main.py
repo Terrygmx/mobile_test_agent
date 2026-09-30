@@ -285,6 +285,7 @@ def cmd_repo(args: argparse.Namespace) -> int:
               "[--check]")
         return 3
     from source.consistency import check, format_report
+    from source.export import export_generated
     from source.metadata import ScanError, build_metadata
 
     # 目录参数递归展开（rglob 全部 .swift/.m/.h），排序保证确定性输出
@@ -311,6 +312,16 @@ def cmd_repo(args: argparse.Namespace) -> int:
     print(f"generated: {out} "
           f"({len(meta['screen_elements'])} screens, "
           f"{sum(len(s['elements']) for s in meta['screen_elements'])} elements)")
+
+    # 桥接到 Repository 布局（12.3 → 5.1 elements/screens YAML）。
+    # 这是 TODO(M3, R10-5.2) 的核心一步：generated 从此**可被 loader 消费**，
+    # Repository 不再需要把 overrides 当 generated 用（4.1 resolve 的两源合并
+    # 语义自此真正成立）。
+    gen_dir = Path(args.out) / args.build
+    counts = export_generated(meta, gen_dir)
+    print(f"exported: {gen_dir}/elements + /screens "
+          f"({counts['elements']} elements, {counts['screens']} screens, "
+          f"origin: source)")
 
     if args.check:
         report = check(meta, "repository/overrides")

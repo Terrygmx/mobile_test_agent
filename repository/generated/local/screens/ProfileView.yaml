@@ -1,0 +1,8 @@
+schema_version: '1.0'
+kind: screen
+id: ProfileView
+marker: screen.ProfileView
+kind_hint: page
+metadata:
+  risk: LOW
+  origin: source

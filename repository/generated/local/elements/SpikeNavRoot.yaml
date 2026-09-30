@@ -1,0 +1,13 @@
+schema_version: '1.0'
+kind: element
+id: nav_root_title
+screen: SpikeNavRoot
+type: text
+strategies:
+- type: accessibility_id
+  value: nav_root_title
+  origin: source
+  source_file: SpikeScreen.swift
+  source_line: 35
+metadata:
+  origin: source

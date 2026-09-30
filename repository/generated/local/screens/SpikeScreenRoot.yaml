@@ -1,0 +1,8 @@
+schema_version: '1.0'
+kind: screen
+id: SpikeScreenRoot
+marker: screen.SpikeScreenRoot
+kind_hint: page
+metadata:
+  risk: LOW
+  origin: source
