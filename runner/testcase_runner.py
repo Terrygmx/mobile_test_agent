@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from environment.secrets import SecretProvider
+from executor.assertion import AssertionEngine, AssertionTargetDrift, AssertionValueMismatch
 from executor.executor import AmbiguousElement, ElementNotFound, Executor, Locator
 from executor.wait import WaitConfig, WaitEngine, WaitTimeout
 from repository.resolver import (
@@ -66,6 +67,7 @@ class TestcaseRunner:
         # Task 2.1：等待参数来自配置（`mta.yaml` wait: 段），不在代码里写死
         self.wait_config = wait_config or WaitConfig()
         self._wait_engine_cached: WaitEngine | None = None
+        self._assertion_engine_cached: AssertionEngine | None = None
         # R11-2：settle 放行记录（每 run 重置），供 trace / 事后区分「放行过」
         self.settle_timeouts: list[str] = []
         # review R2-3：recovery 行 id（steps 落库后回填 step_id 用）
@@ -118,10 +120,14 @@ class TestcaseRunner:
             getattr(self, f"_do_{action}")(step)
         except Exception as e:
             status, error = "FAILED", f"{type(e).__name__}: {e}"
-            # review P0-1/R2-1：元素定位失败 → 自动 reconcile + recovery；
-            # 恢复成功则不 raise，继续执行后续步骤（用例最终 PASS，设计目标 7）
-            if (isinstance(e, (ElementNotFound, AmbiguousElement))
-                    and step.target and self.recovery_ctx):
+            # Recovery 分流（7.3 / 第 9 节）：
+            #   - 定位失败（ElementNotFound / AmbiguousElement）→ 可恢复；
+            #   - 断言目标漂移（AssertionTargetDrift）→ 可恢复（detail.kind=assertion_target）；
+            #   - 断言值不符（AssertionValueMismatch）→ H6：直接 FAIL，无 Recovery；
+            #   - 等待超时（WaitTimeout）→ 默认不恢复（recovery.on_wait_timeout 才放行）。
+            recoverable = isinstance(
+                e, (ElementNotFound, AmbiguousElement, AssertionTargetDrift))
+            if (recoverable and step.target and self.recovery_ctx):
                 rec_result = self._try_recovery(step, e)
                 if rec_result and rec_result["status"] == "RECOVERED":
                     status, error = "RECOVERED", None
@@ -156,14 +162,21 @@ class TestcaseRunner:
 
         review R2-3：recovery 行先落库（step_id=0），steps 行后落库，
         拿到精确行 id 后在此回填——不依赖全局 MAX(id)。
+        Task 2.2：step 可能是 WaitStep/AssertionStep（无 .action 属性，坑 17），
+        动作名用调用点已分派的形态推断，不能摸 step.action。
         """
         from agent.recovery import recover  # 局部导入避免循环依赖
 
+        # 分派后动作名：action 步骤直接取；wait/assertion 步骤的「动作」
+        # 对 recovery 的意义是「LLM 该做 tap 还是 input」——断言漂移恢复
+        # 目前只在 tap 语义下有意义（重新定位目标元素），统一给 tap。
+        action = getattr(step, "action", "tap")
+        value = getattr(step, "value", None)
         ctx = self.recovery_ctx
         try:
             result = recover(step.target, error, self.ex, ctx["metadata"],
                              ctx["budget"], ctx["llm"], recorder=self.rec,
-                             step_action=step.action, step_value=self._resolve(step.value))
+                             step_action=action, step_value=self._resolve(value))
             # review R2-3：暂存精确 recoveries 行 id，steps 落库后回填
             self._last_rec_row = result.get("rec_row_id")
             return result
@@ -207,6 +220,13 @@ class TestcaseRunner:
             )
         return self._wait_engine_cached
 
+    def _assertion_engine(self) -> AssertionEngine:
+        if self._assertion_engine_cached is None:
+            self._assertion_engine_cached = AssertionEngine(
+                self.ex, self._locator_chain,
+            )
+        return self._assertion_engine_cached
+
     def _do_wait_for(self, step) -> None:
         """Task 2.1：完整条件矩阵走 WaitEngine。
 
@@ -234,26 +254,25 @@ class TestcaseRunner:
                 )
 
     def _do_assertion(self, step) -> None:
-        """Task 1.6 最小 assertion：exists 轮询复用 wait 路径。
-        其余条件（text_equals 等）Task 2.2 Assertion Engine 落地。"""
-        a = step.assertion
-        if a.condition not in ("exists",):
-            raise TestFailure(
-                f"assertion condition {a.condition!r} not supported until Task 2.2"
-            )
-        deadline = time.time() + a.timeout
-        last_err: Exception | None = None
-        while time.time() < deadline:
-            try:
-                self.ex.find(self._locator_chain(a.target))
-                return
-            except (ElementNotFound, AmbiguousElement) as e:
-                last_err = e
-                time.sleep(0.5)
-        raise TestFailure(
-            f"assertion {a.target.id!r} condition={a.condition!r} "
-            f"timeout after {a.timeout}s: {last_err}"
-        )
+        """Task 2.2：断言走 AssertionEngine（设计 7.3）。
+
+        三态分派在 _run_step 的 recovery 分流里做：
+          - passed → 返回；
+          - AssertionValueMismatch → H6 直接 FAIL（recovery 白名单外，自然不进恢复）；
+          - AssertionTargetDrift → 进 Recovery，恢复失败仍以漂移异常 FAIL。
+        """
+        try:
+            self._assertion_engine().check(step.assertion)
+        except AssertionTargetDrift as e:
+            # 漂移必须保持原类型抛出——_run_step 的 recovery 分流靠 isinstance
+            # 识别它；无 recovery_ctx 时漂移没有出路，转 TestFailure。
+            if not self.recovery_ctx:
+                raise TestFailure(str(e)) from None
+            raise
+        except AssertionValueMismatch as e:
+            # H6：值不符直接 FAIL。与 WaitTimeout 同款收口成 TestFailure，
+            # 保持 runner 对外契约（TestFailure=测试失败 / InfraError=基础设施）
+            raise TestFailure(str(e)) from None
 
     def _do_tap(self, step) -> None:
         self.ex.tap(self._locator_chain(step.target))
