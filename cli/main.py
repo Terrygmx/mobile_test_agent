@@ -120,15 +120,20 @@ def cmd_lint(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     """Task 2.6：新管线真实接线（R15-2 核销）+ JUnit/HTML 产物。
 
-    退出码走 8.4 全表（compute_exit_code）。前置错误（发现失败/坏 YAML）
-    → 3；运行结果按 RunResult.exit_code。
+    退出码走 8.4 全表（compute_exit_code）。前置错误（发现失败/坏 YAML/
+    lint ERROR/组件未装配）→ 3；运行结果按 RunResult.exit_code。
     """
+    import uuid
+
     from cli.pipeline import PipelineDeps, SessionPipeline
     from runner.lifecycle import Lifecycle
     from runner.runner import StepRunner
     from tracer.storage import TraceStore
 
-    # 1. 发现（前置错误 → 3）
+    # 0. lint 前置（P3-7：8.4 exit 3 语义包含 lint ERROR——带病用例不进 run）
+    from repository.resolver import Severity
+    from testcase.lint import lint as lint_cases, max_severity
+
     pipeline = SessionPipeline(suites_root=args.suites_root)
     try:
         cases = pipeline.discover(suite=args.suite, tag=args.tag,
@@ -137,9 +142,20 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"PREFLIGHT ERROR: {e}")
         print("run: exit 3")
         return 3
+    repo = _load_repository(args)
+    issues = lint_cases(cases, repo, EnvSecretProvider())
+    for i in issues:
+        prefix = "ERROR" if i.severity is Severity.ERROR else "WARN "
+        print(f"{prefix} {i.code}: {i.message}")
+    if max_severity(issues) is Severity.ERROR:
+        print("run: lint ERROR → exit 3")
+        return 3
 
-    # 2. 组件装配（fake-driver：最小桩；真机：Appium 会话）
-    run_id = f"run_{int(time.time())}"
+    # 1. 组件装配（fake-driver：最小桩；真机：Appium 会话，Task 2.7 接线）
+    # R16-2/P3-3：run_id 用 uuid——同秒碰撞会覆盖 TraceStore runs 主键。
+    run_id = f"run_{uuid.uuid4().hex[:8]}"
+    store = TraceStore(args.db)
+    store.start_run(run_id, suite=args.suite)
     if args.fake_driver:
         from executor.guard import EnvKind, Guard
 
@@ -171,30 +187,31 @@ def cmd_run(args: argparse.Namespace) -> int:
             def ensure_alive(self):
                 pass
 
-        store = TraceStore(args.db)
-        store.start_run(run_id, suite=args.suite)
         runner = StepRunner(_StubEx(), _StubDS(),
                             Guard(EnvKind.SANDBOX), run_id=run_id)
-        lifecycle = Lifecycle(store=store)
-        pipeline.store = store
     else:
-        store = TraceStore(args.db)
-        store.start_run(run_id, suite=args.suite)
-        runner = None      # 真机组件装配在 M2 Gate（Task 2.7）接入
-        lifecycle = Lifecycle(store=store)
-        pipeline.store = store
+        # R16-2：真机组件未装配是前置配置错误 → exit 3，fail-loud。
+        # 原实现继续执行，5 条 NoneType AttributeError 伪装成 FAIL + exit 1，
+        # 且假终态写进了 trace.db（8.2 纪律：配置错误不得伪装成测试失败）。
+        store.end_run(run_id, status="ABORTED", exit_code=3)
+        print("PREFLIGHT ERROR: 真机组件未装配（Task 2.7 接线）——"
+              "当前请使用 --fake-driver")
+        print("run: exit 3")
+        return 3
 
-    # 3. 跑
-    results = []
-    for tc in cases:
-        results.append(pipeline.run_case(runner, lifecycle, tc,
-                                         run_id=run_id))
-    from runner.result import RunResult
-    run = RunResult(run_id=run_id, suite=args.suite)
-    for r in results:
-        run.add(r)
-    store.end_run(run_id, status=("PASS" if run.passed else "FAIL"),
-                  exit_code=run.exit_code)
+    pipeline.store = store
+    pipeline.deps = PipelineDeps(env=None)  # env 接线在 2.7（fake 桩无需）
+    pipeline._step_runner = runner
+    pipeline._lifecycle = Lifecycle(store=store)
+    pipeline._run_id = run_id
+
+    # 2. 跑（P3-5：统一走 run_all——H10 中止语义/未执行清单只在套件层可达）
+    run = pipeline.run_all(cases, run_id=run_id)
+
+    # 3. --no-llm 语义（R16-3）：Recovery 接线在 2.7；当前管线 LLM 调用
+    #    恒为 0，flag 断言这一点并让 report 如实渲染，防「参数存在=功能存在」
+    #    的假象在 2.7 接上 Recovery 后静默失效。
+    llm_calls = 0
 
     # 4. 产物
     if args.junit:
@@ -203,10 +220,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"junit: {args.junit}")
     if args.html:
         from report.html import write_run_report
-        write_run_report(run, args.html)
+        write_run_report(
+            run, args.html, llm_calls=llm_calls,
+            executed_steps=len(run.results),
+            wda_restarts=0)
         print(f"html: {args.html}")
 
-    for r in results:
+    for r in run.results:
         line = f"{r.testcase_id}: {r.status}"
         if r.failure_type:
             line += f" ({r.failure_type})"

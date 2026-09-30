@@ -349,3 +349,155 @@ steps:
     # screen active 的 wait 走 WaitEngine → WaitTimeout → FAIL/WAIT_TIMEOUT
     assert result.status == "FAIL"
     assert result.failure_type == "WAIT_TIMEOUT"
+
+
+# --- R16 修复回归 ---
+
+class _StubOKExecutor:
+    """find 返回可见单元素（wait/assert 引擎消费的单元素契约）。"""
+
+    def find(self, strategies):
+        return _StubOKElement()
+
+    def perform(self, action, element, value=None):
+        pass
+
+
+class _StubOKElement:
+    def is_displayed(self):
+        return True
+
+    def is_enabled(self):
+        return True
+
+    @property
+    def text(self):
+        return ""
+
+    def get_attribute(self, name):
+        return ""
+
+
+def test_r16_1_step_declaration_cannot_lower_metadata(tmp_path):
+    """R16-1（P1 安全级）：7.4「取更严格」。element metadata 声明
+    HIGH/NON_IDEMPOTENT 时，用例层一行 `risk: LOW`/`idempotency: IDEMPOTENT`
+    **压不掉**——两个声明源必须过 policy 纯函数取严（原 or 链实锤绕过）。"""
+    from executor.guard import EnvKind, Guard
+    from executor.policy import Idempotency, Risk
+    from runner.lifecycle import Lifecycle
+    from runner.runner import StepRunner
+    from tracer.storage import TraceStore
+
+    from cli.pipeline import PipelineDeps
+
+    class _HighRiskRepo:
+        """element metadata：HIGH / NON_IDEMPOTENT。"""
+
+        def resolve(self, ref, *, build):
+            from repository.loader import DataClass, LocatorStrategy
+            from repository.resolver import EffectiveElement
+            from testcase.schema import Idempotency, Risk
+            return EffectiveElement(
+                id=ref.id, screen="PayView", type="element",
+                strategies=(LocatorStrategy(
+                    type="accessibility_id", value=ref.id),),
+                risk=Risk.HIGH,
+                idempotency=Idempotency.NON_IDEMPOTENT,
+                data_class=DataClass.PUBLIC)
+
+    class _OkEx:
+        def find(self, strategies):
+            return object()
+
+        def perform(self, action, element, value=None):
+            pass
+
+    store = TraceStore(tmp_path / "trace.db")
+    store.start_run("run_r16_1")
+    pipe = SessionPipeline(suites_root=None, store=store,
+                           deps=PipelineDeps(repo=_HighRiskRepo()))
+    case = _load_case("""\
+schema_version: "0.2"
+id: pay_case
+name: pay
+steps:
+  - action: tap
+    target: PayView.pay_button
+    risk: 1
+    idempotency: IDEMPOTENT
+""")
+    runner = StepRunner(_OkEx(), _FakeDS(), Guard(EnvKind.SANDBOX))
+    result = pipe.run_case(runner, Lifecycle(store=store), case,
+                           run_id="run_r16_1")
+    assert result.status == "PASS"
+    row = store.conn.execute(
+        "SELECT effective_risk, effective_idempotency FROM steps"
+    ).fetchone()
+    # 取严：LOW 压不掉 HIGH；IDEMPOTENT 压不掉 NON_IDEMPOTENT
+    assert row[0] == "HIGH", f"risk 被用例声明压低：{row[0]}"
+    assert row[1] == "NON_IDEMPOTENT", f"idempotency 被用例声明放松：{row[1]}"
+
+
+def test_r16_2_no_fake_driver_exits_3_not_fail(tmp_path, capsys):
+    """R16-2（P1 fail-quiet）：真机组件未装配 → PreflightError exit 3，
+    不再伪装成 5 条 FAIL + exit 1，且不往 trace.db 写假 FAIL 终态。"""
+    suites = tmp_path / "suites"
+    suites.mkdir()
+    (suites / "a_001.yaml").write_text(VALID_TC, encoding="utf-8")
+    db = tmp_path / "trace.db"
+    code = main(["run", "--suite", "smoke",
+                 "--suites-root", str(suites),
+                 "--db", str(db)])  # 无 --fake-driver
+    out = capsys.readouterr().out
+    assert code == 3, f"未装配必须 exit 3，got {code}"
+    assert "未装配" in out
+    # trace.db 里不得出现假 FAIL 终态
+    if db.exists():
+        import sqlite3
+        conn = sqlite3.connect(db)
+        rows = conn.execute(
+            "SELECT status FROM testcase_runs").fetchall()
+        assert rows == [], f"fail-quiet 假用例结果入库：{rows}"
+
+
+def test_r16_3_run_id_unique_across_runs(tmp_path, capsys):
+    """R16-2/P3-3：同秒多次 run 不得撞 runs.run_id 主键（原 time.time()）。"""
+    import time as _t
+    suites = tmp_path / "suites"
+    suites.mkdir()
+    (suites / "a_001.yaml").write_text(VALID_TC, encoding="utf-8")
+    for _ in range(2):
+        code = main(["run", "--suite", "smoke",
+                     "--suites-root", str(suites),
+                     "--fake-driver", "--db", str(tmp_path / "trace.db")])
+        assert code == 0
+        _t.sleep(0.01)  # 同秒内连跑两次才构成碰撞场景
+
+
+def test_r16_p3_1_wait_step_lands_in_steps_table(tmp_path):
+    """P3-1：wait/assert 步骤也要落 steps 表（原实现只记 action 步）。"""
+    from executor.guard import EnvKind, Guard
+    from runner.lifecycle import Lifecycle
+    from runner.runner import StepRunner
+    from tracer.storage import TraceStore
+
+    store = TraceStore(tmp_path / "trace.db")
+    store.start_run("run_aux")
+    pipe = SessionPipeline(suites_root=None, store=store)
+    case = _load_case("""\
+schema_version: "0.2"
+id: aux_case
+name: aux
+steps:
+  - wait_for:
+      target: screen:HomeView
+      condition: active
+      timeout: 0.1
+""")
+    runner = StepRunner(_StubOKExecutor(), _FakeDS(), Guard(EnvKind.SANDBOX))
+    result = pipe.run_case(runner, Lifecycle(store=store), case,
+                           run_id="run_aux")
+    assert result.status == "PASS"
+    rows = [tuple(r) for r in store.conn.execute(
+        "SELECT step_type, status FROM steps").fetchall()]
+    assert ("wait_for", "SUCCESS") in rows, f"wait 步骤未落库：{rows}"
