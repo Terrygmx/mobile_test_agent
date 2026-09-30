@@ -145,4 +145,4 @@ R12-4 记入 **M4 漂移 build 验收口径**：
   （大小写/空格/连字符）但对真正未知的 device_type 改为抛 `UnsupportedResetError`
   ——此前静默归一为 REAL_DEVICE，`emulator` 这种值会被当「真机」继续跑。
 
-commit `dc9b64a` / tag `checkpoint-p1-task2.3-r13`；测试 197 → 214。
+commit `84dcad0` / tag `checkpoint-p1-task2.3-r13`；测试 197 → 214。
