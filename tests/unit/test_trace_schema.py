@@ -312,6 +312,36 @@ def test_aggregate_status_empty_is_none():
     assert aggregate_status([]) is None
 
 
+def test_aggregate_status_aborted_only():
+    """R14-5：只剩 ABORTED 时返回 ABORTED（不在优先级链，走 seen[0] 分支）。"""
+    assert aggregate_status(["ABORTED"]) == "ABORTED"
+
+
+def test_aggregate_status_skipped_only():
+    assert aggregate_status(["SKIPPED"]) == "SKIPPED"
+
+
+def test_aggregate_status_aborted_beats_skipped_regardless_of_order():
+    """ABORTED/SKIPPED 不在 8.1 优先级链里（该链只覆盖 PASS→ENV 六档）。
+    语义上 ABORTED（用例跑挂被中止）比 SKIPPED（没跑）更严重，因此两者
+    混合时固定返回 ABORTED，**不依赖输入顺序**。
+
+    实现当前是 `return seen[0]`（依赖顺序），所以这条测试在修复前会红——
+    这正是 R14-5 要求专项覆盖的原因：混合场景此前只在别的参数化里被顺带
+    覆盖，且顺序恰好一致，掩盖了「结果取决于输入顺序」的事实。
+    """
+    assert aggregate_status(["SKIPPED", "ABORTED"]) == "ABORTED"
+    assert aggregate_status(["ABORTED", "SKIPPED"]) == "ABORTED"
+
+
+def test_aggregate_status_aborted_does_not_beat_real_failures():
+    """优先级链上的终态必须压过 ABORTED/SKIPPED（它们只是兜底分支）。"""
+    assert aggregate_status(["ABORTED", "FAIL"]) == "FAIL"
+    assert aggregate_status(["SKIPPED", "PASS"]) == "PASS"
+    assert aggregate_status(["ABORTED", "ENVIRONMENT_FAILURE"]) == \
+        "ENVIRONMENT_FAILURE"
+
+
 def test_aggregate_status_unknown_status_raises():
     """fail-loud：未知状态不静默当 PASS（否则新状态漏统计还不报错）。"""
     from tracer.storage import TestcaseStatusError
@@ -438,6 +468,84 @@ def test_duration_ms_computed(tmp_path):
     d = store.conn.execute(
         "SELECT duration_ms FROM testcase_runs WHERE id=?", (sid,)).fetchone()[0]
     assert d is not None and d >= 0
+
+
+def test_duration_ms_has_no_timezone_offset(tmp_path):
+    """R14-1（P1，探针实锤）：`start_time` 是 UTC 字符串（`_now()` 用 gmtime），
+    解析却用 `time.mktime`（按本地时区）→ duration 多出时区偏移。
+
+    本机 UTC+8 实测：真实 sleep 1.2s，记录成 28,801,468ms（多 8 小时）。
+    Report 的每条用例耗时/总时长全部失真，后续慢用例分析直接废。
+
+    断言用容差而非精确值：真实 sleep 抖动；但**必须**排除小时级偏差。
+    """
+    import time
+    from tracer.storage import TraceStore
+    store = TraceStore(tmp_path / "t.db")
+    store.start_run("run1")
+    sid = store.start_testcase("run1", "login_001")
+    time.sleep(1.2)
+    store.end_testcase(sid, status="PASS")
+    d = store.conn.execute(
+        "SELECT duration_ms FROM testcase_runs WHERE id=?", (sid,)).fetchone()[0]
+    # 真实耗时 ~1.2s；容差 2s。旧实现在本机会给 ~28,800,000ms → 挂。
+    assert 0 <= d < 60_000, f"duration {d}ms 含时区偏移（本机 UTC+8 会多 8 小时）"
+
+
+def test_duration_ms_uses_utc_not_local_timezone():
+    """直接钉住解析口径：给定一个 UTC 字符串，duration 不能受 TZ 环境变量
+    影响。旧实现 time.mktime 受影响（本地 vs UTC 差 8h）。
+
+    注意要**冻结 now** 再跨 TZ 比较：`_duration_ms` 内部调 `time.time()`，
+    两次调用之间流逝的毫秒会让结果差 1~2ms，那不是时区偏移。旧实现在
+    本机会差 28,800,000ms 量级，1ms 级噪声不可能掩盖它。
+    """
+    import os
+    from unittest import mock
+    from tracer import storage
+
+    s = "2026-09-30T04:42:34Z"
+    frozen = 1_789_000_000.0  # 固定 now，两个 TZ 下完全可比
+
+    got = {}
+    for tz in ("UTC", "Asia/Shanghai"):
+        os.environ["TZ"] = tz
+        __import__("time").tzset()
+        with mock.patch.object(storage.time, "time", return_value=frozen):
+            got[tz] = storage._duration_ms(s)
+    os.environ.pop("TZ", None)
+    __import__("time").tzset()
+
+    assert got["UTC"] == got["Asia/Shanghai"], (
+        f"_duration_ms 受 TZ 影响: {got}（UTC 字符串必须用 timegm 解析）")
+    # 旧实现在 Asia/Shanghai 下会比 UTC 多 28,800,000ms
+    assert got["UTC"] < 60_000_000, f"duration 数量级不对: {got}"
+
+
+def test_attribution_can_be_set_explicitly_but_never_auto(tmp_path):
+    """R14-4：`failure_attribution` 此前无写入入口，列恒 UNTRIAGED。补参数
+    供人工 triage 写；仍不提供自动归因 API（8.2 硬约束）。"""
+    from tracer.storage import TraceStore
+    store = TraceStore(tmp_path / "t.db")
+    store.start_run("run1")
+    sid = store.start_testcase("run1", "login_001")
+    store.end_testcase(sid, status="FAIL",
+                       failure_type="ELEMENT_NOT_FOUND",
+                       failure_attribution="AUTOMATION_DEFECT")
+    row = store.conn.execute(
+        "SELECT failure_attribution FROM testcase_runs WHERE id=?",
+        (sid,)).fetchone()
+    assert row[0] == "AUTOMATION_DEFECT"
+    assert not hasattr(store, "attribute_failure")
+
+
+def test_invalid_attribution_rejected(tmp_path):
+    from tracer.storage import TraceStore
+    store = TraceStore(tmp_path / "t.db")
+    store.start_run("run1")
+    sid = store.start_testcase("run1", "tc")
+    with pytest.raises(ValueError):
+        store.end_testcase(sid, status="FAIL", failure_attribution="MY_GUESS")
 
 
 def test_recovery_records_experience_store_fields(tmp_path):

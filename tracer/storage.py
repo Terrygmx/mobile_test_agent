@@ -18,6 +18,7 @@ verify_stage*）还在读它们，M2 Gate 后才退役。现在删会打断那�
 
 from __future__ import annotations
 
+import calendar
 import json
 import sqlite3
 import time
@@ -71,11 +72,16 @@ INFRA_EVENT_TYPES = {
     "DEVICE_UNAVAILABLE",
 }
 
-# 8.1 终态优先级（高→低）
+# 8.1 终态优先级（高→低）。注意这条链只覆盖 8.1 明列的六档；
+# ABORTED / SKIPPED 不在其中（8.1 没给它们的相对顺序），单列一条兜底链。
 _STATUS_PRIORITY = [
     "ENVIRONMENT_FAILURE", "INFRA_FAILURE", "BLOCKED", "FAIL",
     "RECOVERED", "PASS",
 ]
+# R14-5：ABORTED（用例跑挂被中止）比 SKIPPED（没跑）严重。旧实现对这两个
+# 走 `return seen[0]`，结果取决于输入顺序——同一组状态换个顺序聚合出不同
+# 终态，Report 会自相矛盾。这里显式定序，不再依赖调用方传参顺序。
+_FALLBACK_PRIORITY = ["ABORTED", "SKIPPED"]
 
 
 class TestcaseStatusError(ValueError):
@@ -105,8 +111,11 @@ def aggregate_status(statuses) -> str | None:
     for candidate in _STATUS_PRIORITY:
         if candidate in seen:
             return candidate
-    # 只剩 ABORTED / SKIPPED（不在优先级链里）→ 取第一个非 PASS 的终态
-    return seen[0]
+    # 只剩 ABORTED / SKIPPED（不在 8.1 链里）→ 走显式兜底链（R14-5）
+    for candidate in _FALLBACK_PRIORITY:
+        if candidate in seen:
+            return candidate
+    raise TestcaseStatusError(f"no rankable status in: {seen!r}")
 
 
 def pass_rate(counts: dict) -> float:
@@ -400,11 +409,24 @@ class TraceStore:
 
     def end_testcase(self, tc_run_id: int, status: str,
                      failure_type: str | None = None,
+                     failure_attribution: str | None = None,
                      cleanup_status: str | None = None,
                      detail: dict | None = None,
-                     non_idempotent_dispatched: bool | None = None) -> None:
+                     non_idempotent_dispatched: bool | None = None) -> int | None:
+        """结束用例。`failure_attribution` 供**人工 triage** 或显式规则写入
+        （R14-4：此前无任何写入入口，列恒 UNTRIAGED，归因数据流是断的）。
+
+        刻意保持「只能显式传」而非提供 `attribute_failure(...)` 自动归因
+        ——8.2 明文：系统不得仅凭 ELEMENT_NOT_FOUND 判 APP_DEFECT。人工
+        triage 的 UI/CLI（`mta review`，Task 2.6）落地后再消费本参数。
+        """
         if status not in TESTCASE_STATUSES:
             raise ValueError(f"invalid testcase status: {status!r}")
+        if failure_attribution is not None and \
+                failure_attribution not in ATTRIBUTIONS:
+            raise ValueError(
+                f"invalid failure_attribution: {failure_attribution!r} "
+                f"(allowed: {sorted(ATTRIBUTIONS)})")
         sets = ["status=?", "end_time=?", "failure_type=?", "cleanup_status=?",
                 "detail_json=?", "duration_ms=?"]
         tc = self.conn.execute(
@@ -413,6 +435,9 @@ class TraceStore:
         duration = _duration_ms(tc["start_time"] if tc else None)
         vals = [status, _now(), failure_type, cleanup_status,
                 json.dumps(redact(detail)) if detail else None, duration]
+        if failure_attribution is not None:
+            sets.append("failure_attribution=?")
+            vals.append(failure_attribution)
         if non_idempotent_dispatched is not None:
             sets.append("non_idempotent_dispatched=?")
             vals.append(1 if non_idempotent_dispatched else 0)
@@ -539,11 +564,18 @@ class TraceStore:
 
 def _duration_ms(start_time: str | None) -> int | None:
     """started→now 的毫秒数。start_time 缺失 → None（不猜 0，0 会被当
-    「瞬间完成」的假数据）。"""
+    「瞬间完成」的假数据）。
+
+    R14-1（P1）：`_now()` 用 `gmtime` 写 **UTC** 字符串，解析必须用
+    `calendar.timegm`（按 UTC 解释）；旧实现用 `time.mktime`（按**本地**
+    时区解释），本机 UTC+8 下 duration 多出整 8 小时——探针实测真实 sleep
+    1.2s 记录成 28,801,468ms。Report 的每条耗时/总时长全失真。
+    写 UTC 就按 UTC 读，别混。
+    """
     if not start_time:
         return None
     try:
-        start = time.mktime(time.strptime(start_time, "%Y-%m-%dT%H:%M:%SZ"))
+        start = calendar.timegm(time.strptime(start_time, "%Y-%m-%dT%H:%M:%SZ"))
     except ValueError:
         return None
     return max(0, int((time.time() - start) * 1000))

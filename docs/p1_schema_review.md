@@ -146,3 +146,53 @@ R12-4 记入 **M4 漂移 build 验收口径**：
   ——此前静默归一为 REAL_DEVICE，`emulator` 这种值会被当「真机」继续跑。
 
 commit `84dcad0` / tag `checkpoint-p1-task2.3-r13`；测试 197 → 214。
+
+## 9. Task 2.4 Review（R14）记账 — 2026-09-30
+
+处置结果：
+
+- **R14-1（P1）`_duration_ms` 时区错位 —— 已修**（探针实锤，本机 UTC+8 下
+  真实 sleep 1.2s 记录成 28,801,468ms）。根因：`_now()` 用 `gmtime` 写 **UTC**
+  字符串，`_duration_ms` 却用 `time.mktime`（按**本地**时区）解析，整整差一个
+  时区偏移。修：`calendar.timegm`。Report（2.5/2.6）马上要消费 duration，
+  这个偏差会让每条用例耗时与总时长全部失真。
+  测试补两条：①端到端容差断言（`< 60_000ms`，旧实现 ~28.8M 必挂）；
+  ②跨 TZ 钉住解析口径——**冻结 `time.time()`** 再比 UTC vs Asia/Shanghai
+  （`_duration_ms` 内部调 time.time()，不冻结会差 1~2ms，那是流逝不是时区；
+  第一版测试就栽在这里）。修复后实测 1200ms → 1546ms。
+
+- **R14-2（P2）TraceStore 零消费 —— 记账到 Task 2.5**（第三次平行实现，§8 先例）。
+  实测确认：runner / 旧 Recorder / gate 脚本 / verify_p1_m1 全无 TraceStore
+  引用。plan 原文是「Modify recorder.py」，实现改成平行 TraceStore——方向可
+  （enum fail-loud、redact 前置、逐列具名比在旧 Recorder 上叠干净），但接线
+  顺延必须在 **2.5 验收清单显式列出**，否则就是 R11-4 / R13-2 之后第三个
+  「实现存在、链路不通」。
+
+- **R14-3（P2）R12-3/5「落地」表述过强 —— 账面已修正**。实际状态是
+  「`TraceStore.record_step` 的 detail 参数具备承载能力 + 单测自证」，
+  **端到端未通**：本 commit runner 零改动，旧链路 steps.error 仍是格式化
+  异常字符串。随 2.5 的 TraceStore 接线一并核销。
+  （这正是 R13-1 那条教训的同构形态：接口就绪被写成链路打通。）
+
+- **R14-4（P3）`failure_attribution` 无写入入口 —— 已修**。`end_testcase`
+  增加 `failure_attribution` 参数供人工 triage 写入，并加枚举校验（非法值
+  抛错）。**刻意不提供 `attribute_failure()` 自动归因 API**——8.2 明文：
+  系统不得仅凭 ELEMENT_NOT_FOUND 判 APP_DEFECT。`mta review` 的 triage
+  入口在 Task 2.6。
+
+- **R14-5（P3）ABORTED/SKIPPED 分支无专项测试 —— 已修，且暴露出真 bug**。
+  补专项用例后发现实现是 `return seen[0]`（**依赖输入顺序**）：同一组状态
+  换个顺序聚合出不同终态，Report 会自相矛盾。修法：显式 `_FALLBACK_PRIORITY
+  = [ABORTED, SKIPPED]`（ABORTED 跑挂被中止 > SKIPPED 没跑），不再依赖调用方
+  传参顺序；并补「优先级链上的终态必须压过这两个」的断言。
+  review 说「只在混合场景数据里被顺带覆盖」判断准确——顺带覆盖时顺序恰好
+  一致，掩盖了顺序依赖。
+
+commit 见 R14 修复提交；tag `checkpoint-p1-task2.4-r14`。测试 299 → 307。
+
+**Task 2.5 验收清单（累积，务必逐条勾）**：
+1. TraceStore 接线，替换/包住旧 Recorder（**R14-2**）
+2. R12-3/5 端到端核销：runner 侧断言结构化结果真的走 detail_json 落库（**R14-3**）
+3. EnvironmentManager.cleanup 接线 + CleanupError → H10 ENVIRONMENT_FAILURE/
+   ABORT_SUITE 落 suite 层（**R13-2**）
+4. 退出码 8.4 全表：`3 > 2 > 4 > 1 > 5`
