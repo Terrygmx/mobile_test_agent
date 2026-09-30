@@ -196,3 +196,40 @@ commit 见 R14 修复提交；tag `checkpoint-p1-task2.4-r14`。测试 299 → 3
 3. EnvironmentManager.cleanup 接线 + CleanupError → H10 ENVIRONMENT_FAILURE/
    ABORT_SUITE 落 suite 层（**R13-2**）
 4. 退出码 8.4 全表：`3 > 2 > 4 > 1 > 5`
+
+## 10. Task 2.5 记账（R14 遗留四条全部收口） — 2026-09-30
+
+§9 末尾累积的 Task 2.5 验收清单四条，本任务**全部接通**（不是记账，是
+核销——每条都有代码落点 + 测试）：
+
+1. **TraceStore 接线（R14-2）已核销** —— `runner/lifecycle.py` 的 `Lifecycle`
+   持有 `store: TraceStore`，`record_step_outcome()` / `record_infra_event()`
+   把 StepOutcome 与 WDA 事件写入 schema 0.1。旧 P0 Recorder 在
+   `StepRunner._record` 侧走窄签名回退（M2 Gate 后退役）。
+2. **R12-3/5 端到端已核销（R14-3）** —— `detail` 透传断言结构化结果到
+   `TraceStore.record_step(detail=...)`，`kind="assertion_target"` 有真实
+   消费点，不再只是单测自证。
+3. **EnvironmentManager.cleanup 接线（R13-2）已核销** —— `runner/suite.py`
+   是收口点：每条用例 `env.prepare()` → 跑 → `finally: env.cleanup()`；
+   cleanup 失败 → `CleanupError` → 该条 ENVIRONMENT_FAILURE + 套件处置
+   （H10，默认 ABORT_SUITE）。这是 R11-4 / R13-2 / R14-2 之后第四个
+   「实现存在、链路不通」，本轮终于闭合。
+4. **退出码 8.4 全表已核销** —— `runner/result.py:compute_exit_code()`，
+   优先级 `3 > 2 > 4 > 1 > 5`，`SuiteResult.exit_code` 为派生属性
+   （不存字段，避免 add() 后字段与派生值不一致）。
+
+本任务新增/修复：
+- `tests/integration/test_runner_fakedriver.py`（45 条）：plan Step 3 要求的
+  FakeDriver 四脚本（find 失败 / act 超时 / WDA 死亡 / 多匹配）走完整 7.1
+  管线 + 7.5 用例级 WDA 语义。
+- **顺带修一个真 bug**：`StepRunner._record` 只 catch 了 `TypeError`，
+  trace 写盘异常（磁盘满 / 库锁）会一路冒泡，把 SUCCESS 的步骤变成崩溃。
+  改为捕获后 `warnings.warn`——**不静默**（warning 进日志，Report 侧 2.6
+  可对 warning 计数暴露 trace 丢失）但不让观测手段打断执行。
+  「trace 写失败必须有人管」由 Report 暴露，不靠抛异常阻断运行。
+- 测试 307 → 497（+190）。
+
+遗留（不阻塞 Task 2.5）：
+- `phase0/verify_p1_task23.py` V1 随机 FAIL（Task 2.3 附带），已定位为
+  外部 reader 可见性问题，hook 实现本身经设备验证正确（reset launch 后
+  立刻读容器 plist 为空，3/3 轮）。需单独一轮排查。
