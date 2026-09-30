@@ -66,8 +66,10 @@ def scan_files(files: list[str | Path]) -> dict:
     if not files:
         raise ScanError("scan_files: no input files")
     paths = [str(f) for f in files]
-    swift = [p for p in paths if not p.endswith((".m", ".h"))]
+    swift = [p for p in paths if not p.endswith(
+        (".m", ".h", ".xib", ".storyboard"))]
     objc = [p for p in paths if p.endswith((".m", ".h"))]
+    ib = [p for p in paths if p.endswith((".xib", ".storyboard"))]
 
     out: dict = {"screens": [], "screen_elements": []}
     if swift:
@@ -100,6 +102,28 @@ def scan_files(files: list[str | Path]) -> dict:
         out["screens"] = sorted(
             set(out.get("screens", []))
             | {s["name"] for s in objc_out.get("screen_elements", [])})
+    if ib:
+        # XIB/Storyboard 走 XML 解析（12.1）——element 归属 IB ViewController
+        # customClass；转成与 Swift 侧同 schema 的 screen_elements 条目。
+        from source.storyboard import scan_ib_files
+
+        ib_elements = scan_ib_files(ib)
+        by_container: dict[str, list[dict]] = {}
+        for e in ib_elements:
+            key = e.container_type or "UNKNOWN"
+            by_container.setdefault(key, []).append({
+                "id": e.id,
+                "type": e.element_type,
+                "accessibility_id": e.accessibility_id,
+                "resolution_type": e.resolution_type,
+                "container_type": e.container_type,
+                "label": e.label,
+                "source": {"file": e.source_file, "line": e.line},
+            })
+        for name, els in by_container.items():
+            out.setdefault("screen_elements", []).append(
+                {"name": name, "elements": els})
+            out.setdefault("screens", []).append(name)
     return out
 
 
