@@ -42,6 +42,12 @@ class GuardContext:
     screen_id: str
     element_id: str
     action: str
+    # 14.4 的 `data_class ∈ {SENSITIVE, SECRET}` 脱敏判据。**当前 Guard 不消费**
+    # （10.1 的三条规则只用 risk/screen/element/action）——review P3-7 指出
+    # 它是死字段。保留而非删除：它是被 resolver 确定性填充的既有数据，
+    # 且 10.4 的「SENSITIVE 元素值一律遮蔽」将来要在 Guard 侧兜底时无需
+    # 再改 RunStepContext 的形状。docstring 明写「当前不使用」，不留
+    # 「已在生效」的假象。
     data_class: str = "NORMAL"
 
 

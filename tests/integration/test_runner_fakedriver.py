@@ -87,9 +87,9 @@ class FakeDeviceSession:
             raise InfraError("WDA dead")
 
 
-def _runner(ex, ds=None, guard=None, rec=None) -> StepRunner:
+def _runner(ex, ds=None, guard=None, rec=None, **kw) -> StepRunner:
     return StepRunner(ex, ds or FakeDeviceSession(),
-                      guard or Guard(EnvKind.SANDBOX), recorder=rec)
+                      guard or Guard(EnvKind.SANDBOX), recorder=rec, **kw)
 
 
 def _ctx(**kw) -> RunStepContext:
@@ -357,15 +357,17 @@ def test_guard_runs_before_device_touch():
 
 
 def test_guard_blocked_is_pre_dispatch_semantics():
-    """SECURITY_BLOCKED 语义上等于「没发出」→ 按 PRE_DISPATCH 处理重试决策
-    （但它本身是终态，实际不会再重试）。"""
+    """SECURITY_BLOCKED 的 phase 是 None（不是失败阶段），但**重试决策不允许**
+    ——R15 P3-5：guard 判定是确定性的，重试必然再拦，「允许重试」语义不通。"""
     from executor.guard import GuardViolation
     guard = Guard(EnvKind.PRODUCTION, allow_production=False)
     out = _runner(FakeExecutor(), guard=guard).run_step(
         _ctx(risk=Risk.CRITICAL))
     assert out.failure_type == "SECURITY_BLOCKED"
     assert out.phase is None
-    assert out.retry_decision.reason.startswith("PRE_DISPATCH")
+    assert out.retry_decision.allowed is False, \
+        "被安全闸拦的步骤不得标成「可重试」"
+    assert "SECURITY_BLOCKED" in out.retry_decision.reason
 
 
 def test_pipeline_order_is_guard_ensure_find_perform():
@@ -475,12 +477,17 @@ def test_record_failure_does_not_break_step_result():
 
 
 def test_broken_p0_recorder_also_only_warns():
-    """回退路径（P0 Recorder）自身抛错时同样不得打断执行。"""
+    """窄签名（P0 形态）recorder 自身抛错时同样不得打断执行。
+
+    R15-1 修掉「回退路径」后，两条路径合并成一条 warn，措辞统一为
+    `trace write failed`。这里保留本测试是为了钉住「窄签名 recorder
+    也走同一条保护」——不再依赖回退路径存在。"""
     class _BrokenOldRecorder:
-        def record_step(self, step_index, action_type, status="SUCCESS",
+        def record_step(self, run_id, step_index, action_type, status="SUCCESS",
                         error=None, latency_ms=0):
             raise RuntimeError("db locked")
 
-    with pytest.warns(RuntimeWarning, match="P0 fallback"):
-        out = _runner(FakeExecutor(), rec=_BrokenOldRecorder()).run_step(_ctx())
+    with pytest.warns(RuntimeWarning, match="trace write failed"):
+        out = _runner(FakeExecutor(), rec=_BrokenOldRecorder(),
+                      run_id="r1").run_step(_ctx())
     assert out.ok

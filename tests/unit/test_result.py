@@ -125,8 +125,28 @@ def test_summary_empty_run_is_zero_rates():
 
 
 def test_summary_aggregates_attempt_counts():
+    """R15 P3-8：`llm_calls` 是**LLM 实际调用次数**，与 attempts 无关。
+
+    原实现 `llm_calls=llm_calls or attempts` 把它当成 attempts 的别名，
+    这条测试正是固化那个危险默认——没传 llm_calls 时把用例尝试数当成
+    LLM 调用数，Report 的 `LLM Invocation Rate` 直接虚高。现在两者解耦，
+    attempts 落到 `total_attempts`。
+    """
     s = summarize_statuses(["PASS", "FAIL"], attempts=2)
-    assert s.llm_calls == 2, "llm_calls 走 attempts 汇总（P1 由 suite 累加）"
+    assert s.total_attempts == 2
+    assert s.llm_calls == 0, "没传 llm_calls 就是 0，不许用 attempts 顶替"
+
+
+def test_summary_llm_calls_explicit_wins():
+    s = summarize_statuses(["PASS"], attempts=5, llm_calls=3)
+    assert s.llm_calls == 3, "显式传入的调用数优先"
+    assert s.total_attempts == 5
+
+
+def test_summary_no_llm_path_reports_zero():
+    """--no-llm / P0 链路：0 是**真实值**不是缺失，不能用 attempts 顶替。"""
+    s = summarize_statuses(["PASS", "PASS", "PASS"])
+    assert s.llm_calls == 0
 
 
 # --- 8.5 JUnit 映射 ---

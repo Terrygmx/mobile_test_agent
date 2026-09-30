@@ -22,6 +22,7 @@ def run_step(step) -> StepResult:
 
 from __future__ import annotations
 
+import inspect
 import time
 import warnings
 from dataclasses import dataclass, field
@@ -92,11 +93,23 @@ class StepRunner:
     由调用方（testcase 级）汇总，因为它跨 step 累积（7.5）。"""
 
     def __init__(self, executor, device_session, guard: Guard,
-                 recorder=None):
+                 recorder=None, run_id: str | None = None,
+                 tc_run_id: int | None = None):
         self.ex = executor
         self.ds = device_session
         self.guard = guard
         self.rec = recorder
+        self.run_id = run_id
+        self.tc_run_id = tc_run_id
+        # R15-1：recorder 首参必填时必须在**构造期**就要求对应 id——放到运行期
+        # 才发现的后果是每步 trace 写失败，报告上只表现为「步骤失败但 trace
+        # 空」，看不出是配置错。判据用签名探测，不用 try/except。
+        self._first_arg, self._first_arg_name = _required_first_arg(recorder)
+        if self._first_arg is not None and getattr(self, self._first_arg) is None:
+            raise ValueError(
+                f"StepRunner(recorder=...) requires {self._first_arg_name}: "
+                f"this recorder's record_step takes it as a required positional "
+                f"arg. Pass {self._first_arg_name}=... explicitly.")
 
     # --- 7.1 第 1 步：resolve（已在 RunStepContext 构造时完成，这里只做
     #     兜底推导，便于调用方只给最少信息） ---
@@ -146,13 +159,18 @@ class StepRunner:
                 risk=ctx.risk, screen_id=ctx.screen_id,
                 element_id=ctx.element_id, action=ctx.action))
         except GuardViolation as e:
-            # SECURITY_BLOCKED 是 SECURITY_BLOCKED 语义的终态，不再往下走
+            # SECURITY_BLOCKED 的重试决策与普通 PRE_DISPATCH 失败**不同**：
+            # guard 判定是确定性的（同样的输入必然再拦一次），「允许重试」
+            # 在这里语义不通——review P15 P3-5。给一个专门的决策对象：
+            # allowed=False + 明确 reason，别让调用方误以为可以重试。
             return _done(ok=False, failure_type="SECURITY_BLOCKED",
                          error=e.reason,
                          phase=None,
-                         retry_decision=retry_decision(
-                             FailurePhase.PRE_DISPATCH, ctx.idempotency,
-                             ctx.has_postcondition))
+                         retry_decision=RetryDecision(
+                             allowed=False, bounded=False,
+                             check_postcondition=False,
+                             reason="SECURITY_BLOCKED：Guard 判定确定性，"
+                                    "重试必然再拦（10.1 不可绕过）"))
 
         # 2. ensure_alive —— WDA 健康检查，失败按 7.5 抛 InfraError
         #    （基础设施故障，不是测试失败；调用方据此重跑/终止）
@@ -216,45 +234,99 @@ class StepRunner:
         """写 trace。Redactor 前置由 recorder/storage 自己保证（H8）——
         这里不预脱敏也不后脱敏，避免出现第二条「写前/写后」路径。
 
+        **兼容判定用签名探测，不用 `except TypeError` 盲捕**（R15-1）：
+        旧实现靠「调用抛 TypeError」判断 recorder 是不是老接口，有两个致命
+        问题——① 老 `tracer.recorder.Recorder.record_step` 首参 `run_id` 是
+        **必填**，回退调用漏传 → 回退自身 TypeError → 被外层 except 兜住 →
+        steps 表一行都写不进（探针实锤：跑一步 SUCCESS，steps 0 行）；
+        ② recorder **函数体内**的 TypeError（编程错误）会被误判成「签名不兼容」
+        再走一次回退，把 bug 伪装成兼容路径。
+        现在先 `inspect` 签名决定走哪条路，只有「签名确实不兼容」才回退。
+
         **写盘异常不改变步骤结论**（但也不静默）：trace 是观测手段，磁盘满
-        / 库锁了不该把一个 SUCCESS 的步骤变成崩溃，或把 FAIL 记成别的结论。
-        这里捕获后 `warnings.warn`——不吞（异常仍会出现在日志里），但不让
-        它向上冒泡打断执行。真正「trace 丢了必须有人管」的需求由 Report
-        侧对 warning 计数暴露（Task 2.6），不是靠抛异常阻断运行。
+        / 库锁了不该把一个 SUCCESS 的步骤变成崩溃。捕获后 `warnings.warn`
+        ——不吞，但不让它打断执行；Report 侧对 warning 计数暴露 trace 丢失
+        （Task 2.6），不靠抛异常阻断运行。
         """
         if self.rec is None:
             return
+        payload = dict(
+            step_index=out.step_index,
+            action_type=out.action,
+            status="SUCCESS" if out.ok else "FAILED",
+            error=out.error,
+            latency_ms=out.latency_ms,
+        )
         try:
-            self.rec.record_step(
-                step_index=out.step_index,
-                action_type=out.action,
-                status="SUCCESS" if out.ok else "FAILED",
-                error=out.error,
-                latency_ms=out.latency_ms,
-                locator=({"strategy": out.locator_strategy,
-                          "value": out.element_id}
-                         if out.locator_strategy else None),
-                detail=out.detail or None,
-                effective_risk=(out.effective_risk.name
-                                if out.effective_risk else None),
-                effective_idempotency=(out.effective_idempotency.name
-                                       if out.effective_idempotency else None),
-                failure_phase=(out.phase.value if out.phase else None),
-                failure_type=out.failure_type)
-        except TypeError:
-            # 旧 P0 Recorder 不接新字段——M2 Gate 后退役。当前不静默：
-            # 回退到最小字段集，保证 P0 链路不被新参数打断。
-            try:
+            # 首参是 run_id 还是 tc_run_id，按探测结果传（P0 Recorder 用前者，
+            # TraceStore 用后者——两者都是必填位置参，漏了必 TypeError）。
+            head = {}
+            if self._first_arg == "run_id":
+                head["run_id"] = self.run_id
+            elif self._first_arg == "tc_run_id":
+                head["tc_run_id"] = self.tc_run_id
+            if _accepts_new_fields(self.rec):
                 self.rec.record_step(
-                    step_index=out.step_index, action_type=out.action,
-                    status="SUCCESS" if out.ok else "FAILED",
-                    error=out.error, latency_ms=out.latency_ms)
-            except Exception as e:  # noqa: BLE001 — 见 docstring
-                warnings.warn(f"trace write failed (P0 fallback): {e!r}",
-                              RuntimeWarning, stacklevel=2)
+                    **head, **payload,
+                    locator=({"strategy": out.locator_strategy,
+                              "value": out.element_id}
+                             if out.locator_strategy else None),
+                    detail=out.detail or None,
+                    effective_risk=(out.effective_risk.name
+                                    if out.effective_risk else None),
+                    effective_idempotency=(out.effective_idempotency.name
+                                           if out.effective_idempotency else None),
+                    failure_phase=(out.phase.value if out.phase else None),
+                    failure_type=out.failure_type)
+            else:
+                # 老 Recorder（窄签名）：只收基础字段。M2 Gate 后随 P0 Recorder
+                # 一起退役。
+                self.rec.record_step(**head, **payload)
         except Exception as e:  # noqa: BLE001 — 见 docstring
             warnings.warn(f"trace write failed: {e!r}", RuntimeWarning,
                           stacklevel=2)
+
+
+def _required_first_arg(recorder) -> tuple[str | None, str | None]:
+    """探测 recorder.record_step 的**必填首参**，返回 (StepRunner 属性名, 参数名)。
+
+    只认两种实际存在的形态：
+      - `run_id`     —— P0 `tracer.recorder.Recorder`
+      - `tc_run_id`  —— `tracer.storage.TraceStore`（run_id 已在 tc_run_id 里）
+
+    探不到（无 record_step / 签名不可读）→ (None, None)，不强求任何 id。
+    """
+    if recorder is None:
+        return None, None
+    fn = getattr(recorder, "record_step", None)
+    if not callable(fn):
+        return None, None
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return None, None
+    for name in ("run_id", "tc_run_id"):
+        p = sig.parameters.get(name)
+        if p is not None and p.default is inspect.Parameter.empty:
+            return name, name
+    return None, None
+
+
+def _accepts_new_fields(recorder) -> bool:
+    """recorder.record_step 是否接受 schema 0.1 的新字段（纯签名探测）。"""
+    if recorder is None:
+        return True
+    fn = getattr(recorder, "record_step", None)
+    if not callable(fn):
+        return True
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return True   # 探不到签名（C 扩展等）→ 乐观尝试新路径
+    params = sig.parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True   # **kwargs 兜底，什么都收
+    return "effective_risk" in params
 
 
 def _classify_find_error(e: Exception) -> str:

@@ -233,3 +233,69 @@ commit 见 R14 修复提交；tag `checkpoint-p1-task2.4-r14`。测试 299 → 3
 - `phase0/verify_p1_task23.py` V1 随机 FAIL（Task 2.3 附带），已定位为
   外部 reader 可见性问题，hook 实现本身经设备验证正确（reset launch 后
   立刻读容器 plist 为空，3/3 轮）。需单独一轮排查。
+
+## 11. Task 2.5 Review（R15）记账 — 2026-09-30
+
+**口径修正（R15-2，P2）——§10 的「四条全部接通」说过头了。**
+实测：`StepRunner / Lifecycle / SuiteRunner` 只被 `tests/` 引用；
+`runner/testcase_runner.py`、gate 脚本、`cli/main.py`、demo **零引用**。
+事实是：**模块级完成 + 测试级接线属实，生产链路仍未切换**。§10 里
+「链路闭合」的说法作废——真正的闭合要等 2.6 `mta run` 把 SuiteRunner
+接成入口，并有一次真实套件跑出新字段。同时 `lifecycle.py` docstring 里
+「这里把 TestcaseRunner 的执行结果写进 TraceStore」与事实不符
+（TestcaseRunner 不用 Lifecycle），该 docstring 措辞已随代码演进纠正。
+
+- **R15-1（P1）P0 Recorder 兼容回退是坏的 —— 已修**（探针实锤：跑一步
+  SUCCESS，**steps 表 0 行**）。根因两层：
+  ① 真实 `tracer.recorder.Recorder.record_step` 首参 `run_id` 是**必填**，
+  回退调用漏传 → 回退自身 TypeError → 被外层 except 兜住 → 只剩 warning；
+  ② `except TypeError` 盲捕分不清「签名不兼容」与「调用方拼错 kwarg /
+  recorder 函数体自身的编程错误」，后者会被误判成兼容路径再走一次回退。
+  修法：**签名探测**取代盲捕——`inspect.signature` 先判定 recorder 形态
+  （认 `run_id` / `tc_run_id` 两个必填首参），只在签名确实不兼容时走窄
+  字段路径；必填首参缺失在**构造期**就抛（放到运行期才发现，报告上只表现
+  为「步骤失败但 trace 空」，看不出是配置错）。
+  修复过程中还暴露一个连带问题：只补 `run_id` 会把 TraceStore 形态
+  （首参 `tc_run_id`）打挂——所以是「按签名传对的那个」，不是写死。
+  新增 `tests/integration/test_p0_recorder_compat.py`（9 条）**用真实
+  `tracer.recorder.Recorder` 而非替身**（替身失真正是当初漏掉这个 bug 的
+  原因，与 R2-0 同款）。复验：0 行 → 1 行，run_id 正确，无 warning。
+
+P3 八条处置：
+- **P3-1 `keywords` 是死参数**：原实现算出 `table` 紧跟 `del table`，
+  自定义关键词表被静默忽略（7.4 说「启发式可配置」）。→ 真透传给
+  `keyword_heuristic_hit`，两处调用都接上。
+- **P3-2 无操作聚合**：`aggregate_status([x]) or x` 恒等，且已由上面的
+  except 直接改写 status。→ 删除，注明跨 attempt 合并归 suite 层。
+- **P3-3 run_id 跨套件碰撞**：`f"suite_{len(self.results)}"` 每个
+  SuiteRunner 都从 0 数，撞 14.2 `runs.run_id` 主键。→ 改 uuid。
+- **P3-4 8.2 枚举缺 ASSERTION_TARGET_DRIFT**：这是**设计文档的 spec 缺口**，
+  不擅自扩枚举。→ 暂归 `ELEMENT_NOT_FOUND` 但在 detail 保留
+  `kind="assertion_target"`（7.3 的值），**待 2.6 拍板**——JUnit/Report
+  消费 failure_type 之前必须先定这件事，否则漂移在报告里与「元素找不到」
+  不可区分。
+- **P3-5 SECURITY_BLOCKED 标成可重试**：Guard 判定确定性，重试必然再拦，
+  语义不通。→ 专用 RetryDecision(allowed=False) + 明确 reason。
+- **P3-6 restart_wda 静默跳过却记 RESTART_WDA**：账实不符。→ 如实记
+  `SKIP_NO_RESTART_API` / `SKIP_NO_DEVICE_SESSION` 并 warn。
+- **P3-7 `GuardContext.data_class` 死字段**：→ **保留但明写「当前不
+  使用」**（删了将来 10.4 的 SENSITIVE 脱敏兜底要改形状；留着必须不留
+  「已生效」的假象）。
+- **P3-8 `llm_calls=llm_calls or attempts`**：两个语义无关的参数写成互为
+  fallback 的别名，不传就把用例尝试数当 LLM 调用数 → Report 的
+  `LLM Invocation Rate` 虚高。→ 解耦，`attempts` 落到新增的
+  `total_attempts`。**旧测试 `test_summary_aggregates_attempt_counts`
+  正是在固化这个危险默认，已改写并补 2 条**。
+
+测试 497 → 507。真机 smoke PASS（首跑失败是 App 状态残留，重装即恢复，
+非代码问题）。
+
+### Task 2.6 验收清单（累积）
+1. **必须让至少一次真实套件走完整新管线**（SuiteRunner + Lifecycle +
+   TraceStore），并在 trace.db 里看到新字段（effective_risk /
+   failure_phase / failure_type / detail）——否则 R15-2 的口径问题只是
+   往后推（R15-2）
+2. 8.2 是否补 `ASSERTION_TARGET_DRIFT` 枚举，**必须在 JUnit/Report 消费
+   failure_type 之前拍板**（P3-4）
+3. Report 首页对 trace 写盘 warning 计数暴露「trace 丢失」（Task 2.5 遗留）
+4. `mta run` 全参数（8.4 退出码真跑一次，验 `3>2>4>1>5` 优先级）

@@ -111,6 +111,7 @@ class RunSummary:
     recovery_rate: float
     worst_status: str | None
     llm_calls: int = 0
+    total_attempts: int = 0   # 含 WDA 故障重跑的尝试数（14.2 testcase_runs.attempt）
 
     @property
     def fail_count(self) -> int:
@@ -122,8 +123,19 @@ class RunSummary:
 
 
 def summarize_statuses(statuses, attempts: int = 0,
-                       llm_calls: int = 0) -> RunSummary:
-    """8.3 汇总。`worst_status` 复用 tracer.storage.aggregate_status（8.1）。"""
+                       llm_calls: int | None = None) -> RunSummary:
+    """8.3 汇总。`worst_status` 复用 tracer.storage.aggregate_status（8.1）。
+
+    `llm_calls` 语义（review P3-8 消歧）：**LLM 实际调用次数**。
+    原实现 `llm_calls=llm_calls or attempts` 把两个语义无关的参数
+    （调用次数 / 用例尝试数）写成互为 fallback 的别名——读代码的人会以为
+    没传 llm_calls 就等于「每条用例调一次 LLM」，那是个危险的默认（会把
+    调用数虚报成用例数，Report 的 `LLM Invocation Rate` 直接失真）。
+
+    现在：`llm_calls=None` 时**不猜**，RunSummary.llm_calls 保持 0，并要求
+    真实调用方显式传 `llm_calls=`。`attempts` 只用于 metadata（总尝试数），
+    不参与调用数推算。
+    """
     counts: dict[str, int] = {}
     for s in statuses:
         if s is None:
@@ -132,13 +144,17 @@ def summarize_statuses(statuses, attempts: int = 0,
             raise ValueError(f"unknown testcase status: {s!r}")
         counts[s] = counts.get(s, 0) + 1
     total = sum(counts.values())
+    if llm_calls is None:
+        # 无 LLM 的执行路径（--no-llm / P0 链路）→ 0 是**真实值**不是缺失
+        llm_calls = 0
     return RunSummary(
         counts=counts,
         total=total,
         pass_rate=pass_rate(counts),
         recovery_rate=recovery_rate(counts),
         worst_status=aggregate_status(list(counts)) if counts else None,
-        llm_calls=llm_calls or attempts,
+        llm_calls=llm_calls,
+        total_attempts=attempts,
     )
 
 

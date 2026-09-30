@@ -1,8 +1,13 @@
-"""lifecycle — 7.5 WDA 故障处理 + TraceStore 接线（R14-2 收口）。
+"""lifecycle — 7.5 WDA 故障处理 + TraceStore 写入（R14-2 收口）。
 
-**本模块是 R14-2 的核销点**：`TraceStore`（Task 2.4 建的 schema 0.1 写入层）
-此前零消费——runner / Recorder / gate 脚本全无引用（review R14-2 P2 记账到
-2.5）。这里把 TestcaseRunner 的执行结果写进 TraceStore。
+`TraceStore`（Task 2.4 建的 schema 0.1 写入层）此前零消费——runner /
+Recorder / gate 脚本全无引用（review R14-2 P2 记账到 2.5）。本模块由
+`SuiteRunner` 持有，把用例级执行结果写进 TraceStore。
+
+R15-2 更正：本模块**不**从 `TestcaseRunner` 取结果（旧 P0 runner 不用
+Lifecycle），也不被生产链路调用——目前只有 `tests/` 在用。真正的接线在
+Task 2.6（`mta run` 把 SuiteRunner 接成入口）。此处「接线」指模块间的
+依赖已建立且有测试覆盖，不等于生产链路已切换。
 
 7.5 WDA 语义：
   - 每个 action 前 ensure_alive；失败 → restart_wda → 复检；仍失败抛
@@ -19,6 +24,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 
 from executor.policy import Idempotency
@@ -138,13 +144,27 @@ class Lifecycle:
                 f"wda.max_restart_per_run="
                 f"{self.policy.max_restart_per_run} 已耗尽，终止 run（7.5）")
 
-        self._record_infra_event(testcase_id, "WDA_DEAD",
-                                 action_taken="RESTART_WDA",
-                                 step_index=self.dispatched_step_index)
-        if device_session is not None:
+        # 7.5 要求 restart → **复检**。复检由调用方重跑时的首轮
+        # ensure_alive 功能性覆盖；这里负责的是「restart 真的发生了」。
+        # review P15 P3-6：原实现用 getattr 探测 restart_wda，缺失时静默
+        # 跳过却仍记 action_taken=RESTART_WDA —— 账实不符，事后看 trace
+        # 会以为重启过了。缺失时如实记 SKIP_NO_RESTART_API 并 warn。
+        action_taken = "RESTART_WDA"
+        if device_session is None:
+            action_taken = "SKIP_NO_DEVICE_SESSION"
+        else:
             restart = getattr(device_session, "restart_wda", None)
-            if callable(restart):
+            if not callable(restart):
+                action_taken = "SKIP_NO_RESTART_API"
+                warnings.warn(
+                    f"{testcase_id}: device_session has no restart_wda(); "
+                    f"WDA was NOT restarted (recorded as {action_taken})",
+                    RuntimeWarning, stacklevel=2)
+            else:
                 restart()
+        self._record_infra_event(testcase_id, "WDA_DEAD",
+                                 action_taken=action_taken,
+                                 step_index=self.dispatched_step_index)
 
     # --- TraceStore 写入（R14-2） ---
 

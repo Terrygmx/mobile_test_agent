@@ -57,13 +57,19 @@ class RetryDecision:
     reason: str = ""
 
 
-def keyword_heuristic_hit(*texts: str | None) -> bool:
-    """任一文本（小写后）命中 RISK_KEYWORDS 子串即 True。"""
+def keyword_heuristic_hit(*texts: str | None, keywords=None) -> bool:
+    """任一文本（小写后）命中关键词子串即 True。
+
+    `keywords` 可覆盖默认表（7.4 说「启发式可配置」）——R15 P3-1 原实现
+    在调用方算出 `table` 之后 `del table`，自定义表被静默忽略，留下「可配置」
+    的假象。现在真正透传。
+    """
+    table = RISK_KEYWORDS if keywords is None else tuple(keywords)
     for text in texts:
         if not text:
             continue
         low = str(text).lower()
-        if any(kw in low for kw in RISK_KEYWORDS):
+        if any(kw in low for kw in table):
             return True
     return False
 
@@ -92,11 +98,10 @@ def effective_idempotency(step_decl, element_decl,
     if step is not None or element is not None:
         return max((d for d in (step, element) if d is not None),
                    key=lambda d: _IDEMPOTENCY_STRICTNESS[d.value])
-    # 2. 无任何声明 → 启发式
-    table = RISK_KEYWORDS if keywords is None else tuple(keywords)
-    if keyword_heuristic_hit(element_id, label, accessibility_id):
+    # 2. 无任何声明 → 启发式（自定义关键词表真正生效，R15 P3-1）
+    if keyword_heuristic_hit(element_id, label, accessibility_id,
+                             keywords=keywords):
         return Idempotency.NON_IDEMPOTENT
-    del table  # keyword_heuristic_hit 用模块级表；显式传参留给未来可配置化
     return Idempotency.IDEMPOTENT
 
 
@@ -117,7 +122,7 @@ def effective_risk(step=None, element=None, screen=None, env=None,
 
     bump = None
     if element is None and keyword_heuristic_hit(
-            element_id, label, accessibility_id):
+            element_id, label, accessibility_id, keywords=keywords):
         bump = Risk.HIGH
 
     candidates = [c for c in (_r(step), _r(element), _r(screen), _r(env), bump)

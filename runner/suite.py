@@ -14,6 +14,7 @@ CONTINUE。
 from __future__ import annotations
 
 import enum
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -85,8 +86,12 @@ class SuiteRunner:
                 result.status = "ENVIRONMENT_FAILURE"
                 result.failure_type = "CLEANUP_FAILED"
                 result.detail["cleanup_error"] = str(e)
-        # 8.1 终态聚合：曾 RECOVERED 但 cleanup 失败 → ENVIRONMENT_FAILURE
-        result.status = aggregate_status([result.status]) or result.status
+        # 8.1 终态聚合：`cleanup` 的失败已在上面的 except 里直接改写
+        # status（ENVIRONMENT_FAILURE），这里不再对单元素列表调
+        # aggregate_status —— 那是恒等操作（review P3-2：原实现
+        # `aggregate_status([result.status]) or result.status` 是无操作，
+        # 看起来像想合并前次 attempt 的状态而留下的残迹）。
+        # 跨 attempt 的终态合并交给 suite 层（那里有多个 result 可聚合）。
         self.results.append(result)
         return result
 
@@ -96,7 +101,11 @@ class SuiteRunner:
         中止时已跑的结果**保留**在 RunResult 里——报告需要看到「跑到哪
         因环境问题停了」，把已跑结果清掉等于伪造「没跑过」。
         """
-        run = RunResult(run_id=f"suite_{len(self.results)}")
+        # run_id 必须全局唯一（14.2 `runs.run_id` 是主键，撞了会覆盖历史）。
+        # review P3-3：原实现 `f"suite_{len(self.results)}"` 跨套件必撞
+        # （每个 SuiteRunner 都从 0 开始数）。用 uuid + 时间戳，形状与 P0
+        # Recorder 的 `start_run` 一致。
+        run = RunResult(run_id=f"suite_{uuid.uuid4().hex[:8]}")
         for tc in testcases:
             try:
                 result = self.run_testcase(tc)
@@ -136,6 +145,11 @@ def _classify(e: Exception) -> tuple[str, str | None]:
     if isinstance(e, AssertionValueMismatch):
         return "FAIL", "ASSERTION_VALUE_MISMATCH"
     if isinstance(e, AssertionTargetDrift):
+        # 8.2 的 failure_type 枚举里**没有** ASSERTION_TARGET_DRIFT（spec
+        # 缺口，review P3-4）——8.2 枚举是设计文档，不擅自扩。这里先归到
+        # 最接近的既有项，但**不丢信息**：调用方（2.6 JUnit/Report 消费
+        # failure_type 前）会从 detail["kind"] 读到 "assertion_target"，
+        # 7.3 明确该值。补枚举的事记在 p1_schema_review.md，待 2.6 拍板。
         return "FAIL", "ELEMENT_NOT_FOUND"
     if isinstance(e, WaitTimeout):
         return "FAIL", "WAIT_TIMEOUT"
