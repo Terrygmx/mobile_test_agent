@@ -90,3 +90,18 @@ metadata:
   risk: LOW
   idempotency: IDEMPOTENT
   data_class: PUBLIC
+---
+# Task 3.1 一致性 Gate 补齐：scanner 输出 literal home_list（List 容器 id），
+# 此前手写 overrides 漏登记。
+schema_version: "1.0"
+kind: element
+id: home_list
+screen: HomeView
+type: other
+strategies:
+  - {type: accessibility_id, value: home_list, origin: manual,
+     source_file: LoginDemoApp.swift, source_line: 72}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC

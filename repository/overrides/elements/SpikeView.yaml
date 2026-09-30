@@ -1,0 +1,125 @@
+# overrides/elements/SpikeView.yaml — P1-03 Spike 三场景元素定义
+# Task 3.1 一致性 Gate 补齐（与 screens/SpikeView.yaml 同批）。
+# source_line 对齐 ios_demo/LoginDemo/SpikeScreen.swift 的
+# accessibilityIdentifier 声明处。
+
+# --- 场景 1：TabView ---
+schema_version: "1.0"
+kind: element
+id: tab_inner_title
+screen: SpikeTabScreen
+type: text
+strategies:
+  - {type: accessibility_id, value: tab_inner_title, origin: manual,
+     source_file: SpikeScreen.swift, source_line: 18}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: tab_inner_button
+screen: SpikeTabScreen
+type: button
+strategies:
+  - {type: accessibility_id, value: tab_inner_button, origin: manual,
+     source_file: SpikeScreen.swift, source_line: 20}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+# --- 场景 2：NavigationStack push ---
+schema_version: "1.0"
+kind: element
+id: nav_root_title
+screen: SpikeNavRoot
+type: text
+strategies:
+  - {type: accessibility_id, value: nav_root_title, origin: manual,
+     source_file: SpikeScreen.swift, source_line: 35}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: nav_detail_text
+screen: SpikeNavDetail
+type: text
+strategies:
+  - {type: accessibility_id, value: nav_detail_text, origin: manual,
+     source_file: SpikeScreen.swift, source_line: 47}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+# --- 场景 3：Sheet ---
+schema_version: "1.0"
+kind: element
+id: sheet_open_button
+screen: SpikeSheetHost
+type: button
+strategies:
+  - {type: accessibility_id, value: sheet_open_button, origin: manual,
+     source_file: SpikeScreen.swift, source_line: 61}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: spike_tab_tab
+screen: SpikeScreenRoot
+type: other
+strategies:
+  - {type: accessibility_id, value: spike_tab_tab, origin: manual,
+     source_file: SpikeScreen.swift, source_line: 81}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: spike_tab_nav
+screen: SpikeScreenRoot
+type: other
+strategies:
+  - {type: accessibility_id, value: spike_tab_nav, origin: manual,
+     source_file: SpikeScreen.swift, source_line: 84}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: spike_tab_sheet
+screen: SpikeScreenRoot
+type: other
+strategies:
+  - {type: accessibility_id, value: spike_tab_sheet, origin: manual,
+     source_file: SpikeScreen.swift, source_line: 87}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+# scanner container 归属：SpikeSheet struct（sheet 内容根）
+schema_version: "1.0"
+kind: element
+id: sheet_inner_text
+screen: SpikeSheetHost
+type: text
+strategies:
+  - {type: accessibility_id, value: sheet_inner_text, origin: manual,
+     source_file: SpikeScreen.swift, source_line: 69}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC

@@ -69,11 +69,29 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--fake-driver", action="store_true",
                        help="不连真机，组件注入最小桩（开发/CI 冒烟）")
 
+    # --- mta repo（M3：Repository 管理；generate 为 P1-09 第一子命令）---
+    repo_p = sub.add_parser("repo", help="Repository 管理子命令（M3）")
+    repo_sub = repo_p.add_subparsers(dest="repo_command")
+    gen_p = repo_sub.add_parser(
+        "generate",
+        help="扫描源码 → repository/generated/<build>/source_metadata.json"
+             "（12.3/12.4；H16：generated 不手改，只能本命令重新生成）")
+    gen_p.add_argument("sources", nargs="+", metavar="FILE",
+                       help="源文件/目录（.swift/.m/.h；目录递归 rglob）")
+    gen_p.add_argument("--out", metavar="DIR",
+                       default="repository/generated",
+                       help="generated 根目录（默认 repository/generated）")
+    gen_p.add_argument("--build", metavar="ID", default="local",
+                       help="build 标识（落 generated/<build>/，默认 local）")
+    gen_p.add_argument("--app-version", metavar="V", default="debug")
+    gen_p.add_argument("--check", action="store_true",
+                       help="生成后立即跑一致性 Gate（overrides vs generated，"
+                            "12.6）；缺口非空 → exit 3")
+
     # --- 占位子命令（后续任务填充） ---
     for name, help_text in (
         ("review", "人工确认 RECOVERED（M2）"),
         ("report", "生成 HTML/JUnit 报告（M2）"),
-        ("repo", "Repository 管理子命令（M3）"),
     ):
         sub.add_parser(name, help=help_text)
 
@@ -255,18 +273,66 @@ def cmd_run(args: argparse.Namespace) -> int:
     return run.exit_code
 
 
+def cmd_repo(args: argparse.Namespace) -> int:
+    """mta repo（M3）。`generate`：源码扫描 → 12.3 metadata（P1-09）。
+
+    一致性 Gate（--check，12.6/plan Task 3.1 第 5 步）失败语义：缺口是
+    **前置配置问题** → exit 3（与 lint ERROR 同档），不是 exit 1——生成成
+    功但与人工 overrides 有 diff 要人来看，CI 不能当「工具坏了」。
+    """
+    if getattr(args, "repo_command", None) != "generate":
+        print("usage: mta repo generate <FILE...> [--out DIR] [--build ID] "
+              "[--check]")
+        return 3
+    from source.consistency import check, format_report
+    from source.metadata import ScanError, build_metadata
+
+    # 目录参数递归展开（rglob 全部 .swift/.m/.h），排序保证确定性输出
+    files: list[Path | str] = []
+    for src in args.sources:
+        p = Path(src)
+        if p.is_dir():
+            files.extend(sorted(
+                f for ext in ("*.swift", "*.m", "*.h")
+                for f in p.rglob(ext)))
+        else:
+            files.append(p)
+    if not files:
+        print(f"repo generate: no source files matched: {args.sources}")
+        return 3
+
+    out = Path(args.out) / args.build / "source_metadata.json"
+    try:
+        meta = build_metadata(files, out, app_version=args.app_version,
+                              build=args.build)
+    except ScanError as e:
+        print(f"repo generate FAILED: {e}")
+        return 3
+    print(f"generated: {out} "
+          f"({len(meta['screen_elements'])} screens, "
+          f"{sum(len(s['elements']) for s in meta['screen_elements'])} elements)")
+
+    if args.check:
+        report = check(meta, "repository/overrides")
+        print(format_report(report))
+        return 0 if report.ok else 3
+    return 0
+
+
 def cmd_placeholder(args: argparse.Namespace) -> int:
     print(f"mta {args.command}: not implemented yet (planned for a later task)")
     return 2
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "lint":
         return cmd_lint(args)
     if args.command == "run":
         return cmd_run(args)
+    if args.command == "repo":
+        return cmd_repo(args)
     return cmd_placeholder(args)
 
 

@@ -144,20 +144,27 @@ public final class SwiftUIVisitor: SyntaxVisitor {
         switch arg.as(StringLiteralExprSyntax.self) {
         case .some(let literal):
             guard let value = literal.representedLiteralValue else {
-                // 空字面量 / 仅插值：插值不是「唯一命名常量」→ dynamic
-                append(resolution: .dynamic, id: nil, type: hostType,
-                       label: hostLabel, source: source)
+                // 纯插值/含插值的字面量：12.2 dynamic。id 用**静态前缀** +
+                // 位置（如 "cell_*:138"）——下游一致性 Gate 靠前缀与人工
+                // overrides（cell_alpha/cell_beta）匹配，而不只是 UNKNOWN:line
+                // （那种占位无法与人工登记对应，Gate 会误报 REMOVED）。
+                append(resolution: .dynamic,
+                       id: interpolatedIdPrefix(literal)
+                           ?? "UNKNOWN:\(source.file):\(source.line)",
+                       type: hostType, label: hostLabel, source: source,
+                       accessibilityId: nil)
                 return
             }
             append(resolution: .literal, id: value, type: hostType,
-                   label: hostLabel, source: source)
+                   label: hostLabel, source: source, accessibilityId: value)
         case .none:
             // 非字面量：查常量表（12.2 constant 档）。member access 形态
             // `Foo.bar` / 裸标识符 `bar` 都可查——表内键收集时已去歧义。
             let (resolution, resolved) = resolveConstant(from: arg)
             if resolution == .constant, let resolved {
                 append(resolution: .constant, id: resolved, type: hostType,
-                       label: hostLabel, source: source)
+                       label: hostLabel, source: source,
+                       accessibilityId: resolved)
             } else {
                 // 引用在但不可静态求值 → dynamic；完全认不出 → unknown（不猜）。
                 // id=nil：accessibility_id 只在**解析出真实值**时非空；
@@ -244,11 +251,15 @@ public final class SwiftUIVisitor: SyntaxVisitor {
         return (.unknown, nil)
     }
     private func append(resolution: ResolutionType, id: String?,
-                        type: String, label: String?, source: SourceLocation) {
+                        type: String, label: String?, source: SourceLocation,
+                        accessibilityId: String? = nil) {
         elements.append(ScannedElement(
             id: id ?? "UNKNOWN:\(source.file):\(source.line)",
             type: type,
-            accessibilityId: id,
+            // accessibilityId 独立于 id：dynamic 的 id 可以是插值前缀
+            // （"cell_"，Gate 前缀匹配用），但 accessibility_id 必须为 nil
+            // （12.2：解析不出唯一值的元素没有 accessibility id）。
+            accessibilityId: accessibilityId,
             resolutionType: resolution,
             containerType: containerStack.last,
             label: label,
@@ -272,6 +283,21 @@ public final class SwiftUIVisitor: SyntaxVisitor {
             names.append(name)
         }
         return ScanResult(screens: names, screenElements: screens)
+    }
+
+    /// 插值字面量的静态前缀（`"cell_\(item.key)"` → "cell_"）。只取第一段
+    /// 插值前的纯文本；无前置文本 → nil（回退 UNKNOWN:file:line）。
+    private func interpolatedIdPrefix(_ literal: StringLiteralExprSyntax) -> String? {
+        // StringLiteralSegmentListSyntax 本身就是段序列（无 .segments 成员）
+        for seg in literal.segments {
+            if let s = seg.as(StringSegmentSyntax.self) {
+                if !s.content.text.isEmpty { return s.content.text }
+                continue
+            }
+            // 遇到第一个插值段就停（只取它前面的静态文本）
+            break
+        }
+        return nil
     }
 }
 

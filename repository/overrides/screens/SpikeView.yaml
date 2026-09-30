@@ -1,0 +1,51 @@
+# overrides/screens/SpikeView.yaml — P1-03 Spike 三场景 Screen 定义
+# Task 3.1 一致性 Gate 补齐：scanner 从 SpikeScreen.swift 解析出 5 个
+# mtaScreen marker + 7 元素（此前手写 overrides 未覆盖 P1-03 产物）。
+schema_version: "1.0"
+kind: screen
+id: SpikeTab
+marker: screen.SpikeTab
+kind_hint: page
+metadata:
+  risk: LOW
+---
+schema_version: "1.0"
+kind: screen
+id: SpikeNavRoot
+marker: screen.SpikeNavRoot
+kind_hint: page
+metadata:
+  risk: LOW
+---
+schema_version: "1.0"
+kind: screen
+id: SpikeNavDetail
+marker: screen.SpikeNavDetail
+kind_hint: page
+metadata:
+  risk: LOW
+---
+schema_version: "1.0"
+kind: screen
+id: SpikeSheetHost
+marker: screen.SpikeSheetHost
+kind_hint: page
+metadata:
+  risk: LOW
+---
+schema_version: "1.0"
+kind: screen
+id: SpikeSheet
+marker: screen.SpikeSheet
+kind_hint: modal
+metadata:
+  risk: LOW
+---
+# SpikeTabScreen/SpikeNavDetail 等容器 struct 名（scanner container_type）
+schema_version: "1.0"
+kind: screen
+id: SpikeScreenRoot
+marker: screen.SpikeScreenRoot
+kind_hint: page
+metadata:
+  risk: LOW
