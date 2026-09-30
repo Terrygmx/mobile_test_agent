@@ -27,7 +27,7 @@ import time
 import warnings
 from dataclasses import dataclass, field
 
-from executor.executor import AmbiguousElement
+from executor.executor import AmbiguousElement, ElementNotFound
 from executor.guard import Guard, GuardViolation
 from executor.policy import (
     FailurePhase,
@@ -178,7 +178,7 @@ class StepRunner:
 
         # 3. find —— PRE_DISPATCH：任何失败都说明动作从未发出
         try:
-            elements = self.ex.find(ctx.strategies)
+            found = self.ex.find(ctx.strategies)
         except InfraError:
             raise  # 设备层故障向上冒，不归测试失败
         except Exception as e:
@@ -188,6 +188,11 @@ class StepRunner:
                          retry_decision=retry_decision(
                              FailurePhase.PRE_DISPATCH, ctx.idempotency,
                              ctx.has_postcondition))
+
+        # 2.6 e2e 实锤的契约归一：生产 Executor.find 返回单个元素（歧义抛
+        # AmbiguousElement），测试替身/部分驱动返回列表。统一成列表后走
+        # 同一套 H3 歧义判定，两种契约都兼容。
+        elements = list(found) if isinstance(found, (list, tuple)) else [found]
 
         if not elements:
             return _done(ok=False, phase=FailurePhase.PRE_DISPATCH,
@@ -331,9 +336,16 @@ def _accepts_new_fields(recorder) -> bool:
 
 def _classify_find_error(e: Exception) -> str:
     """find 阶段异常 → failure_type。fail-loud：认不出来的抛出去而非归
-    ELEMENT_NOT_FOUND（那会把编程错误伪装成测试失败）。"""
+    ELEMENT_NOT_FOUND（那会把编程错误伪装成测试失败）。
+
+    Task 2.6：ElementNotFound 从 StepRunner 的 find 契约里显式映射——
+    pipeline 注入的 locator 引擎抛它时，failure_type 必须是 8.2 枚举值
+    （原归 `FIND_ERROR:ElementNotFound`，CI 无法按症状聚合）。
+    """
     if isinstance(e, AmbiguousElement):
         return "AMBIGUOUS_ELEMENT"
+    if isinstance(e, ElementNotFound):
+        return "ELEMENT_NOT_FOUND"
     if isinstance(e, ValueError):
         return "ELEMENT_NOT_FOUND"
     return f"FIND_ERROR:{type(e).__name__}"

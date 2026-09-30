@@ -88,7 +88,11 @@ _JUNIT_MAP = {
 
 def junit_status_for(status: str, failure_type: str | None = None
                      ) -> JUnitStatus:
-    """8.5 JUnit 映射。RECOVERED 必带 message（H5：需人工确认）。"""
+    """8.5 JUnit 映射。RECOVERED 必带 message（H5：需人工确认）。
+
+    Task 2.6：`type` 一律带 failure_type——CI 面上 `<failure type=...>`
+    是最廉价的症状入口，只给 RECOVERED 配 type 会让普通 FAIL 丢症状。
+    """
     if status not in _JUNIT_MAP:
         raise ValueError(f"unknown testcase status: {status!r}")
     jstatus, jtype = _JUNIT_MAP[status]
@@ -98,6 +102,8 @@ def junit_status_for(status: str, failure_type: str | None = None
                    + (f"（failure_type={failure_type}）" if failure_type else ""))
     elif failure_type:
         message = failure_type
+    if jtype is None:
+        jtype = failure_type
     return JUnitStatus(status=jstatus, type=jtype, message=message)
 
 

@@ -88,5 +88,13 @@ def test_cli_lint_invalid_yaml_exit_3(repo_env, capsys):
 
 
 def test_cli_placeholder_exit_2(capsys):
-    assert main(["run"]) == 2
+    # Task 2.6 后 run 已实现；占位只余 review/report/repo
+    assert main(["report"]) == 2
     assert "not implemented" in capsys.readouterr().out
+
+
+def test_cli_run_requires_target_selector():
+    """--suite/--tag/--case 互斥且必选（14.6）。"""
+    with pytest.raises(SystemExit) as e:
+        main(["run", "--fake-driver"])
+    assert e.value.code == 2
