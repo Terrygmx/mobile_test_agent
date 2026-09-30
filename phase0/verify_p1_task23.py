@@ -77,12 +77,36 @@ def quiesce(udid: str) -> None:
     time.sleep(1.0)
 
 
-def read_marker(udid: str):
+def read_marker(udid: str, settle: float = 1.5):
+    """读 marker，**读前先等写入可见**。
+
+    Task 2.4 实测坑：即使 App 侧 `set()` + `synchronize()`，plist 的更新
+    对外部 reader 也不是同步可见的——会出现「写入晚一轮」：读到的还是
+    上一次 launch 留下的值。表现是验证随机 FAIL（同一命令 3 次里 1~2 次
+    失败），而 hook 实现完全正确。
+
+    这里改成**轮询到稳定**：连续两次读到相同值（间隔 settle）才算数，
+    最多等 timeout 秒。比固定 sleep 可靠——sleep 猜不准 cfprefsd 的
+    落盘延迟，轮询是「等它不再变」。
+    """
     p = app_plist(udid)
-    if p is None or not p.exists():
+    if p is None:
         return None
-    r = sh("plutil", "-extract", "MTA_TEST_MARKER", "raw", "-o", "-", str(p))
-    return r.stdout.strip() if r.returncode == 0 else None
+    deadline = time.time() + 5.0
+    prev = object()
+    stable = 0
+    while time.time() < deadline:
+        r = sh("plutil", "-extract", "MTA_TEST_MARKER", "raw", "-o", "-", str(p))
+        cur = r.stdout.strip() if r.returncode == 0 else None
+        if cur == prev:
+            stable += 1
+            if stable >= 2:
+                return cur
+        else:
+            stable = 0
+        prev = cur
+        time.sleep(settle)
+    return prev
 
 
 def log_has(udid: str, needle: str, last: str = "30s") -> bool:

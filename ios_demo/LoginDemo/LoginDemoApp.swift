@@ -39,11 +39,16 @@ struct LoginView: View {
             fatalError("MTA: -UITestLogout requires a Debug build (11.1 App hook)")
             #endif
         }
-        // Task 2.3 验证辅助（仅 DEBUG）：写标记 key，供「写→reset→读回」端到端
+        // Task 2.4 验证辅助（仅 DEBUG）：写标记 key，供「写→reset→读回」端到端
         // 验证 hook 清 domain 生效。与 hook 分开：写了标记的 launch 不清。
+        // 必须 synchronize()：`set()` 只改内存快照，进程被 terminate 时
+        // iOS 不保证把快照刷到磁盘 —— 实测不 sync 时写入约一半概率丢，
+        // 表现为「marker 写不进去」，误判成 reset hook 失效。
         if ProcessInfo.processInfo.arguments.contains("-UITestWriteMarker") {
             #if DEBUG
             UserDefaults.standard.set("BEFORE_RESET", forKey: "MTA_TEST_MARKER")
+            UserDefaults.standard.synchronize()
+            NSLog("MTA_WRITE_MARKER set+synchronized")
             #endif
         }
     }

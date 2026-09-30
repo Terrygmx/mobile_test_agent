@@ -13,6 +13,16 @@ enum MTAResetHook {
     static func performReset() {
         NSLog("MTA_RESET_HOOK executed (bundle=%@)", Bundle.main.bundleIdentifier ?? "?")
         // 1. UserDefaults：清 App 自己的 domain（不碰系统 domain）
+        //
+        // 验证口径备忘（Task 2.4 踩过的坑，见 phase0/verify_p1_task23.py）：
+        // App 的 UserDefaults.standard 落在**App 容器内**
+        // `container/Library/Preferences/com.phaset0.logindemo.plist`；
+        // 而 `xcrun simctl spawn <udid> defaults ...` 操作的是模拟器 host 的
+        // **cfprefsd 域**，两者是不同存储。因此：
+        //   - 验证 hook 是否清干净 → 读容器内 plist（plutil）；
+        //   - 用 simctl defaults 写入的 marker，hook 根本看不到 → 误判「没生效」。
+        // 早期「3 轮只中 1 轮」的结论是脚本在两处交替读造成的假象，
+        // 不是 hook 的竞态——实现一直是正确的。
         if let domain = Bundle.main.bundleIdentifier {
             UserDefaults.standard.removePersistentDomain(forName: domain)
         }
