@@ -12,6 +12,30 @@ struct LoginView: View {
     @State private var isLoggedIn: Bool = false
     @State private var errorMessage: String?
 
+    init() {
+        // 附录 A4（Task 2.3 / P1-06）：reset hook——`-UITestReset` 启动参数时
+        // 在 UI 展示前清理登录态/UserDefaults/缓存。App 当前无持久化登录态
+        // （isLoggedIn 是内存 @State，重启即回未登录），hook 按契约全量清理，
+        // 为将来引入 UserDefaults/Keychain 持久化兜底。
+        // DEBUG 门：release 构建不编译清理逻辑（A4：不得进入发布包）。
+        if ProcessInfo.processInfo.arguments.contains("-UITestReset") {
+            #if DEBUG
+            MTAResetHook.performReset()
+            #else
+            // A4：release 包不带清理逻辑。到此分支说明构建配置漏了
+            // SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG（fail-loud，不静默跳过）。
+            fatalError("MTA: -UITestReset requires a Debug build (A4)")
+            #endif
+        }
+        // Task 2.3 验证辅助（仅 DEBUG）：写标记 key，供「写→reset→读回」端到端
+        // 验证 hook 清 domain 生效。与 hook 分开：写了标记的 launch 不清。
+        if ProcessInfo.processInfo.arguments.contains("-UITestWriteMarker") {
+            #if DEBUG
+            UserDefaults.standard.set("BEFORE_RESET", forKey: "MTA_TEST_MARKER")
+            #endif
+        }
+    }
+
     var body: some View {
         if isLoggedIn {
             HomeView(username: username, onLogout: { isLoggedIn = false })

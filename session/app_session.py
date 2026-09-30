@@ -40,8 +40,18 @@ class AppSession:
         self.ds = device_session
         self.bundle_id = bundle_id
 
-    def launch(self) -> None:
-        self.ds.ensure_alive().activate_app(self.bundle_id)
+    def launch(self, arguments: list[str] | None = None) -> None:
+        """启动 App。`arguments` 非空时以 simctl launch 附加参数启动（附录 A4
+        reset hook 的入口：`-UITestReset` 必须作为**启动参数**到达 App，
+        activate_app 做不到）。空参数走 activate_app（幂等、无子进程开销）。"""
+        d = self.ds.ensure_alive()
+        if not arguments:
+            d.activate_app(self.bundle_id)
+            return
+        udid = d.capabilities.get("udid")
+        if not udid:
+            raise InfraError("capabilities missing 'udid'; simctl launch needs it")
+        _simctl("launch", udid, self.bundle_id, *arguments)
 
     def terminate(self) -> None:
         self.ds.ensure_alive().terminate_app(self.bundle_id)

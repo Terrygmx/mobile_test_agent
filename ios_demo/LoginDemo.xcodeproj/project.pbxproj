@@ -9,12 +9,14 @@
 		AA0000010000000000000003 /* LoginDemoTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000003; };
 		AA0000010000000000000004 /* SpikeScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000004; };
 		AA0000010000000000000005 /* MTAScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000005; };
+		AA0000010000000000000006 /* MTAResetHook.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000006; };
 
 /* Begin PBXFileReference section */
 		AA0000020000000000000001 /* LoginDemoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginDemoApp.swift; sourceTree = "<group>"; };
 		AA0000020000000000000003 /* LoginDemoTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginDemoTests.swift; sourceTree = "<group>"; };
 		AA0000020000000000000004 /* SpikeScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpikeScreen.swift; sourceTree = "<group>"; };
 		AA0000020000000000000005 /* MTAScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MTAScreen.swift; sourceTree = "<group>"; };
+		AA0000020000000000000006 /* MTAResetHook.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MTAResetHook.swift; sourceTree = "<group>"; };
 		AA0000030000000000000001 /* LoginDemo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LoginDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA0000030000000000000002 /* LoginDemoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LoginDemoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 
@@ -33,6 +35,7 @@
 				AA0000020000000000000001 /* LoginDemoApp.swift */,
 				AA0000020000000000000004 /* SpikeScreen.swift */,
 				AA0000020000000000000005 /* MTAScreen.swift */,
+				AA0000020000000000000006 /* MTAResetHook.swift */,
 				AA0000020000000000000003 /* LoginDemoTests.swift */,
 			);
 			path = LoginDemo;
@@ -119,6 +122,7 @@
 				AA0000010000000000000001 /* LoginDemoApp.swift in Sources */,
 				AA0000010000000000000004 /* SpikeScreen.swift in Sources */,
 				AA0000010000000000000005 /* MTAScreen.swift in Sources */,
+				AA0000010000000000000006 /* MTAResetHook.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -157,6 +161,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.phaset0.logindemo;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -173,6 +178,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.phaset0.logindemo;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALIDATE_PRODUCT = YES;

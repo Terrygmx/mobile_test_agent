@@ -169,12 +169,51 @@ def _check_unconsumed_declarations(
                 ))
 
 
+def _check_reset_strategy(
+    data: dict | TestCase, tc_id: str, issues: list[LintIssue],
+    device_type: str | None,
+) -> None:
+    """11.2：不支持的 reset 策略在 lint 预检就报错，不运行到一半才炸。
+
+    R5-3 的 `reset: RESET_STATEE` typo 在此拦截。device_type=None（调用方
+    未声明设备）时跳过设备相关判定，只查策略名本身是否存在于矩阵。
+    """
+    precondition = (data.get("precondition") if isinstance(data, dict)
+                    else getattr(data, "precondition", None)) or {}
+    reset = precondition.get("reset") if isinstance(precondition, dict) else None
+    if not reset:
+        return
+    from environment.capabilities import CapabilityResolver, RESET_CAPABILITIES
+
+    if device_type is None:
+        if reset not in RESET_CAPABILITIES:
+            issues.append(LintIssue(
+                "unsupported_reset",
+                f"testcase {tc_id!r}: unknown reset strategy {reset!r} "
+                f"(known: {sorted(RESET_CAPABILITIES)})",
+                tc_id,
+            ))
+        return
+    if not CapabilityResolver.is_supported(reset, device_type):
+        issues.append(LintIssue(
+            "unsupported_reset",
+            f"testcase {tc_id!r}: reset strategy {reset!r} not supported on "
+            f"device_type={device_type!r} (11.1 matrix / 11.2 preflight)",
+            tc_id,
+        ))
+
+
 def lint(
     testcases: list[dict | TestCase],
     repo: Repository,
     secrets: SecretProviderProtocol,
+    device_type: str | None = None,
 ) -> list[LintIssue]:
-    """6.4 全量检查；输入可为原始 dict 或已解析 TestCase。"""
+    """6.4 全量检查；输入可为原始 dict 或已解析 TestCase。
+
+    `device_type`：'simulator' / 'real_device'。传入时启用 11.2 的 reset
+    策略预检（11.1 矩阵逐行判定）；None 时只查策略名拼写（R5-3 typo 防线）。
+    """
     issues: list[LintIssue] = []
     for data in testcases:
         if isinstance(data, TestCase):
@@ -204,6 +243,7 @@ def lint(
         _check_secrets(raw_steps, tc_id, secrets, issues)
         _check_postcondition(raw_steps, tc_id, issues)
         _check_unconsumed_declarations(raw_steps, tc_id, issues)
+        _check_reset_strategy(data, tc_id, issues, device_type)
     return issues
 
 
