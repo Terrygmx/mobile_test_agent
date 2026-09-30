@@ -180,12 +180,83 @@ def test_element_count_mismatch_fails_fast():
     assert ei.value.result.expected == 2
 
 
-def test_element_count_zero_missing_is_mismatch_not_drift():
-    """element_count=0 期望：目标找不到是**值**不符（数量确实是 0），不是漂移。"""
+def test_element_count_nonzero_missing_is_mismatch_not_drift():
+    """element_count 期望非 0：目标找不到是**值**不符（数量确实是 0），不是漂移。"""
     ex = FakeExecutor([ElementNotFound("none")], repeat_last=True)
     with pytest.raises(AssertionValueMismatch) as ei:
-        _engine(ex).check(_spec("element_count", 0))
+        _engine(ex).check(_spec("element_count", 1))
     assert ei.value.result.actual == 0
+    assert ei.value.result.expected == 1
+
+
+# --- R12-2：expected=0 是合法断言（「元素已从列表消失」）---
+
+def test_element_count_zero_absent_passes():
+    """expected=0、目标找不到 → actual=0 = expected → 必须 PASS，不是 mismatch。"""
+    clock = FakeClock()
+    ex = FakeExecutor([ElementNotFound("none")])
+    r = _engine(ex, clock).check(_spec("element_count", 0))
+    assert r.passed
+    assert (r.expected, r.actual) == (0, 0)
+
+
+def test_element_count_zero_present_is_mismatch():
+    """expected=0、目标在 → 值不符（actual=1 ≠ 0）。"""
+    ex = FakeExecutor([FakeElement()], repeat_last=True)
+    with pytest.raises(AssertionValueMismatch) as ei:
+        _engine(ex).check(_spec("element_count", 0))
+    assert ei.value.result.actual == 1
+
+
+def test_element_count_zero_ambiguous_is_mismatch():
+    """expected=0、≥2 命中 → ">=2" 必然不符 → 值判定（不是漂移）。"""
+    ex = FakeExecutor([AmbiguousElement("2")], repeat_last=True)
+    with pytest.raises(AssertionValueMismatch) as ei:
+        _engine(ex).check(_spec("element_count", 0))
+    assert ei.value.result.actual == ">=2"
+
+
+# --- R12-1：属性读取 stale 防护（R11-3 同源洞） ---
+
+class StaleTextElement:
+    """转场期典型：find 成功但读属性抛驱动异常。不继承 FakeElement（.text 属性冲突）。"""
+
+    @property
+    def text(self):
+        raise RuntimeError("stale element reference: element is not attached")
+
+    def is_displayed(self):
+        return True
+
+    def is_enabled(self):
+        return True
+
+
+def test_stale_attr_read_retries_then_succeeds():
+    clock = FakeClock()
+    ex = FakeExecutor([StaleTextElement(), FakeElement(text="退出登录")])
+    r = _engine(ex, clock).check(_spec("text_contains", "退出", timeout=5.0))
+    assert r.passed
+    assert len(clock.sleeps) == 1
+
+
+def test_stale_attr_read_until_timeout_marks_drift_not_bubble():
+    """stale 持续到 deadline → TargetDrift（可恢复），不是裸驱动异常冒泡。"""
+    clock = FakeClock()
+    ex = FakeExecutor([StaleTextElement()], repeat_last=True)
+    with pytest.raises(AssertionTargetDrift) as ei:
+        _engine(ex, clock).check(_spec("text_contains", "退出", timeout=0.5))
+    assert ei.value.result.actual == "NOT_RESOLVED"
+
+
+def test_stale_read_does_not_mask_internal_errors():
+    """引擎自身的编程错误（ValueError）不许被 stale 防护吞掉。"""
+    clock = FakeClock()
+    ex = FakeExecutor([FakeElement()], repeat_last=True)
+    bad = AssertionSpec(target=TargetRef(id="x"), condition="exists", timeout=1.0)
+    object.__setattr__(bad, "condition", "sparkles")
+    with pytest.raises(ValueError):
+        _engine(ex, clock).check(bad)
 
 
 # --- 目标定位失败 → 漂移 ---

@@ -86,3 +86,27 @@ schema 0.1 结构经 5 条真实用例验证**无阻塞缺陷**；上述修复�
 升 **0.2**：SCHEMA_VERSION 与 SUPPORTED_SCHEMA_VERSIONS 同步（0.1 用例不再
 可加载——loader 报「unsupported schema_version: '0.1'」，明确拒优于静默放行），
 precondition EnvSpec 定型顺延至 M1 末冻结盘点（R5-3 记账不变）。
+
+## 7. Task 2.2 Review（R12）记账 — 2026-09-30
+
+R12-1/2 已修（`executor/assertion.py`）：
+- **R12-1**：`_judge` 属性读取加 stale 防护（wait.py R11-3 同款）。断言恰恰最常
+  发生在转场后，find 成功后读 `.text`/`is_enabled()` 抛 stale 直接冒泡会是既非
+  ValueMismatch 也非 Drift 的裸异常（不在 recovery 白名单）。现按「本轮不满足」
+  继续轮询至 deadline，到点标 Drift（可恢复）；ValueError 保持 fail-loud。
+- **R12-2**：`element_count expected=0` 语义 bug——schema validator 只拦
+  `expected is None`，`expected=0` 是合法断言（「元素已从列表消失」），但
+  ElementNotFound 分支无条件判 mismatch，expected=0/actual=0 判 FAIL 自相矛盾。
+  现判 passed（expected=0 + actual=0）；expected=0 + ">=2" 仍为 mismatch
+  （必然不符，值判定）。原「count=0 是 mismatch」测试改为期望非 0 的版本。
+
+R12-3/5 记账到 **Task 2.4**（trace schema 迁移加列时一并落）：
+- `detail.kind = "assertion_target"` 全库无消费点——trace 只落异常字符串前缀，
+  结构化 `AssertionResult`（expected/actual/timeout）不落库；
+- `AssertionValueMismatch.result` 同样只在异常属性里，error 字段只有格式化串。
+- 两者都等 schema 0.1 → 迁移版的 warning/detail 列，避免现在越界改表。
+
+R12-4 记入 **M4 漂移 build 验收口径**：
+- 断言漂移恢复 = tap 重定位，恢复后**不重验断言值**（text_contains 类断言的值
+  从未对新元素验证）。故障矩阵 #15 的验收就是步骤 RECOVERED，但报告口径必须写明
+  **RECOVERED ≠ 断言通过**，避免被误读为该步断言成功。

@@ -138,21 +138,41 @@ class AssertionEngine:
                 #   element_count → 找不到意味着 count=0，是「值」判定不是漂移
                 #     （哪怕期望非 0——漂移说的是「定位手段失效」，这里定位手段
                 #     正常工作了，结果确实是 0 个）。
+                # R12-2：count=0 与 expected=0 相等即 passed（expected=0 是合法
+                # 值，断言「元素已从列表消失」；expected=0、actual=0 判 FAIL
+                # 语义自相矛盾）。下同，AmbiguousElement 分支的 ">=2" 同理。
                 if spec.condition == "not_exists":
                     return AssertionResult(spec.condition, target_id,
                                            False, 0, True, timeout)
                 if spec.condition == "element_count":
+                    if spec.expected == 0:
+                        return AssertionResult(spec.condition, target_id,
+                                               0, 0, True, timeout)
                     return self._mismatch(spec, target_id, 0, timeout, expected)
             except AmbiguousElement:
                 # ≥2 命中：element_count 视为「数量与期望不符」（fail-closed 下
                 # 只知道 >=2）；其余条件无法唯一定位目标 → 漂移。
+                # R12-2：expected=0 时 ">=2" 必然不符 → 值判定（漂移无关）。
                 if spec.condition == "element_count":
-                    return self._mismatch(spec, target_id, ">=2", timeout)
+                    return self._mismatch(spec, target_id, ">=2", timeout, expected)
                 return self._drift(spec, target_id, timeout)
             else:
                 if spec.condition == "element_count":
                     return self._mismatch_or_pass(spec, target_id, 1, timeout)
-                passed, actual = self._judge(spec, el)
+                # R12-1：find 成功后的属性读取（.text / is_enabled）发生在转场期
+                # （恰恰是断言最常出现的时刻），可能抛 stale element 一类驱动异常。
+                # 与 wait.py R11-3 同款：当作「本轮不满足」继续轮询至 deadline，
+                # 不冒泡（否则既不是 ValueMismatch 也不是 Drift，步骤直接 FAILED
+                # 且不在 recovery 白名单）。ValueError 保持 fail-loud。
+                try:
+                    passed, actual = self._judge(spec, el)
+                except ValueError:
+                    raise
+                except Exception as e:  # noqa: BLE001 — 驱动异常类型随 Appium 版本变化
+                    if self.clock() >= deadline:
+                        return self._drift(spec, target_id, timeout)
+                    self.sleep(self.polling_interval)
+                    continue
                 if passed:
                     return AssertionResult(spec.condition, target_id,
                                            expected, actual, True, timeout)
