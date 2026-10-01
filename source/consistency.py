@@ -30,11 +30,17 @@ class ConsistencyReport:
     removed: tuple[tuple[str, str], ...] = ()    # overrides 有、generated 无
     # ADDED 里「generated 解析不出 accessibility_id」的元素不计缺口
     unresolvable: tuple[tuple[str, str], ...] = ()
+    # REMOVED 里被插值前缀豁免的——**可见但不算失败**（12.2 人工确认精神：
+    # 豁免是「前缀匹配疑似插值实例」，漂移必须仍出现在报告里，不能静默。
+    # review P2-2：cell_removed 与 cell_alpha 同样满足 startswith("cell_")
+    # 曾被一并吞掉）。
+    prefix_matched: tuple[tuple[str, str], ...] = ()
 
     @property
     def ok(self) -> bool:
         """P1 口径：REMOVED 是硬失败（用例会挂）；ADDED 是待办（须人工补齐
-        overrides 后重跑）。两者都为空才算过。"""
+        overrides 后重跑）。两者都为空才算过。prefix_matched 不影响 ok
+        （插值人工登记是 12.2 预期流程），但**永远列在报告里**供人确认。"""
         return not self.removed and not self.added
 
 
@@ -72,12 +78,18 @@ def check(metadata: dict, overrides_root: str | Path, *,
 
     added = gen_ids - override_ids
     removed = override_ids - gen_ids
+    prefix_matched: tuple[tuple[str, str], ...] = ()
     if not strict:
-        # 宽容模式：generated 的 dynamic/unknown（12.2 不猜值）不参与 REMOVED
-        # 判定。两种覆盖：① id 完全相同；② 插值前缀覆盖（overrides 登记的
-        # cell_alpha 被 generated 的 "cell_" 前缀覆盖——插值不猜值、人工登记
-        # 实例是 12.2 的预期流程，不是 App 侧漂移）。
+        # 宽容模式：generated 的 dynamic/unknown（12.2 不猜值）不判 REMOVED。
+        # ① id 完全相同；② 插值前缀覆盖（overrides 登记的 cell_alpha 被
+        # generated 的 "cell_" 前缀覆盖）。② 进 prefix_matched 桶——
+        # **不算失败但必须可见**（P2-2：cell_removed 也曾一并被吞，
+        # 前缀越短盲区越大；漂移静默 = 12.6 Gate 形同虚设）。
         unresolvable_pairs = unresolvable_ids(metadata)
+        prefix_matched = tuple(sorted(
+            p for p in removed
+            if p not in unresolvable_pairs
+            and _covered_by_prefix(p, unresolvable_pairs)))
         removed = {p for p in removed
                    if not (p in unresolvable_pairs
                            or _covered_by_prefix(p, unresolvable_pairs))}
@@ -91,7 +103,8 @@ def check(metadata: dict, overrides_root: str | Path, *,
         matched=tuple(sorted(matched)),
         added=tuple(sorted(added)),
         removed=removed_final,
-        unresolvable=unresolvable)
+        unresolvable=unresolvable,
+        prefix_matched=prefix_matched)
 
 
 def unresolvable_ids(metadata: dict) -> set[tuple[str, str]]:
@@ -136,5 +149,9 @@ def format_report(report: ConsistencyReport) -> str:
     if report.unresolvable:
         lines.append("  UNRESOLVABLE (12.2 不猜值，人工补齐后重跑):")
         lines += [f"    ? {s}.{i}" for s, i in report.unresolvable]
+    if report.prefix_matched:
+        lines.append("  PREFIX-MATCHED (REMOVED 被插值前缀豁免，不算失败——"
+                     "人工确认是否漂移):")
+        lines += [f"    ~ {s}.{i}" for s, i in report.prefix_matched]
     lines.append("  verdict: " + ("PASS" if report.ok else "FAIL"))
     return "\n".join(lines)

@@ -278,11 +278,13 @@ public final class SwiftUIVisitor: SyntaxVisitor {
             screens.append(ScannedScreen(name: key,
                                          elements: grouped[key] ?? []))
         }
-        var names = screenNames
-        for name in grouped.keys where name != "" && !names.contains(name) {
-            names.append(name)
-        }
-        return ScanResult(screens: names, screenElements: screens)
+        // 顶层 screens = **仅 mtaScreen marker 显式声明名**。
+        // 教训（review P3-6）：container struct 名不是 marker 名
+        // （SpikeTabScreen vs .mtaScreen("SpikeTab")）——混进顶层 screens
+        // 会让下游 export 导出永远匹配不到真机的 screen 条目，属猜值；
+        // 同时污染 12.3 metadata 的语义（顶层 screens 应是 marker 层）。
+        // container 名只用于元素归属（screenElements），不进 screens。
+        return ScanResult(screens: screenNames, screenElements: screens)
     }
 
     /// 插值字面量的静态前缀（`"cell_\(item.key)"` → "cell_"）。只取第一段

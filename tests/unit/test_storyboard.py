@@ -93,6 +93,20 @@ def test_non_accessibility_elements_skipped(sb):
                                        e.id for e in els}
 
 
+def test_line_numbers_are_real(tmp_path):
+    """P2-1：行号必须真实（ET.parse 无 _line，曾恒 0 使 UNKNOWN id 不可区分）。
+    textField 在第 7 行、label 在第 10 行（fixture 内计数）。"""
+    p = tmp_path / "L.storyboard"
+    p.write_text(STORYBOARD, encoding="utf-8")
+    els = {e.id: e for e in parse_storyboard(p)}
+    assert els["username_field"].line > 0
+    assert els["login_button"].line > els["username_field"].line
+    unknown = [e for e in parse_storyboard(p)
+               if e.resolution_type == "unknown"][0]
+    assert unknown.line > 0
+    assert unknown.id == f"UNKNOWN:L.storyboard:{unknown.line}"
+
+
 def test_bad_xml_raises(tmp_path):
     p = tmp_path / "Bad.storyboard"
     p.write_text("<document><unclosed>", encoding="utf-8")

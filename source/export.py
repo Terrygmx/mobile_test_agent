@@ -76,7 +76,7 @@ def export_generated(metadata: dict, out_dir: str | Path) -> dict[str, int]:
                     "source_file": el.get("source", {}).get("file"),
                     "source_line": el.get("source", {}).get("line"),
                 }],
-                "metadata": _element_metadata(el),
+                "metadata": _element_metadata(),
             }
 
     element_count = 0
@@ -85,9 +85,12 @@ def export_generated(metadata: dict, out_dir: str | Path) -> dict[str, int]:
                     [bucket[k] for k in sorted(bucket)])
         element_count += len(bucket)
 
-    # --- 屏幕：元素 container 名 + 顶层 screens 名（marker 声明名）---
-    screen_names: set[str] = set(by_screen)
-    screen_names.update(n for n in metadata.get("screens", []) if n)
+    # --- 屏幕：**只从顶层 screens（mtaScreen marker 声明名）生成** ---
+    # 教训（review P3-6）：元素 container struct 名不是 marker 名——
+    # SpikeTabScreen(struct) vs SpikeTab(.mtaScreen 声明) 导出的 screen
+    # 条目 marker 永远匹配不到真机，属猜值（12.2 同源纪律）。container 名
+    # 仅用于元素归属，screen 定义必须来自 marker 声明。
+    screen_names: set[str] = {n for n in metadata.get("screens", []) if n}
     for name in sorted(screen_names):
         _write_yaml(screens_dir / f"{name}.yaml", [{
             "schema_version": "1.0",
@@ -101,9 +104,9 @@ def export_generated(metadata: dict, out_dir: str | Path) -> dict[str, int]:
     return {"elements": element_count, "screens": len(screen_names)}
 
 
-def _element_metadata(el: dict) -> dict:
+def _element_metadata() -> dict:
     """元素 metadata：risk/idempotency 留空由 policy 推导（7.4）——generated
-    只提供 source 事实，人的策略判断在 overrides。"""
+    只提供 source 事实，人的策略判断在 overrides。无参数（P3-7：el 未用）。"""
     return {"origin": "source"}
 
 

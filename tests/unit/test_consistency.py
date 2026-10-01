@@ -116,6 +116,32 @@ def test_dynamic_without_prefix_does_not_cover(overrides):
         ("V", "UNKNOWN:x.swift:9")}
 
 
+def test_prefix_matched_is_visible_not_silent(overrides):
+    """P2-2：前缀豁免的 REMOVED 必须**可见**（prefix_matched 桶）——
+    cell_alpha（插值实例，预期豁免）与 cell_removed（已删漂移）同样满足
+    startswith("cell_")；此前一并吞掉、REMOVED 静默为空。"""
+    import yaml
+    d = overrides / "elements"
+    for eid in ("cell_alpha", "cell_removed"):
+        (d / f"{eid}.yaml").write_text(
+            yaml.safe_dump(
+                {"schema_version": "1.0", "kind": "element", "id": eid,
+                 "screen": "V", "type": "cell",
+                 "strategies": [{"type": "accessibility_id", "value": eid,
+                                 "origin": "manual"}],
+                 "metadata": {"risk": "LOW", "idempotency": "IDEMPOTENT",
+                              "data_class": "PUBLIC"}},
+                allow_unicode=True),
+            encoding="utf-8")
+    meta = _meta(("V", [("a", "a", "literal"), ("cell_", None, "dynamic")]))
+    r = check(meta, overrides)
+    # 两条都豁免出 removed（ok 维持）
+    assert not r.removed and r.ok
+    # 但都必须出现在 prefix_matched（人工确认）
+    assert ("V", "cell_alpha") in r.prefix_matched
+    assert ("V", "cell_removed") in r.prefix_matched
+
+
 def test_strict_mode_reports_interpolated_as_removed(overrides):
     """strict=True：插值也当缺口（临时排查用）。"""
     import pathlib

@@ -22,6 +22,7 @@ accessibilityIdentifier 以 `userDefinedRuntimeAttributes` 的
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+import xml.parsers.expat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -89,16 +90,62 @@ def _element_type(tag: str) -> str:
     return _IB_ELEMENT_TYPES.get(tag, "other")
 
 
+class _LineNumberTreeBuilder(ET.TreeBuilder):
+    """记录每个 start 标签行号的 TreeBuilder。
+
+    驱动者必须是 `xml.parsers.expat`（其 `CurrentLineNumber` 公开可用）——
+    `ET.XMLParser` 不注入底层 expat（Python 3.11 实测 `parser` 属性恒
+    None），所以由 expat 直接驱动 TreeBuilder。
+    行号 = start 事件触发行；UNKNOWN id 用它组 "file:line"，同文件多个
+    unknown 元素因此可区分（review P2-1）。
+    """
+
+    def __init__(self, lines: dict[int, int]) -> None:
+        super().__init__()
+        self._lines = lines
+        self._expat: xml.parsers.expat.XMLParserType | None = None
+
+    def start(self, tag, attrs):  # type: ignore[override]
+        el = super().start(tag, attrs)
+        expat = getattr(self, "_expat", None)
+        if expat is not None:
+            self._lines[id(el)] = expat.CurrentLineNumber
+        return el
+
+
+def _parse_with_lines(p: Path, lines_by_id: dict[int, int]) -> ET.Element:
+    """expat 直接驱动 TreeBuilder 解析文件（行号入 lines_by_id）。"""
+    tree_builder = _LineNumberTreeBuilder(lines_by_id)
+    expat = xml.parsers.expat.ParserCreate()
+    # 显式挂上：TreeBuilder.start 需要读 expat.CurrentLineNumber
+    tree_builder._expat = expat            # noqa: SLF001（内部约定）
+    for handler in ("StartElementHandler", "EndElementHandler",
+                    "CharacterDataHandler"):
+        setattr(expat, handler, getattr(tree_builder, {
+            "StartElementHandler": "start",
+            "EndElementHandler": "end",
+            "CharacterDataHandler": "data",
+        }[handler]))
+    try:
+        with open(p, "rb") as fh:
+            data = fh.read()
+        expat.Parse(data, True)      # 一次性读完全部
+    except xml.parsers.expat.ExpatError as e:
+        raise ValueError(f"invalid IB XML in {p}: {e}") from None
+    return tree_builder.close()
+
+
 def parse_storyboard(path: str | Path) -> list[StoryboardElement]:
     """解析单个 .xib/.storyboard → 元素列表（无元素返回空 list，不报错）。"""
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"storyboard not found: {p}")
 
-    try:
-        root = ET.parse(p).getroot()
-    except ET.ParseError as e:
-        raise ValueError(f"invalid IB XML in {p}: {e}") from None
+    # 行号捕获：标准 ET.parse 的 Element 没有 _line 属性（自定义 TreeBuilder
+    # 才有）——裸 getattr(el, "_line", 0) 恒 0，UNKNOWN id 退化成
+    # "file:0" 同文件多个 unknown 不可区分（review P2-1 实锤）。
+    lines_by_id: dict[int, int] = {}
+    root = _parse_with_lines(p, lines_by_id)
 
     # 容器映射：element（IB 节点）→ 最近祖先 viewController 的 customClass/id。
     # IB 文件里 viewController 用 <viewController customClass="X"> 标记。
@@ -115,7 +162,7 @@ def parse_storyboard(path: str | Path) -> list[StoryboardElement]:
         if a11y is None and label is None:
             continue  # 非可访问性元素，跳过（大量 IB 节点）
         seen.add(id(el))
-        line = getattr(el, "_line", 0) or 0
+        line = lines_by_id.get(id(el), 0)
         if _looks_like_placeholder(a11y):
             good_label = None if _looks_like_placeholder(label) else label
             elements.append(StoryboardElement(
@@ -145,10 +192,15 @@ def _map_containers(el: ET.Element, current: str | None,
 
     customClass 优先（真类名），无则退回 `id` 属性（IB 内部 id）——沿用
     12.1「以所在 View/ViewController 类型为 container_type」。
+    tag 判定用 ascii lowercase endswith：IB 家族 tag 大小写混用
+    （viewController / tableViewController / collectionViewController /
+    navigationController / tabBarController / splitViewController /
+    pageViewController / glkViewController…）——原来只匹配
+    endswith("ViewController") 会漏掉 camelCase 家族（review P3-7）。
     """
     here = current
-    tag = el.tag
-    if tag.endswith("ViewController") or tag == "viewController":
+    tag = el.tag.lower()
+    if tag.endswith("viewcontroller") or tag == "viewcontrollerplacement":
         here = el.get("customClass") or el.get("id") or "ViewController"
     out[id(el)] = here
     for child in el:
