@@ -7,3 +7,8 @@ out/
 *.xcodeproj/xcuserdata/
 .DS_Store
 .codegraph/
+
+# M3 generated 产物：local build 不入库（时间戳/git_commit 每次生成必变，
+# 常驻 dirty——review P3-4 拍板）。release/staging build 的 generated/
+# 仍可入库；CI 自行 regenerate local。
+repository/generated/local/

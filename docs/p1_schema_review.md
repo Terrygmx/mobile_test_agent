@@ -346,3 +346,44 @@ P3 八条处置：
    （5.3 generated+override 合并语义，TODO(M3, R10-5.2) 已记账）。
 3. M3 集成测试的替身规格直接用生产 Executor 契约（find→list[dict] /
    tap·input / 无 perform）——2.6-2.7 四次「替身失真」的教训。
+
+### M3 Task 3.1-3.3 顺延项（review_m3_task31_2026-09-30 核销记录）
+
+- P2-1（已修，commit 见下）：storyboard 行号恒 0。`ET.parse` 产出的
+  Element 没有 `_line` 属性（自定义 TreeBuilder 才有），裸
+  `getattr(el, "_line", 0)` 恒 0 → UNKNOWN id 退化为 "file:0"，同文件
+  多个 unknown 不可区分。修复：`xml.parsers.expat` 直驱自定义
+  TreeBuilder（`CurrentLineNumber` 公开可用；`ET.XMLParser` 在 3.11 不注入
+  底层 expat，`parser` 属性恒 None），`id(el)→line` map 反查。测试补
+  `test_line_numbers_are_real`。
+- P2-2（已修，commit 见下）：一致性 Gate 前缀豁免吞真实漂移。
+  `_covered_by_prefix` 对 `cell_removed` 与 `cell_alpha` 同样命中
+  startswith("cell_") 一并吞掉、REMOVED 静默为空。修复：新增
+  `prefix_matched` 桶——**不算失败但必须可见**（12.2「人工确认」精神：
+  自动豁免 ≠ 人工确认；前缀越短盲区越大）。`format_report` 以 `~` 前缀
+  列出待人工确认。当前实际生效：HomeView.cell_alpha/beta/gamma +
+  SearchView.cell_beta 共 5 条均可见。
+- P2-3（**顺延，本单核销条件**）：`mta run` 无 `--generated` 参数
+  （`lint` 有），运行时 Repository 仍是「overrides 兼职 generated」旧
+  形态。「实现存在但零消费」平行实现第 6 次（R11-4/R13-2/R14-2/R15-2/
+  R16-4 之后）。**Task 3.3 Gate 验收时核销**：
+  `mta run --generated repository/generated/<build> ...` 真机实跑，
+  双源合并与手写基线一致 + build 不匹配拦截（12.5）随该 run 一并验。
+- P3-4（已拍板并执行）：local generated 产物 `.gitignore`
+  （`repository/generated/local/`），git rm --cached 历史移除；时间戳/
+  git_commit 每次生成必变的噪音消除，release/staging build 产物仍可入库。
+- P3-5（已修）：`repo generate --check` 的 overrides 根参数化
+  （`--overrides`，默认 repository/overrides）。
+- P3-6（已修，根因在 Swift 侧）：container struct 名混入 metadata 顶层
+  `screens`（marker 层）。`SpikeTabScreen`(struct) vs
+  `.mtaScreen("SpikeTab")`——导出的 screen 条目 marker 永远匹配不到真机，
+  属猜值（12.2 同源纪律）。修复：SwiftUIVisitor.buildResult() 顶层
+  screens 只收 mtaScreen marker 声明名；container 名仅用于元素归属。
+  screens 12→10（去掉 2 个 struct 名猜值条目）。
+- P3-7（已修）：①`export._element_metadata` 死参数 el 删；
+  ②`_map_containers` tag 判定改 ascii lowercase endswith，覆盖
+  tableViewController/collectionViewController/navigationController 等
+  camelCase 家族（原 endswith("ViewController") 漏匹配）；
+  ③SwiftUIVisitor.location(of:) 每 modifier 新建
+  SourceLocationConverter 的 O(n²) 隐患——大文件性能项，暂挂
+  （正确性无碍；App 源文件 < 千行级）。

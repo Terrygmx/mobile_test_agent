@@ -1,8 +1,0 @@
-schema_version: '1.0'
-kind: screen
-id: LoginView
-marker: screen.LoginView
-kind_hint: page
-metadata:
-  risk: LOW
-  origin: source

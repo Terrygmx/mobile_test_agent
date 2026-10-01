@@ -87,6 +87,10 @@ def build_parser() -> argparse.ArgumentParser:
     gen_p.add_argument("--check", action="store_true",
                        help="生成后立即跑一致性 Gate（overrides vs generated，"
                             "12.6）；缺口非空 → exit 3")
+    gen_p.add_argument("--overrides", metavar="DIR",
+                       default="repository/overrides",
+                       help="--check 比对的手写 overrides 根目录"
+                            "（默认 repository/overrides）")
 
     # --- 占位子命令（后续任务填充） ---
     for name, help_text in (
@@ -324,7 +328,7 @@ def cmd_repo(args: argparse.Namespace) -> int:
           f"origin: source)")
 
     if args.check:
-        report = check(meta, "repository/overrides")
+        report = check(meta, args.overrides)
         print(format_report(report))
         return 0 if report.ok else 3
     return 0
