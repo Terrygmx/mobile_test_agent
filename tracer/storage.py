@@ -535,6 +535,33 @@ class TraceStore:
         self.conn.commit()
         return int(cur.lastrowid)
 
+    def list_reviews(self, status: str | None = "PENDING") -> list:
+        """review 列表（join recoveries：补丁导出需要的候选信息同行返回）。"""
+        sql = ("SELECT r.id AS review_id, r.review_status, r.reviewer,"
+               " r.reviewed_at, r.note,"
+               " rec.id AS recovery_id, rec.kind, rec.expected_target,"
+               " rec.candidate_target, rec.candidate_type, rec.screen,"
+               " rec.app_build, rec.result"
+               " FROM recovery_reviews r"
+               " JOIN recoveries rec ON rec.id = r.recovery_id")
+        params: tuple = ()
+        if status is not None:
+            sql += " WHERE r.review_status=?"
+            params = (status,)
+        sql += " ORDER BY r.id"
+        return self.conn.execute(sql, params).fetchall()
+
+    def get_review(self, review_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT r.id AS review_id, r.review_status, r.reviewer,"
+            " r.reviewed_at, r.note, r.recovery_id,"
+            " rec.kind, rec.expected_target, rec.candidate_target,"
+            " rec.candidate_type, rec.screen, rec.app_build, rec.result"
+            " FROM recovery_reviews r"
+            " JOIN recoveries rec ON rec.id = r.recovery_id WHERE r.id=?",
+            (review_id,)).fetchone()
+        return dict(row) if row is not None else None
+
     def decide_review(self, review_id: int, review_status: str,
                       reviewer: str, note: str | None = None) -> None:
         if review_status not in REVIEW_STATUSES:

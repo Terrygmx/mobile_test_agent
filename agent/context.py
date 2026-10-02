@@ -58,6 +58,9 @@ class RecoveryContext:
     effective_risk: object | None = None      # testcase.schema.Risk
     effective_idempotency: Idempotency | None = None
     has_postcondition: bool = False
+    # 期望元素类型（9.3-2 类型校验基准；aux 步骤（wait/assert）由管线从
+    # Repository 补——候选类型对不上 → LLM_TARGET_TYPE_MISMATCH
+    expected_type: str | None = None
     # --- Source 子集（9.1「Source 子集」）：当前屏的 metadata 切片，
     #     reconcile_local 的输入。None = 调用方没给，reconciliation 跳过。 ---
     source_metadata: dict | None = None
@@ -89,3 +92,6 @@ class RecoveryResult:
     kind: str | None = None        # settle_retry / local_reconcile / postcondition / run_memo / llm / experience
     failure_type: str | None = None
     detail: dict = field(default_factory=dict)
+    # LLM 候选的定位策略（aux 步骤恢复消费：管线把它挂进 recovered_locators
+    # 覆盖后重跑 wait/assert——动作步由引擎直接 redispatch，不走这里）
+    strategy: dict | None = None

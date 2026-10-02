@@ -518,6 +518,10 @@ Failure
   最先查（幂等与否都查）——成立即 RECOVERED(kind=postcondition) 不重发
   （矩阵 #18）；此前 StepRunner 只在 dispatch 成功路径查，dispatch 异常
   路径无处可判定。
+- **postcondition 双查定档**（⑧，review_m4_task41 P3-4）：StepRunner
+  成功路径与引擎各查一次，**不合并、不去重、以第二次（引擎）为准**——
+  时间窗口内页面就绪视为动作生效（恢复语义：动作结果未知的唯一可判定
+  途径就是再查）；两次结果均留痕（steps.post_detail + recovery stages）。
 
 ### 9.3 候选校验（全部通过才执行）
 
@@ -531,12 +535,37 @@ Failure
 
 `confidence` 只能**过滤**，不能作为"足够安全"的依据，校准不可靠。
 
+**修订记录（Task 4.2 实现后回填）**：校验链落地 `agent/recovery.py
+_llm_stage`（FakeLLM 全覆盖单测）。P1 定档：
+
+- **执行顺序**：解析/动作一致性 → confidence → 数量 → 类型 → Screen →
+  risk+Guard。confidence 提前——它零设备成本，且不给低置信候选任何
+  定位机会；表序与实现序在单故障注入下不可区分（每项各自触发对应
+  failure_type），多故障同时命中时 fail-fast 序是实现细节。
+- **Screen/risk 的 fail-closed 面**：候选 id 在 Repository 登记不到 →
+  无法证明属于当前屏 → `LLM_TARGET_SCREEN_MISMATCH`（漂移元素在**新
+  build 的 metadata** 里必有登记——检测漂移的前提就是双源可比）；候选
+  risk 无声明（None）→ `LLM_RISK_BLOCKED`（"不知道风险"按最高处理）。
+- **类型归一**：`XCUIElementTypeButton ↔ button`（剥前缀 + 小写）；
+  运行时取不到类型 → 拒绝。
+- **动作一致性**（10.4）并入契约层：LLM 改动作类型 →
+  `LLM_INVALID_OUTPUT`（stages 留痕）；8.2 枚举无 LLM_ACTION_MISMATCH，
+  P0 值不复用。
+- **aux 步骤（wait/assert）**：校验链相同，但 ctx.redispatch=None——
+  引擎只验证不执行，候选策略交管线做定位覆盖后重验一次（矩阵 #15）。
+
 ### 9.4 作用域内复用（非学习）
 
 同一次 run 内，`(screen, target_id, app_build)` 的已校验恢复结果可保存在**内存**里，供后续同 run 的用例直接复用，避免同一漂移重复调 LLM：
 
 - 每次使用仍标记 `RECOVERED`，`recoveries.kind = 'RUN_MEMO'`；
 - 只存在于内存；run 结束即丢弃；**不写 Repository**，不跨 run（H15）。
+
+**修订记录（Task 4.2 实现后回填）**：`RunMemo` 落地 `agent/recovery.py`。
+save 时机 = LLM 校验链全过后（⑦定档——确定性路径 settle/postcondition
+不写 memo，它们没有可复用的"新定位"）；消费 = memo 命中后按**保存的
+恢复策略**经 `RecoveryContext.find_with` 重找（review_m4_task41 P3-1：
+按原始 strategies 重找在漂移下必然再失败，复用语义=策略被消费）。
 
 ### 9.5 人工确认流程
 
@@ -548,6 +577,21 @@ mta review reject <id> --note "..."
 
 - 只有 `ACCEPT` 才允许被人工合入 `repository/overrides/`；**工具不自动写入**。
 - 目的：避免"App 真出了 bug → LLM 找到另一个按钮 → 变绿 → 永久学坏"。
+
+**修订记录（Task 4.2 实现后回填）**：`agent/review.py` + `mta review`
+CLI。实际形态定档：
+
+- `mta review list [--status PENDING|ACCEPT|REJECT|ALL]`（join recoveries
+  展示 expected→candidate）；`accept <id> [--reviewer] [--note] [--out
+  PATH]`（决策落库 + **导出补丁**：stdout 或 --out，单元素 overrides
+  YAML，`origin: manual` + review_id 审计字段）；`reject <id> --note`
+  （**note 必填**——拒绝理由是 triage 数据；argparse 层拦 exit 2，
+  agent 层拦 exit 3）。
+- 补丁导出的 fail-loud：recovery 行缺 candidate_target/screen/
+  candidate_type 任一 → 拒绝导出（缺了就是猜值，12.2）。
+- LLM 恢复成功即建 `recovery_reviews(PENDING)`（9.2 末步）；review
+  不可二次决策（已 ACCEPT/REJECT 再改 → exit 3）。
+- reviewer 缺省 `$USER`；全程无任何路径写 `repository/`（H15）。
 
 ---
 
@@ -597,6 +641,19 @@ Policy → Guard → App/后端沙箱。推荐 UITest build 指向 Staging / San
 - **发送前脱敏**：UI 树中 `data_class ∈ {SENSITIVE, SECRET}` 的元素值、SecureTextField 值、匹配手机号 / 邮箱 / 订单号等模式的文本一律遮蔽。**保留 label / type / 层级**——这些是 LLM 判断语义所必需的，过度脱敏会让恢复失效。
 - 截图默认不发送（P1 无 Vision）。
 
+**修订记录（Task 4.2 实现后回填）**：`build_recovery_prompt` /
+`redact_ui_tree` 落地 `llm/prompt.py`（P0 PROMPT_TEMPLATE 保留至
+verify_stage8 退役）。定档：
+
+- SecureTextField 判定看**标签名**（XCUITest 树里它是 tag，不是
+  type/class 属性——漏 tag 名就漏真实输入框，实现时探针实锤过）；
+  data_class 属性为 SENSITIVE/SECRET 同遮。
+- 文本模式：手机号（1[3-9]\d{9}）/ 邮箱 / 订单流水号（ORD|NO|SN 前缀）。
+  value/label/name 三属性过模式；type/层级不动。
+- XML 解析失败 → 原样返回（上层截断兜底）——脱敏故障不得炸掉恢复。
+- 额外字段（含 risk_level）解析器忽略并记录（`ignored_fields` 进
+  stages，H4 审计：LLM 越权痕迹不可静默消失）。
+
 ### 10.5 Budget / Circuit Breaker
 
 ```yaml
@@ -611,6 +668,19 @@ llm:
 ```
 
 熔断后：不再调用 LLM，相关步骤按 `LLM_BUDGET_EXCEEDED` 失败，并在报告首页告警。
+
+**修订记录（Task 4.2 实现后回填）**：`llm/budget.py` 重构（P0 API 兼容）。
+定档：
+
+- **双限独立扣减**：per-run 与 per-testcase 计数器互不挤占；
+- **熔断不可逆**（本 run 内）：连续达阈值即 broken，`record_success`
+  不解锁——连续失败说明提供方/漂移形态系统性异常；
+- **失败定义**：一次 LLM 恢复尝试未以 RECOVERED 收尾（provider 异常 /
+  LLM_INVALID_OUTPUT / 校验链拒绝都算；RECOVERED 复位连续计数）；
+- **装配**（mta run）：`LLM_API_KEY` 存在且未 `--no-llm` → LLMProvider +
+  LLMBudget（默认值即 10.5）；二者缺一 → 确定性半边照常，llm 阶段
+  disabled 如实可见（不是静默无恢复）。`--no-llm` 语义就此真实生效
+  （R18-4 的「未接线」标记退役）。
 
 ---
 

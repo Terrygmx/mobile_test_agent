@@ -89,9 +89,12 @@ def admitted_actions(
     # H6：断言值失败永不恢复——期望值错了重试也是错，恢复只会掩盖。
     if failure_type == "ASSERTION_VALUE_MISMATCH":
         return None
-    # 9.2：Wait Timeout 默认不进 Recovery；显式开启才走恢复流水线。
-    if failure_type == "WAIT_TIMEOUT" and not cfg.on_wait_timeout:
-        return None
+    # 9.2：Wait Timeout 默认不进 Recovery；显式开启 → 与 find 失败同集
+    # （wait 目标重找 / LLM 候选；P1 端到端接线见 Task 4.2 aux 恢复）。
+    if failure_type == "WAIT_TIMEOUT":
+        if not cfg.on_wait_timeout:
+            return None
+        return _PRE_DISPATCH_ALLOWED
     # Guard 拦截是确定性判定（10.1 不可绕过），恢复必然再拦。
     if failure_type == "SECURITY_BLOCKED":
         return None

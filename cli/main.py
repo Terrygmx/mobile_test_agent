@@ -148,9 +148,35 @@ def build_parser() -> argparse.ArgumentParser:
                        help="REMOVED 非空也返回非零（默认不阻塞：12.6 "
                             "「独立任务，不阻塞日常回归」）")
 
+    # --- mta review（9.5 / Task 4.2；H15：只导出补丁，绝不自动写入） ---
+    review_p = sub.add_parser(
+        "review", help="人工确认 RECOVERED（9.5；accept 只导出 overrides "
+                       "补丁供人工合入，工具不写 Repository——H15）")
+    rev_sub = review_p.add_subparsers(dest="review_cmd", required=True)
+    rev_list = rev_sub.add_parser("list", help="列出待确认恢复")
+    rev_list.add_argument("--db", metavar="PATH", default="out/trace.db",
+                          help="TraceStore SQLite 路径（默认 out/trace.db）")
+    rev_list.add_argument("--status", default="PENDING",
+                          choices=["PENDING", "ACCEPT", "REJECT", "ALL"],
+                          help="按状态过滤（默认 PENDING）")
+    rev_acc = rev_sub.add_parser("accept", help="确认恢复 → 导出 overrides 补丁")
+    rev_acc.add_argument("review_id", type=int)
+    rev_acc.add_argument("--db", metavar="PATH", default="out/trace.db")
+    rev_acc.add_argument("--reviewer", metavar="NAME",
+                         default=None, help="确认人（缺省取 $USER）")
+    rev_acc.add_argument("--note", metavar="TEXT", default=None)
+    rev_acc.add_argument("--out", metavar="PATH",
+                         help="补丁落盘路径（缺省 stdout；H15：写 Repository "
+                              "由人工完成）")
+    rev_rej = rev_sub.add_parser("reject", help="拒绝恢复")
+    rev_rej.add_argument("review_id", type=int)
+    rev_rej.add_argument("--db", metavar="PATH", default="out/trace.db")
+    rev_rej.add_argument("--reviewer", metavar="NAME", default=None)
+    rev_rej.add_argument("--note", metavar="TEXT", required=True,
+                         help="拒绝理由必填（triage 数据）")
+
     # --- 占位子命令（后续任务填充） ---
     for name, help_text in (
-        ("review", "人工确认 RECOVERED（M2）"),
         ("report", "生成 HTML/JUnit 报告（M2）"),
     ):
         sub.add_parser(name, help=help_text)
@@ -227,11 +253,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("run: exit 3")
         return 3
     repo = _load_repository(args)
-    # Task 4.1：RecoveryEngine 确定性半边接入（决策表 + settle + postcondition
-    # + RUN_MEMO + ExperienceStore 恒空）。llm=None：LLM Recovery 属 4.2，
-    # 当前恢复全部确定性——--no-llm 的「LLM 调用数恒 0」由此结构性成立。
+    # Task 4.2：RecoveryEngine 装配。LLM_API_KEY 缺省 = 无 LLM（确定性半边
+    # 照常工作）；--no-llm 显式禁用（R18-4 语义就此定档：flag 真实生效，
+    # 不再是「参数存在=功能存在」）。budget 默认值即 10.5。
     from agent.recovery import RecoveryEngine
-    pipeline.recovery = RecoveryEngine(repo=repo)
+    from llm.budget import LLMBudget
+    llm = budget = None
+    if not args.no_llm and os.environ.get("LLM_API_KEY"):
+        from llm.provider import LLMProvider
+        llm = LLMProvider()
+        budget = LLMBudget()
+    pipeline.recovery = RecoveryEngine(repo=repo, llm=llm, budget=budget)
     issues = lint_cases(cases, repo, EnvSecretProvider())
     for i in issues:
         prefix = "ERROR" if i.severity is Severity.ERROR else "WARN "
@@ -344,6 +376,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     pipeline.store = store
     pipeline.deps = PipelineDeps(env=None)  # app 级动作走 pipeline 内建桩
     pipeline._step_runner = runner
+    # 9.3-4：LLM 候选的 Guard 复检与动作步同一实例（10.1：Guard 不受 LLM
+    # 输出影响——同一策略对象才保证这一点）
+    pipeline.recovery.guard = runner.guard
     lifecycle = Lifecycle(store=store)
     pipeline._lifecycle = lifecycle
     pipeline._run_id = run_id
@@ -351,14 +386,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     # 2. 跑（P3-5：统一走 run_all——H10 中止语义/未执行清单只在套件层可达）
     run = pipeline.run_all(cases, run_id=run_id)
 
-    # 3. --no-llm 语义（R18-4）：Recovery 接线在 M4（plan 里程碑重排）；
-    #    当前管线 LLM 调用恒为 0。flag 接了（不报错、如实读入）但**显式
-    #    warn 未生效语义边界**——不留「参数存在=功能存在」的静默假象
-    #    （R17-1/2）。
-    llm_calls = 0
+    # 3. --no-llm 语义（R18-4 最终定档，Task 4.2）：flag 真实禁用 LLM
+    #    Recovery；确定性恢复（settle/postcondition/memo）不受影响。
+    #    LLM 调用数取 budget 实数（报告 LLM Invocation Rate 的分子）。
+    llm_calls = budget.calls_used if budget is not None else 0
     if args.no_llm:
-        print("note: --no-llm：Recovery 确定性半边已接线（4.1），LLM 未接入"
-              "（4.2）——LLM 调用数结构性为 0")
+        print("note: --no-llm：LLM Recovery 已禁用（确定性恢复不受影响）")
 
     # 4. 产物
     if args.junit:
@@ -595,6 +628,57 @@ def cmd_placeholder(args: argparse.Namespace) -> int:
     return 2
 
 
+def cmd_review(args: argparse.Namespace) -> int:
+    """9.5 人工确认流程。accept 导出补丁（stdout 或 --out），任何路径都不
+    写 repository/overrides（H15）。"""
+    import getpass
+
+    from agent.review import ReviewError, decide_review, \
+        export_overrides_patch, list_reviews
+    from tracer.storage import TraceStore
+
+    store = TraceStore(args.db)
+    reviewer = getattr(args, "reviewer", None) or getpass.getuser()
+    try:
+        if args.review_cmd == "list":
+            rows = list_reviews(store, args.status)
+            if not rows:
+                print(f"review: no {args.status} items")
+                return 0
+            for r in rows:
+                print(f"#{r['review_id']} [{r['review_status']}] "
+                      f"recovery={r['recovery_id']} kind={r['kind']} "
+                      f"target={r['expected_target']} -> "
+                      f"{r['candidate_target']} (screen={r['screen']})")
+                if r.get("note"):
+                    print(f"    note: {r['note']}")
+            return 0
+        if args.review_cmd == "accept":
+            decide_review(store, args.review_id, "ACCEPT", reviewer,
+                          args.note)
+            patch = export_overrides_patch(store, args.review_id, reviewer)
+            if args.out:
+                Path(args.out).write_text(patch, encoding="utf-8")
+                print(f"review: #{args.review_id} ACCEPT；补丁已写 "
+                      f"{args.out}（请人工合入 repository/overrides/，"
+                      "工具不代写——H15）")
+            else:
+                print(patch, end="")
+                print(f"# review: #{args.review_id} ACCEPT（补丁见上；"
+                      "人工合入 Repository——H15）")
+            return 0
+        if args.review_cmd == "reject":
+            decide_review(store, args.review_id, "REJECT", reviewer,
+                          args.note)
+            print(f"review: #{args.review_id} REJECT（note 已留痕）")
+            return 0
+        print(f"review: unknown subcommand {args.review_cmd!r}")
+        return 2
+    except ReviewError as e:
+        print(f"REVIEW ERROR: {e}")
+        return 3
+
+
 def main(argv: Sequence | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -606,6 +690,8 @@ def main(argv: Sequence | None = None) -> int:
         return cmd_repo(args)
     if args.command == "source":
         return cmd_source(args)
+    if args.command == "review":
+        return cmd_review(args)
     return cmd_placeholder(args)
 
 

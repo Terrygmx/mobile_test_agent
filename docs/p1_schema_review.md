@@ -489,3 +489,46 @@ Task 3.3 前半）。本轮补齐：
   此前无人对 live 库跑过而未暴露（又一例「真机项不跑就没有证据」）。
   改命名列 INSERT（P0 的 8 列在 M1 迁移中全部保留，命名列对纯净库与
   并集库都成立）。
+
+
+### Task 4.2 完成态（P1-12 LLM Recovery + 校验链 + review 流程，2026-10-02）
+
+plan Task 4.2 全部交付 + 4.1 顺延清单 8 项全核销：
+
+- **10.4 契约**：llm/prompt.py 分区模板（[SYSTEM INSTRUCTIONS]/[TEST GOAL]/
+  [SOURCE METADATA]/[ERROR]/[UNTRUSTED OBSERVED UI]，不可信区殿后）+
+  redact_ui_tree（SecureTextField 按 tag 名判定——探针实锤 tag≠属性；
+  手机号/邮箱/订单号模式；保留 type/label/层级）；llm/parser.py 严格解析
+  （非法 JSON/必填缺失/越界 confidence → LLM_INVALID_OUTPUT；额外字段
+  忽略并记录 ignored_fields，H4 risk_level 尤其如此；action 白名单）。
+- **9.3 校验链**：引擎 _llm_stage 五项（数量/类型/Screen/risk+Guard/
+  confidence，fail-closed 面：候选未登记→screen mismatch、risk None→
+  blocked、类型取不到→mismatch）；动作一致性并入契约层（8.2 无
+  LLM_ACTION_MISMATCH，映射 LLM_INVALID_OUTPUT + stages 留痕）；
+  confidence 提前（零设备成本，不给低置信候选定位机会）。
+- **10.5 budget**：per-run+per-testcase 双限独立扣减；熔断连续 3 次失败、
+  本 run 不可逆（success 不解锁）；失败定义=尝试未以 RECOVERED 收尾；
+  P0 API 兼容（max_calls_per_run 属性 + 无参 try_acquire）。
+- **9.4 memo**：save 时机=LLM 校验全过后（⑦）；消费=find_with 按保存
+  策略重找（P3-1 闭环）。
+- **9.5 review**：agent/review.py + mta review list/accept/reject；accept
+  导出单元素 overrides 补丁（--out 或 stdout，origin: manual + review_id
+  审计；缺 candidate_target/screen/candidate_type 拒导出——12.2 不猜值）；
+  reject note 必填（argparse exit 2 / agent exit 3）；review 不可二次决策；
+  LLM 恢复成功自动建 PENDING。H15 全程无路径写 repository/。
+- **顺延核销**：①reconcile 适配（引擎 _source_subset，合并视图派生本屏
+  子集）；⑤矩阵 #15（assertion 分支接恢复：AssertionTargetDrift→引擎
+  验证候选→定位覆盖→重验一次，RECOVERED+exit 5；recoveries.kind=LLM、
+  detail.recovery_context=assertion_target——kind 枚举记机制不记上下文，
+  拍板记录于此）；⑥on_wait_timeout 接通（wait 分支同一套 aux 恢复；
+  决策表默认不准入不变）；⑦memo save 时机；⑧postcondition 双查定档
+  （不合并/不去重/以第二次为准，均留痕——见 design 9.2 修订记录）。
+- **矩阵覆盖**：#2/#4/#5/#6/#7/#8/#9/#10/#13-on/#15 端到端或单测全过
+  （FakeLLM/FakeDriver，无网络）；#11-#14/#16-#19 已有覆盖不变。
+- **装配**：cmd_run 按 LLM_API_KEY + --no-llm 装配（缺省=确定性半边，
+  llm 阶段 disabled 可见）；llm_calls 取 budget 实数（报告分子）；
+  Guard 与动作步同实例（10.1）。
+- 实测：pytest 731 passed（+36：budget 7 / llm_contract 24 / llm_matrix 5）；
+  M3 Gate 9/9；verify_stage8 全绿（LLMBudget 重构 P0 兼容实测）。
+- **4.3 前置已齐**：矩阵 24 项中 19 项已有 FakeDriver/FakeLLM 覆盖，
+  #2/#15 真机版（改名重编译）与 #16/#17 WDA 真机项留给 verify_p1_m4.py。

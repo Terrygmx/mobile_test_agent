@@ -154,6 +154,10 @@ from agent.policy import (           # noqa: E402
     RecoveryConfig,
     admitted_actions,
 )
+from agent.risk import candidate_risk_allowed   # noqa: E402
+from llm.budget import BudgetConfig, LLMBudget  # noqa: E402
+from llm.parser import parse_llm_output         # noqa: E402
+from llm.prompt import build_recovery_prompt, redact_ui_tree  # noqa: E402
 
 __all__ = ["RunMemo", "RecoveryEngine"]
 
@@ -196,12 +200,18 @@ class RecoveryEngine:
                  experience_store: ExperienceStore | None = None,
                  run_memo: RunMemo | None = None,
                  llm=None,
+                 budget: LLMBudget | None = None,
+                 guard=None,
                  sleep=time.sleep) -> None:
         self.config = config or RecoveryConfig()
         self.repo = repo
         self.experience_store = experience_store or EmptyExperienceStore()
         self.run_memo = run_memo or RunMemo()
-        self.llm = llm            # Task 4.2：LLMProvider（含 budget 校验链）
+        # Task 4.2：llm + budget + guard——LLM 候选执行前过 9.3 校验链，
+        # 风险门控复用 Guard 实例（10.1：Guard 不受 LLM 输出影响）。
+        self.llm = llm
+        self.budget = budget
+        self.guard = guard
         self._sleep = sleep
 
     def recover(self, ctx: RecoveryContext) -> RecoveryResult:
@@ -266,28 +276,36 @@ class RecoveryEngine:
 
         # --- LOCAL_RECONCILE（9.2 第 6-7 步：当前屏识别 + Source 子集对比）---
         recon: dict | None = None
+        screen_res = None          # 当前屏识别结果，LLM 校验链复用（9.3-3）
         if RecoveryAction.LOCAL_RECONCILE in allowed \
                 and ctx.page_source is not None and self.repo is not None:
             try:
                 page = ctx.page_source()
-                screen = current_screen(page, self.repo)
+                screen_res = current_screen(page, self.repo)
             except Exception as e:  # noqa: BLE001 — page_source/解析故障
                 stages.append({"stage": "screen",
                                "outcome": f"{type(e).__name__}"})
-                screen = None
             else:
-                stages.append({"stage": "screen", "outcome": screen.status,
-                               "screen": screen.screen})
-                if screen.status == "FOUND" and ctx.source_metadata:
-                    recon = reconcile_local(
-                        ctx.element_id or "", screen.screen,
-                        ctx.source_metadata, page)
-                    stages.append({"stage": "reconcile",
-                                   "outcome": recon["status"],
-                                   "candidates": recon["candidates_in_runtime"]})
+                stages.append({"stage": "screen",
+                               "outcome": screen_res.status,
+                               "screen": screen_res.screen})
+                if screen_res.status == "FOUND":
+                    # 顺延①（4.1 记账）：12.3 两键 metadata 的 reconcile 适配
+                    # 在引擎内收口——ctx.source_metadata 由调用方给时优先，
+                    # 缺省从 Repository 合并视图派生本屏子集。
+                    source_meta = ctx.source_metadata or self._source_subset(
+                        screen_res.screen)
+                    if source_meta:
+                        recon = reconcile_local(
+                            ctx.element_id or "", screen_res.screen,
+                            source_meta, page)
+                        stages.append({"stage": "reconcile",
+                                       "outcome": recon["status"],
+                                       "candidates":
+                                           recon["candidates_in_runtime"]})
                 # 确定性候选自动执行是设计 stretch（9.2 可选）——P1 不自动
                 # 执行运行时候选：候选元素无 metadata，risk 未知按最高处理
-                # （agent/risk.candidate_risk_allowed）。候选留给 4.2 LLM。
+                # （agent/risk.candidate_risk_allowed）。候选留给 LLM。
 
         # --- RUN_MEMO（9.4：同 run 复用，reconciliation 后、LLM 前） ---
         # 命中后必须按 memo 保存的**恢复策略**重找（ctx.find_with）——
@@ -321,14 +339,191 @@ class RecoveryEngine:
             stages.append({"stage": "experience",
                            "outcome": len(exp) if exp else "empty"})
 
-        # --- LLM（4.2 之前恒 None：到此为止，如实报告未恢复） ---
+        # --- LLM（9.2 第 8 步；--no-llm / 未配置 → disabled 如实可见） ---
         if self.llm is None:
             stages.append({"stage": "llm", "outcome": "disabled"})
             return RecoveryResult(
                 recovered=False, failure_type=ctx.failure_type,
                 detail={"stages": stages, "recovery": "no_llm_engine"})
-        # Task 4.2：LLM 调用 + 9.3 五项候选校验链在此接续。
-        stages.append({"stage": "llm", "outcome": "not_implemented"})
-        return RecoveryResult(
-            recovered=False, failure_type=ctx.failure_type,
-            detail={"stages": stages, "recovery": "no_llm_engine"})
+        return self._llm_stage(ctx, stages, screen_res, recon)
+
+    # --- LLM 校验链（9.3 五项 + 10.4 契约 + 10.5 budget/熔断） ---
+
+    def _source_subset(self, screen_id: str) -> dict:
+        """12.3 → reconcile_local 输入适配（顺延①）：Repository 合并视图
+        派生本屏子集。合并视图保留的是「登记过的 id」——动态前缀的人工
+        登记实例（12.2 预期流程）也在其中，对 DRIFT/MATCH 判定语义正确。"""
+        if self.repo is None or not screen_id:
+            return {}
+        try:
+            elements = self.repo.elements_of(screen_id)
+        except Exception:  # noqa: BLE001 — repo 侧异常不伪装成空屏
+            return {}
+        entries = []
+        for e in elements or []:
+            entries.append({
+                "accessibilityId": e.id,
+                "resolution_type": "literal",
+                "screen": screen_id,
+                "type": getattr(e, "type", None),
+            })
+        return {"elements": entries, "screens": [screen_id]}
+
+    def _prompt_source_subset(self, screen_id: str) -> list[dict]:
+        """[SOURCE METADATA] 分区（可信，来自构建产物）：id/type/风险。"""
+        if self.repo is None or not screen_id:
+            return []
+        try:
+            elements = self.repo.elements_of(screen_id)
+        except Exception:  # noqa: BLE001
+            return []
+        return [{"id": e.id,
+                 "type": getattr(e, "type", None),
+                 "risk": getattr(getattr(e, "risk", None), "name", None)}
+                for e in elements or []]
+
+    def _llm_stage(self, ctx: RecoveryContext, stages: list,
+                   screen_res, recon: dict | None) -> RecoveryResult:
+        def miss(failure_type: str, stage: dict) -> RecoveryResult:
+            stages.append(stage)
+            if self.budget is not None:
+                self.budget.record_failure()
+            return RecoveryResult(
+                recovered=False, failure_type=ctx.failure_type
+                if failure_type == "keep" else failure_type,
+                detail={"stages": stages, "recovery": "llm_missed"})
+
+        if ctx.page_source is None:
+            return miss(ctx.failure_type, {"stage": "llm",
+                                           "outcome": "no_page_source"})
+        if self.budget is not None and                 not self.budget.try_acquire(ctx.testcase_id):
+            # 矩阵 #10：熔断/预算耗尽后**不发**新 API 调用（FakeLLM 计数为证）
+            return miss("LLM_BUDGET_EXCEEDED",
+                        {"stage": "llm", "outcome": "LLM_BUDGET_EXCEEDED"})
+
+        page = redact_ui_tree(ctx.page_source())
+        timeout = self.budget.config.timeout_seconds if self.budget else 20
+        prompt = build_recovery_prompt(
+            goal_element=ctx.element_id or "",
+            goal_action=ctx.action or "tap",
+            error=ctx.failure_type or "",
+            source_subset=self._prompt_source_subset(
+                (screen_res.screen if screen_res and screen_res.screen
+                 else ctx.screen_id) or ""),
+            page_source=page,
+            reconciliation=(json.dumps(recon, ensure_ascii=False)
+                            if recon else ""))
+        try:
+            raw = self.llm.complete(prompt, timeout=timeout)
+        except Exception as e:  # noqa: BLE001 — provider 故障如实分类
+            return miss("LLM_PROVIDER_ERROR",
+                        {"stage": "llm", "outcome": "LLM_PROVIDER_ERROR",
+                         "error": f"{type(e).__name__}: {e}"})
+
+        parsed = parse_llm_output(raw)
+        if parsed.ignored_fields:
+            stages.append({"stage": "llm", "outcome": "ignored_fields",
+                           "fields": sorted(parsed.ignored_fields)})
+        if not parsed.valid:
+            return miss("LLM_INVALID_OUTPUT",
+                        {"stage": "llm", "outcome": "LLM_INVALID_OUTPUT"})
+        # 动作一致性（10.4：action 必须与原动作一致；P0 P1-2 白名单同款）
+        if ctx.action and parsed.action != ctx.action:
+            return miss("LLM_INVALID_OUTPUT",
+                        {"stage": "llm", "outcome": "LLM_INVALID_OUTPUT",
+                         "reason": f"action {parsed.action!r} != "
+                                   f"original {ctx.action!r}"})
+        # 9.3-5 confidence（先于执行；只过滤不当安全依据，10.4 注）
+        conf = parsed.confidence or 0.0
+        min_conf = self.budget.config.min_confidence if self.budget else 0.85
+        if conf < min_conf:
+            return miss("LLM_LOW_CONFIDENCE",
+                        {"stage": "llm", "outcome": "LLM_LOW_CONFIDENCE",
+                         "confidence": conf})
+
+        candidate = {"type": parsed.target_type or "accessibility_id",
+                     "value": parsed.target_value}
+        stages.append({"stage": "llm", "outcome": "candidate",
+                       "target": candidate, "confidence": conf})
+
+        # 9.3-1 数量：恰一
+        try:
+            found = ctx.find_with((candidate,))
+        except Exception as e:  # noqa: BLE001 — ElementNotFound 等
+            return miss("LLM_TARGET_NOT_FOUND",
+                        {"stage": "validate", "check": "count",
+                         "outcome": f"{type(e).__name__}"})
+        try:
+            element = _single_element(found)
+        except LookupError:
+            return miss("LLM_TARGET_AMBIGUOUS",
+                        {"stage": "validate", "check": "count",
+                         "outcome": "ambiguous"})
+
+        # 9.3-2 类型：候选类型 == 期望类型（XCUIElementTypeButton↔button）
+        expected_type = (ctx.expected_type or "").strip()
+        runtime_type = ""
+        get_attr = getattr(element, "get_attribute", None)
+        if callable(get_attr):
+            runtime_type = get_attr("type") or ""
+        if expected_type:
+            norm = lambda t: str(t or "").replace("XCUIElementType", "").lower()  # noqa: E731
+            if not runtime_type or norm(runtime_type) != norm(expected_type):
+                return miss("LLM_TARGET_TYPE_MISMATCH",
+                            {"stage": "validate", "check": "type",
+                             "expected": expected_type,
+                             "runtime": runtime_type or "unknown"})
+
+        # 9.3-3 Screen：候选必须登记在当前屏（fail-closed：登记不到=无法证明）
+        current_screen_id = (screen_res.screen if screen_res
+                             and screen_res.screen else ctx.screen_id) or ""
+        try:
+            eff = self.repo.resolve(candidate["value"], build=ctx.app_build)
+        except Exception:  # noqa: BLE001 — UnknownReference 等
+            return miss("LLM_TARGET_SCREEN_MISMATCH",
+                        {"stage": "validate", "check": "screen",
+                         "outcome": "candidate_unregistered"})
+        if not current_screen_id or eff.screen != current_screen_id:
+            return miss("LLM_TARGET_SCREEN_MISMATCH",
+                        {"stage": "validate", "check": "screen",
+                         "outcome": eff.screen or "unknown",
+                         "current": current_screen_id})
+
+        # 9.3-4 risk：候选 effective_risk == LOW 且 Guard 通过
+        if not candidate_risk_allowed(eff.risk):
+            return miss("LLM_RISK_BLOCKED",
+                        {"stage": "validate", "check": "risk",
+                         "risk": getattr(getattr(eff, "risk", None),
+                                         "name", None)})
+        if self.guard is not None:
+            from executor.guard import GuardContext
+            try:
+                self.guard.check(GuardContext(
+                    risk=eff.risk, screen_id=eff.screen,
+                    element_id=eff.id, action=parsed.action or "tap"))
+            except Exception as e:  # noqa: BLE001 — GuardViolation → 10.1
+                if type(e).__name__ == "GuardViolation":
+                    return miss("SECURITY_BLOCKED",
+                                {"stage": "validate", "check": "guard",
+                                 "outcome": str(getattr(e, "reason", e))})
+                raise
+
+        # 全链通过：动作步执行（redispatch 用**原步骤的值**——LLM 编造的
+        # 输入内容永不采纳）；aux 步骤不执行，返回策略给管线做覆盖重跑。
+        if self.budget is not None:
+            self.budget.record_success()
+        if ctx.redispatch is not None:
+            ctx.redispatch(element)
+        result = RecoveryResult(
+            recovered=True, kind="llm",
+            detail={"stages": stages, "candidate": candidate,
+                    "confidence": conf,
+                    # 9.5 补丁导出需要：候选登记屏 + 类型（无则导出 fail-loud）
+                    "screen": current_screen_id,
+                    "candidate_type": getattr(eff, "type", None)},
+            strategy=candidate)
+        # ⑦（9.4）：LLM 校验通过后写 RUN_MEMO——同 run 同漂移免重复调用
+        if ctx.element_id:
+            self.run_memo.save(current_screen_id, ctx.element_id,
+                               ctx.app_build, candidate)
+        return result

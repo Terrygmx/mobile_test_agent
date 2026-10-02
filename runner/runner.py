@@ -61,6 +61,8 @@ class RunStepContext:
     has_postcondition: bool = False
     # Task 2.7：postcondition 具体 spec（不只布尔）。None = 未声明。
     postcondition_spec: object | None = None
+    # 4.2：期望元素类型（9.3-2 类型校验基准），由调用方从 metadata 填。
+    expected_type: str | None = None
     step_index: int = 0
 
 

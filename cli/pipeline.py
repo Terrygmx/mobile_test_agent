@@ -105,6 +105,10 @@ class SessionPipeline:
         # Task 4.1：RecoveryEngine（确定性半边）。None = 不恢复（旧行为，
         # P0 链路不受影响）——接线由 cmd_run 按组件装配注入。
         self.recovery = recovery
+        # 4.2：恢复后的定位覆盖（aux 步骤重跑用）——LLM 候选策略按目标 ref
+        # 记住，locate() 优先消费。run 级生命周期（与 RUN_MEMO 同语义：
+        # 同 run 同 build 内复用，pipeline 实例即 run 作用域）。
+        self._recovered_locators: dict[str, list[dict]] = {}
 
     # --- 发现 ---
 
@@ -222,6 +226,7 @@ class SessionPipeline:
                             continue
                         step_ctx, outcome = self._run_action_step(
                             runner, step, idx)
+                        rec = None
                         if (not outcome.ok and self.recovery is not None
                                 and outcome.phase is not None):
                             rec = self.recovery.recover(self._recovery_context(
@@ -235,31 +240,23 @@ class SessionPipeline:
                                 step_recovered = rec.kind
                             else:
                                 outcome.detail["recovery_attempted"] = rec.detail
+                                # 矩阵 #9/#10：LLM 链拒绝/预算耗尽的 failure_type
+                                # 替换步骤症状（8.2 语义——它就是最终症状）
+                                if rec.failure_type:
+                                    outcome.failure_type = rec.failure_type
                         # 失败步骤也落 steps 表——只记成功会让 trace
                         # 「看起来跑到一半就没了」，排障无从下手
                         step_row_id = lifecycle.record_step(
                             outcome, step_index=idx,
                             status="RECOVERED" if step_recovered else None)
-                        if step_recovered:
-                            # 9.2 末步：恢复必须写 recoveries 行（矩阵/报告
-                            # 追溯的唯一证据）。kind 落库用 trace schema 的
-                            # 大写枚举（14.2 契约）；local_reconcile 对应
-                            # DETERMINISTIC_CANDIDATE（无 LLM 的确定性候选）。
-                            if self.store is not None and step_row_id:
-                                rec_kind = {"settle_retry": "SETTLE_RETRY",
-                                            "postcondition": "POSTCONDITION",
-                                            "run_memo": "RUN_MEMO",
-                                            "local_reconcile":
-                                                "DETERMINISTIC_CANDIDATE",
-                                            }.get(step_recovered,
-                                                  step_recovered.upper())
-                                self.store.record_recovery(
-                                    step_row_id, rec_kind,
-                                    expected_target=outcome.element_id,
-                                    app_build="local",
-                                    result="RECOVERED", accepted=True)
+                        if step_recovered and rec is not None:
+                            # 9.2 末步：恢复必须写 recoveries 行（kind 用
+                            # 14.2 大写枚举）；LLM 恢复建 PENDING review。
+                            self._write_recovery_row(
+                                step_row_id, outcome.element_id or "", rec)
                             recovered_kinds.append(step_recovered)
                             step_recovered = None
+                        rec = None
                         if not outcome.ok:
                             status = "FAIL"
                             failure_type = outcome.failure_type
@@ -270,14 +267,64 @@ class SessionPipeline:
                             break
                     elif isinstance(step, WaitStep):
                         t1 = time.time()
-                        wait_engine.wait_for(step.wait_for)
+                        try:
+                            wait_engine.wait_for(step.wait_for)
+                        except InfraError:
+                            raise
+                        except Exception as e:
+                            # ⑥（4.2 顺延）：wait 超时进恢复管线——决策表
+                            # 默认不准入（on_wait_timeout=false），开了才走
+                            rec = self._aux_recover(
+                                runner, tc, attempt, step.wait_for.target,
+                                e, "wait")
+                            if rec is None or not rec.recovered \
+                                    or rec.strategy is None:
+                                raise
+                            self._recovered_locators[
+                                self._ref_key(step.wait_for.target)] = \
+                                [dict(rec.strategy)]
+                            wait_engine.wait_for(step.wait_for)
+                            self._record_aux_recovered(
+                                lifecycle, idx, "wait_for",
+                                _target_label(step.wait_for.target),
+                                rec, latency_ms=int((time.time() - t1) * 1000))
+                            recovered_kinds.append(rec.kind)
+                            continue
                         self._record_aux_step(
                             lifecycle, idx, "wait_for",
                             _target_label(step.wait_for.target),
                             latency_ms=int((time.time() - t1) * 1000))
                     elif isinstance(step, AssertionStep):
                         t1 = time.time()
-                        result = assertion_engine.check(step.assertion)
+                        try:
+                            result = assertion_engine.check(step.assertion)
+                        except InfraError:
+                            raise
+                        except Exception as e:
+                            # H6：断言**值**失败不进恢复；目标漂移（定位失效）
+                            # 是 find 语义 → 矩阵 #15（kind=assertion_target
+                            # 指恢复上下文，recoveries.kind 仍是机制枚举）
+                            if type(e).__name__ != "AssertionTargetDrift":
+                                raise
+                            rec = self._aux_recover(
+                                runner, tc, attempt, step.assertion.target,
+                                e, "assert")
+                            if rec is None or not rec.recovered \
+                                    or rec.strategy is None:
+                                raise
+                            self._recovered_locators[
+                                self._ref_key(step.assertion.target)] = \
+                                [dict(rec.strategy)]
+                            result = assertion_engine.check(step.assertion)
+                            if not result.passed:
+                                raise  # 覆盖重验仍不过 → 原异常语义 FAIL
+                            self._record_aux_recovered(
+                                lifecycle, idx, "assert",
+                                _target_label(step.assertion.target),
+                                rec, latency_ms=int((time.time() - t1) * 1000),
+                                context="assertion_target")
+                            recovered_kinds.append(rec.kind)
+                            continue
                         self._record_aux_step(
                             lifecycle, idx, "assert",
                             _target_label(step.assertion.target),
@@ -432,6 +479,7 @@ class SessionPipeline:
             effective_risk=step_ctx.risk,
             effective_idempotency=step_ctx.idempotency,
             has_postcondition=step_ctx.has_postcondition,
+            expected_type=getattr(step_ctx, "expected_type", None),
             source_metadata=None,
             refind=(lambda: ex.find(step_ctx.strategies))
             if ex is not None else None,
@@ -520,6 +568,7 @@ class SessionPipeline:
 
         ref = step.target
         element_id = ref.id if ref is not None else ""
+        eff = None
         # screen 引用不进 find/perform 管线（它是 wait/assert 的目标）
         # Executor.find 的 Locator 契约是 list[dict]（strat["type"] 下标
         # 访问）——2.7 M2 Gate 真机实锤：传 (type, value) 元组会 TypeError。
@@ -555,23 +604,117 @@ class SessionPipeline:
             # H7 闭环：spec 也传下去（不只布尔）——执行端见
             # make_postcondition_checker / StepRunner.postcondition_checker
             postcondition_spec=step.postcondition,
+            expected_type=getattr(eff, "type", None),
             step_index=idx)
         return ctx, runner.run_step(ctx)
     def _record_aux_step(self, lifecycle: Lifecycle, idx: int, step_type: str,
                          target_id: str, *, ok: bool = True,
                          failure_type: str | None = None,
-                         latency_ms: int = 0, detail: dict | None = None
-                         ) -> None:
-        """wait/assert 步骤也落 steps 表（P3-1：TraceStore 全步可见）。"""
+                         latency_ms: int = 0, detail: dict | None = None,
+                         status: str | None = None
+                         ) -> int | None:
+        """wait/assert 步骤也落 steps 表（P3-1：TraceStore 全步可见）。
+
+        `status` 覆盖：aux 恢复成功终态 RECOVERED（8.1，不是 SUCCESS）。
+        返回 steps 行 id——aux 恢复也要落 recoveries 行（9.2）。"""
         if self.store is None:
-            return
-        lifecycle.record_step(StepOutcome(
+            return None
+        return lifecycle.record_step(StepOutcome(
             ok=ok, step_index=idx, action=step_type, element_id=target_id,
             failure_type=failure_type, latency_ms=latency_ms,
-            detail=detail or {}), step_index=idx)
+            detail=detail or {}), step_index=idx, status=status)
+
+    def _write_recovery_row(self, step_row_id: int | None, target_id: str,
+                            rec, context: str | None = None) -> None:
+        """recoveries 行（kind=机制枚举）+ LLM 恢复建 PENDING review
+        （9.2 末步 / 9.5 流程入口）。动作步与 aux 步共用。"""
+        if self.store is None or not step_row_id:
+            return
+        kind_map = {"settle_retry": "SETTLE_RETRY", "postcondition":
+                    "POSTCONDITION", "run_memo": "RUN_MEMO",
+                    "local_reconcile": "DETERMINISTIC_CANDIDATE"}
+        rec_kind = kind_map.get(rec.kind, (rec.kind or "LLM").upper())
+        rec_id = self.store.record_recovery(
+            step_row_id, rec_kind, expected_target=target_id,
+            candidate_target=(rec.strategy or {}).get("value"),
+            candidate_type=rec.detail.get("candidate_type"),
+            screen=rec.detail.get("screen"),
+            app_build="local", result="RECOVERED", accepted=True)
+        if rec.kind == "llm":
+            self.store.create_review(rec_id)
+
+    def _record_aux_recovered(self, lifecycle, idx, step_type, target_id,
+                              rec, *, latency_ms: int = 0,
+                              context: str | None = None) -> None:
+        """aux 步骤恢复成功：steps 行 RECOVERED + recoveries 行。"""
+        step_row_id = lifecycle.record_step(
+            StepOutcome(ok=True, step_index=idx, action=step_type,
+                        element_id=target_id, latency_ms=latency_ms,
+                        detail={"recovery_kind": rec.kind,
+                                "recovery_context": context,
+                                "recovery": rec.detail}),
+            step_index=idx, status="RECOVERED")
+        self._write_recovery_row(step_row_id, target_id, rec, context)
+
+    def _aux_recover(self, runner, tc, attempt, target_ref, exc,
+                     step_type: str):
+        """aux 步骤（wait/assert）的恢复入口（4.2 ⑤⑥）。
+
+        断言目标漂移（矩阵 #15）与 wait 超时（on_wait_timeout 接通）经
+        引擎取回**已校验的候选策略**——aux 无 dispatch 语义，ctx.redispatch
+        为 None，引擎只验证不执行；重跑由调用方在覆盖定位后做一次。
+        返回 None = 未准入/未恢复（调用方按原异常走 FAIL）。
+        """
+        if self.recovery is None:
+            return None
+        from agent.context import RecoveryContext
+        from executor.policy import FailurePhase, Idempotency
+
+        failure_type, _ = _map_exception(exc)
+        phase = FailurePhase.PRE_DISPATCH
+        ref_id = getattr(target_ref, "id", "") or ""
+        eff_screen, eff_type = "", None
+        strategies: tuple = ()
+        repo = self.deps.repo if self.deps else None
+        if repo is not None and ref_id:
+            try:
+                eff = repo.resolve(target_ref, build="local")
+                eff_screen = eff.screen
+                eff_type = getattr(eff, "type", None)
+                strategies = tuple({"type": st.type, "value": st.value}
+                                   for st in eff.strategies)
+            except Exception:  # noqa: BLE001 — 引用解析失败照常进引擎
+                pass
+        ex = runner.ex if runner is not None else None
+        ctx = RecoveryContext(
+            failure_type=failure_type, phase=phase,
+            element_id=ref_id, screen_id=eff_screen,
+            strategies=strategies,
+            action=None,                      # aux 无动作语义
+            effective_idempotency=Idempotency.IDEMPOTENT,  # 读操作可重验
+            expected_type=eff_type,
+            refind=(lambda: ex.find(list(strategies)))
+            if ex is not None and strategies else None,
+            find_with=(lambda sts: ex.find(list(sts)))
+            if ex is not None else None,
+            redispatch=None,                  # 只验证不执行（H7 精神）
+            page_source=(getattr(ex, "page_source", None)
+                         if ex is not None else None),
+            testcase_id=tc.id, attempt=attempt, app_build="local")
+        return self.recovery.recover(ctx)
+
+    @staticmethod
+    def _ref_key(target_ref) -> str:
+        return f"{getattr(target_ref, 'type', 'element')}:" \
+               f"{getattr(target_ref, 'id', target_ref)}"
 
     def _locator_for(self, runner: StepRunner):
         def locate(target_ref):
+            # 恢复覆盖优先（4.2 aux 重跑）：该目标被 LLM 候选恢复过 → 直接
+            # 用恢复策略定位。不查 repo——漂移元素在 repo 里 resolve 会失败。
+            override = self._recovered_locators.get(self._ref_key(target_ref))
+            if override:
+                return [dict(s) for s in override]
             if self.deps and self.deps.repo is not None:
                 eff = self.deps.repo.resolve(target_ref, build="local")
                 if hasattr(eff, "marker"):
