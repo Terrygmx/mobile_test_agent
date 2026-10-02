@@ -532,3 +532,35 @@ plan Task 4.2 全部交付 + 4.1 顺延清单 8 项全核销：
   M3 Gate 9/9；verify_stage8 全绿（LLMBudget 重构 P0 兼容实测）。
 - **4.3 前置已齐**：矩阵 24 项中 19 项已有 FakeDriver/FakeLLM 覆盖，
   #2/#15 真机版（改名重编译）与 #16/#17 WDA 真机项留给 verify_p1_m4.py。
+
+
+### review_m4_task42_2026-10-02 核销记录（2×P2 / 4×P3，全收口）
+
+- **P2-1（已修）**：脱敏模式 `\b` 边界在「下划线/CJK + 数字」形态失效
+  （`user_13812345678`、`用户13812345678`、`订单NO123456789` 曾原样出
+  prompt——裸数字测试恰好掩盖）。修复：手机号/订单号换数字边界
+  lookaround（`(?<![0-9])…(?![0-9])`），邮箱去前导 `\b`；泄漏三形态
+  单测 + FakeLLM 捕获实文双重断言（引擎出口级别，防接线回归）。
+- **P2-2（已修）**：reconciliation 通道绕过脱敏 + recon JSON 落可信区 +
+  同一次恢复拉两次页。修复：一次取页 → `redact_ui_tree` → 同一份喂
+  current_screen / reconcile_local / prompt（marker `screen.*` 与元素 id
+  不命中遮蔽模式，识别语义不变）；recon JSON 归位 [UNTRUSTED OBSERVED UI]
+  区（带「runtime 派生，同样不可信」标注）；build_recovery_prompt 撤销
+  reconciliation 参数（运行时派生数据一律由调用方拼进不可信区）。
+  单测断言：泄漏元素 id 不出现在 prompt、recon 标注在不可信区头之后。
+- **P3-1（已修，提前于 4.3）**：报告首页熔断告警——`render_run_report
+  (llm_broken=)`，熔断时首页渲染告警卡，未熔断零痕迹；cmd_run 传
+  `budget.broken`。
+- **P3-2（已修/已拍板）**：①预算拒绝（try_acquire False）没有发生
+  「尝试」，不再计入熔断连续失败（否则预算耗尽与熔断互相催肥）；
+  ②aux 步骤（wait/assert）恢复失败维持原症状并记账拍板——aux 异常携带
+  结构化结果（assertion_value），症状替换会丢结构；LLM 失败类型经
+  recovery_attempted 留痕（design 10.5 修订记录）。
+- **P3-3（已修）**：P0 无参 `try_acquire()` 豁免 per-testcase 限（None
+  桶不知 testcase 归属；verify_stage8 第 4 次调用会炸的一踩边界），
+  只受 per-run 限；语义有专项测试。
+- **P3-4（已修）**：`miss()` 的 "keep" 死哨兵移除（本就没有调用方传它）；
+  pipeline.py:399 多空格格式化。连续第三例 heredoc 压行——后续多行
+  Python 改写一律用 Edit 工具或写完立即 `cat -A` 复核。
+- 实测：pytest 735 passed（+4：泄漏形态 / recon 通道 / P0 豁免 / 报告
+  告警）；M3 Gate 9/9；verify_stage8 实跑全绿（P0 豁免真实验证）。

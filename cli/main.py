@@ -404,7 +404,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             run, args.html, llm_calls=llm_calls,
             # R18-4/R17-3：分母是**步骤数**（lifecycle 累计），不是用例数
             executed_steps=lifecycle.steps_recorded,
-            wda_restarts=0)
+            wda_restarts=0,
+            # 10.5：熔断首页告警
+            llm_broken=(budget.broken if budget is not None else False))
         print(f"html: {args.html}")
 
     for r in run.results:

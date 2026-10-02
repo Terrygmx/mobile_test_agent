@@ -50,10 +50,20 @@ def _llm_json(action="tap", value="signin_button", conf=0.93, **extra):
 
 
 class FakeRepo:
-    """最小 Repository 契约：elements_of(screen) + resolve(id, build)。"""
+    """最小 Repository 契约：elements_of(screen) + resolve(id, build) +
+    current_screen 所需的 marker 映射（screen 识别/reconcile 阶段真实可达，
+    否则 recon 恒 None——recon 通道的测试会空转）。"""
 
     def __init__(self, elements):
         self._els = {e.id: e for e in elements}
+        self.generated_screens = {
+            "HomeView": SimpleNamespace(marker="screen.HomeView"),
+            "ProfileView": SimpleNamespace(marker="screen.ProfileView"),
+        }
+        self.override_screens = {}
+
+    def screen_kind_hint(self, screen_id):
+        return "page"
 
     def elements_of(self, screen):
         return [e for e in self._els.values() if e.screen == screen]
@@ -176,6 +186,50 @@ def test_prompt_no_secret_values_h14():
     assert "13812345678" not in prompt
     assert "TextField" in prompt and "pw" in prompt, \
         "保留 type/label——过度脱敏会让恢复失效（10.4）"
+
+
+def test_redaction_leak_forms_p2_1():
+    """review_m4_task42 P2-1 探针形态：\b 在下划线/CJK 与数字间不成立——
+    「user_138…」「用户138…」「订单NO123456789」都曾泄漏进 prompt。
+    修复后全部遮蔽（对 redact 输出直接断言 + 引擎出口双重验证）。"""
+    leak_page = ("<App>"
+                 "<Node name='user_13812345678'/>"
+                 "<Node label='用户13812345678'/>"
+                 "<Node value='订单NO123456789'/>"
+                 "<Node name='mail_user@example.com'/>"
+                 "</App>")
+    masked = redact_ui_tree(leak_page)
+    for secret in ("13812345678", "NO123456789", "mail_user@example.com"):
+        assert secret not in masked, f"泄漏形态未遮蔽: {secret}"
+
+    # 引擎出口（FakeLLM 捕获实文）——防「忘了接 redact」回归
+    page_holder = {"page": leak_page}
+    engine, c, llm = _ctx(page_source=lambda: page_holder["page"])
+    engine.recover(c)
+    assert llm.calls
+    assert "13812345678" not in llm.calls[0]
+    assert "NO123456789" not in llm.calls[0]
+    assert "mail_user@example.com" not in llm.calls[0]
+
+
+def test_recon_channel_redacted_p2_2():
+    """review_m4_task42 P2-2：reconciliation 候选派生自运行时页——必须
+    来自脱敏页，且 JSON 落在不可信区（[UNTRUSTED OBSERVED UI] 之后）。"""
+    # 元素 id 含订单号形态 → recon candidates_in_runtime 若取自原始页
+    # 就会带原值；脱敏后应是 masked 形态
+    leak_page = ("<App><Node name='screen.HomeView' visible='true'/>"
+                 "<Node name='order_NO123456789'/></App>")
+    engine, c, llm = _ctx(page_source=lambda: leak_page,
+                          refind=lambda: (_ for _ in ())
+                          .throw(LookupError("drifted")))
+    r = engine.recover(c)
+    assert llm.calls
+    prompt = llm.calls[0]
+    assert "NO123456789" not in prompt, "recon 通道未脱敏"
+    assert "runtime reconciliation" in prompt, "recon 必须带 runtime 派生标注"
+    # recon JSON 在不可信区头部之后
+    assert prompt.index("[UNTRUSTED OBSERVED UI]") < \
+        prompt.index("runtime reconciliation")
 
 
 def test_engine_prompt_sent_is_redacted():

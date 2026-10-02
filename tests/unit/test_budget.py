@@ -75,3 +75,13 @@ def test_config_defaults_are_design_values():
     assert c.timeout_seconds == 20
     assert c.min_confidence == 0.85
     assert c.breaker_consecutive_failures == 3
+
+
+def test_p0_noarg_call_exempt_from_per_testcase_limit():
+    """review_m4_task42 P3-3：P0 无参形态全落 None 桶——若套 per-testcase
+    上限，verify_stage8 第 4 次调用就会被拒（一踩就炸的兼容边界）。
+    无参 = 只受 per-run 限。"""
+    b = LLMBudget()   # 默认 per-testcase=3, per-run=10
+    assert all(b.try_acquire() for _ in range(10)), \
+        "无参调用不受 per-testcase 限（P0 兼容）"
+    assert b.try_acquire() is False, "per-run 上限仍然生效"

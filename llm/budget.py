@@ -75,11 +75,15 @@ class LLMBudget:
             return False
         if self._used_run >= self.config.max_calls_per_run:
             return False
-        used_tc = self._used_testcase.get(testcase_id, 0)
-        if used_tc >= self.config.max_calls_per_testcase:
-            return False
+        # P0 无参形态（verify_stage8 回归路径）豁免 per-testcase 限：
+        # 它不知道 testcase 归属，全落 None 桶——套 3 次上限会在第 4 次调用
+        # 炸掉 P0 回归（review P3-3 实锤边界）。无参 = 只受 per-run 限。
+        if testcase_id is not None:
+            used_tc = self._used_testcase.get(testcase_id, 0)
+            if used_tc >= self.config.max_calls_per_testcase:
+                return False
+            self._used_testcase[testcase_id] = used_tc + 1
         self._used_run += 1
-        self._used_testcase[testcase_id] = used_tc + 1
         return True
 
     def record_failure(self) -> None:

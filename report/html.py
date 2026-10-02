@@ -45,6 +45,7 @@ def render_run_report(
     report_url: str | None = None,
     unexecuted: list[str] | None = None,
     abort_reason: str | None = None,
+    llm_broken: bool = False,
 ) -> str:
     """14.5 首页。字段：Total / PASS / RECOVERED / FAIL / INFRA / ENV /
     BLOCKED、LLM 调用数、耗时、LLM Invocation Rate、WDA 重启次数。
@@ -88,6 +89,15 @@ def render_run_report(
             f"<td>{_esc(r.cleanup_status or '')}</td>"
             f"<td>{(r.duration_ms or 0) / 1000:.3f}</td></tr>")
 
+    breaker_html = ""
+    if llm_broken:
+        # 10.5 明文「报告首页告警」：熔断必须一眼可见（RECOVERED 同款纪律
+        # ——CI 判读者只看首页）
+        breaker_html = ('<section class="breaker-alert">'
+                        '<strong>LLM 熔断已触发（10.5）</strong>——连续失败达'
+                        "阈值，本 run 后续不再调用；相关步骤按 "
+                        "LLM_BUDGET_EXCEEDED 记录。</section>")
+
     unexec_html = ""
     if unexecuted:
         items = "".join(f"<li>{_esc(t)}</li>" for t in unexecuted)
@@ -107,6 +117,9 @@ body {{ font-family: -apple-system, "PingFang SC", sans-serif;
         min-width: 84px; text-align: center; }}
 .card .num {{ font-size: 22px; font-weight: 600; }}
 .card .label {{ font-size: 12px; color: #666; margin-top: 2px; }}
+.breaker-alert {{ border: 1px solid #d33; background: #fdeaea;
+             padding: 10px 16px; border-radius: 8px; margin-bottom: 20px;
+             color: #8a1f1f; }}
 .c-recovered {{ border-color: #e6a817; background: #fff8e6; }}
 .c-fail {{ border-color: #d33; background: #fdeaea; }}
 table {{ border-collapse: collapse; width: 100%; }}
@@ -123,6 +136,7 @@ th, td {{ border: 1px solid #ddd; padding: 6px 10px; text-align: left;
 <p>run_id: <code>{_esc(run.run_id)}</code>
  | exit code: <code>{run.exit_code}</code>{_esc(f" | {report_url}" if report_url else "")}</p>
 <div class="cards">{cards}</div>
+{breaker_html}
 <table><thead><tr>
 <th>用例</th><th>状态</th><th>failure_type</th><th>phase</th>
 <th>attribution</th><th>cleanup</th><th>耗时(s)</th>

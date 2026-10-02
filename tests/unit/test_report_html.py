@@ -95,3 +95,15 @@ def test_llm_calls_zero_shows_real_zero():
         TestcaseResult(testcase_id="a", status="PASS")),
         llm_calls=0, executed_steps=10)
     assert "LLM" in html
+
+
+def test_breaker_alert_on_homepage():
+    """10.5「报告首页告警」（review_m4_task42 P3-1）：熔断必须一眼可见；
+    未熔断零痕迹（没有事就不喊）。"""
+    from runner.result import RunResult
+    from report.html import render_run_report
+
+    html = render_run_report(RunResult(run_id="r"), llm_broken=True)
+    assert "LLM 熔断已触发" in html
+    html_ok = render_run_report(RunResult(run_id="r"), llm_broken=False)
+    assert "熔断" not in html_ok

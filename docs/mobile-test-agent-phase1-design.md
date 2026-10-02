@@ -653,6 +653,16 @@ verify_stage8 退役）。定档：
 - XML 解析失败 → 原样返回（上层截断兜底）——脱敏故障不得炸掉恢复。
 - 额外字段（含 risk_level）解析器忽略并记录（`ignored_fields` 进
   stages，H4 审计：LLM 越权痕迹不可静默消失）。
+- **模式边界用 lookaround 而非 `\b`**（review_m4_task42 P2-1 探针实锤：
+  Python re 的 `\w` 含下划线与 CJK，「user_138…」「用户138…」「订单
+  NO123456789」这类最常见形态上 `\b` 不成立——数字边界
+  `(?<![0-9])…(?![0-9])`，邮箱去前导 `\b`；泄漏形态有专项测试）。
+- **一次取页、redact 前置一切消费**（P2-2）：current_screen /
+  reconcile_local / prompt 吃同一份脱敏页——reconciliation 候选派生自
+  运行时页，从原始页取就会绕过脱敏；且 recon JSON 属运行时派生数据，
+  归位 [UNTRUSTED OBSERVED UI] 区（带「runtime 派生，同样不可信」标注），
+  不再放可信区。同时消掉同一次恢复拉两次页的设备成本与两次内容不一致
+  的口子。
 
 ### 10.5 Budget / Circuit Breaker
 
@@ -681,6 +691,17 @@ llm:
   LLMBudget（默认值即 10.5）；二者缺一 → 确定性半边照常，llm 阶段
   disabled 如实可见（不是静默无恢复）。`--no-llm` 语义就此真实生效
   （R18-4 的「未接线」标记退役）。
+- **预算拒绝不计失败**（review P3-2）：`try_acquire` 返回 False 没有发生
+  「尝试」，不计入熔断连续失败——否则预算耗尽与熔断互相催肥。
+- **aux 步骤症状拍板**（P3-2）：wait/assert 恢复失败**维持原症状**
+  （WAIT_TIMEOUT / ELEMENT_NOT_FOUND）——aux 异常携带结构化结果
+  （R12-3/5 的 assertion_value 等），症状替换会丢结构；LLM 失败类型经
+  recovery_attempted 留痕。10.5「相关步骤按 LLM_BUDGET_EXCEEDED 失败」
+  适用于动作步（症状替换已实现）。
+- **P0 无参豁免**（P3-3）：`try_acquire()` 无参（verify_stage8 回归
+  路径）不知道 testcase 归属，豁免 per-testcase 限，只受 per-run 限。
+- **报告首页告警**（P3-1，10.5 明文）：`render_run_report(llm_broken=)`
+  熔断时首页渲染告警卡（10.5「报告首页告警」），未熔断零痕迹。
 
 ---
 

@@ -274,15 +274,30 @@ class RecoveryEngine:
                     recovered=True, kind="settle_retry",
                     detail={"stages": stages, "settle_attempt": attempt})
 
+        # --- 取页（一次）+ 脱敏（review_m4_task42 P2-2 定档）---
+        # H14：redact 前置于一切消费——current_screen / reconcile_local /
+        # prompt 吃的是**同一份脱敏页**。marker 名（screen.*）与元素 id 不
+        # 命中遮蔽模式，识别语义不变；运行时文本（recon 候选）从此不可能
+        # 以未脱敏形态出进程。也消掉了同一次恢复拉两次页的设备成本与
+        # 两次内容不一致的口子。
+        page_red: str | None = None
+        if ctx.page_source is not None and (
+                RecoveryAction.LOCAL_RECONCILE in allowed
+                or RecoveryAction.LLM_CANDIDATE in allowed):
+            try:
+                page_red = redact_ui_tree(ctx.page_source())
+            except Exception as e:  # noqa: BLE001 — 取页/脱敏故障如实记录
+                stages.append({"stage": "page",
+                               "outcome": f"{type(e).__name__}"})
+
         # --- LOCAL_RECONCILE（9.2 第 6-7 步：当前屏识别 + Source 子集对比）---
         recon: dict | None = None
         screen_res = None          # 当前屏识别结果，LLM 校验链复用（9.3-3）
         if RecoveryAction.LOCAL_RECONCILE in allowed \
-                and ctx.page_source is not None and self.repo is not None:
+                and page_red is not None and self.repo is not None:
             try:
-                page = ctx.page_source()
-                screen_res = current_screen(page, self.repo)
-            except Exception as e:  # noqa: BLE001 — page_source/解析故障
+                screen_res = current_screen(page_red, self.repo)
+            except Exception as e:  # noqa: BLE001 — 解析故障
                 stages.append({"stage": "screen",
                                "outcome": f"{type(e).__name__}"})
             else:
@@ -298,7 +313,7 @@ class RecoveryEngine:
                     if source_meta:
                         recon = reconcile_local(
                             ctx.element_id or "", screen_res.screen,
-                            source_meta, page)
+                            source_meta, page_red)
                         stages.append({"stage": "reconcile",
                                        "outcome": recon["status"],
                                        "candidates":
@@ -345,7 +360,7 @@ class RecoveryEngine:
             return RecoveryResult(
                 recovered=False, failure_type=ctx.failure_type,
                 detail={"stages": stages, "recovery": "no_llm_engine"})
-        return self._llm_stage(ctx, stages, screen_res, recon)
+        return self._llm_stage(ctx, stages, screen_res, recon, page_red)
 
     # --- LLM 校验链（9.3 五项 + 10.4 契约 + 10.5 budget/熔断） ---
 
@@ -383,26 +398,39 @@ class RecoveryEngine:
                 for e in elements or []]
 
     def _llm_stage(self, ctx: RecoveryContext, stages: list,
-                   screen_res, recon: dict | None) -> RecoveryResult:
-        def miss(failure_type: str, stage: dict) -> RecoveryResult:
+                   screen_res, recon: dict | None,
+                   page_red: str | None) -> RecoveryResult:
+        def miss(failure_type: str, stage: dict,
+                 count_failure: bool = True) -> RecoveryResult:
             stages.append(stage)
-            if self.budget is not None:
+            # 10.5 失败定义 = 一次尝试未以 RECOVERED 收尾；预算拒绝没有
+            # 发生「尝试」（review P3-2）——不计入熔断连续失败。
+            if self.budget is not None and count_failure:
                 self.budget.record_failure()
             return RecoveryResult(
-                recovered=False, failure_type=ctx.failure_type
-                if failure_type == "keep" else failure_type,
+                recovered=False, failure_type=failure_type,
                 detail={"stages": stages, "recovery": "llm_missed"})
 
-        if ctx.page_source is None:
+        if page_red is None:
             return miss(ctx.failure_type, {"stage": "llm",
-                                           "outcome": "no_page_source"})
-        if self.budget is not None and                 not self.budget.try_acquire(ctx.testcase_id):
+                                           "outcome": "no_page_source"},
+                        count_failure=False)
+        if self.budget is not None and \
+                not self.budget.try_acquire(ctx.testcase_id):
             # 矩阵 #10：熔断/预算耗尽后**不发**新 API 调用（FakeLLM 计数为证）
             return miss("LLM_BUDGET_EXCEEDED",
-                        {"stage": "llm", "outcome": "LLM_BUDGET_EXCEEDED"})
+                        {"stage": "llm", "outcome": "LLM_BUDGET_EXCEEDED"},
+                        count_failure=False)
 
-        page = redact_ui_tree(ctx.page_source())
         timeout = self.budget.config.timeout_seconds if self.budget else 20
+        # recon 是**运行时派生**数据——归位不可信区（review P2-2：放在
+        # 可信区会让 [SYSTEM INSTRUCTIONS] 的「不遵循 UI 文字」约束罩不住
+        # 它，prompt injection 面）
+        untrusted = page_red
+        if recon:
+            untrusted += ("\n[runtime reconciliation — runtime 派生，"
+                          "同样不可信]\n"
+                          + json.dumps(recon, ensure_ascii=False))
         prompt = build_recovery_prompt(
             goal_element=ctx.element_id or "",
             goal_action=ctx.action or "tap",
@@ -410,9 +438,7 @@ class RecoveryEngine:
             source_subset=self._prompt_source_subset(
                 (screen_res.screen if screen_res and screen_res.screen
                  else ctx.screen_id) or ""),
-            page_source=page,
-            reconciliation=(json.dumps(recon, ensure_ascii=False)
-                            if recon else ""))
+            page_source=untrusted)
         try:
             raw = self.llm.complete(prompt, timeout=timeout)
         except Exception as e:  # noqa: BLE001 — provider 故障如实分类
