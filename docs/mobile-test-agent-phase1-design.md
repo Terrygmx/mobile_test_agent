@@ -423,7 +423,13 @@ def run_step(step) -> StepResult:
 ### 8.2 两个独立字段
 
 - `failure_type`：**症状**，可自动判定。
-  `ELEMENT_NOT_FOUND, AMBIGUOUS_ELEMENT, WAIT_TIMEOUT, ASSERTION_VALUE_MISMATCH, ACTION_OUTCOME_UNKNOWN, CURRENT_SCREEN_UNKNOWN, SCREEN_AMBIGUOUS, APP_CRASH, WDA_FAILURE, APPIUM_FAILURE, DEVICE_UNAVAILABLE, ENV_RESET_FAILED, CLEANUP_FAILED, UNSUPPORTED_RESET, SECRET_NOT_FOUND, BUILD_METADATA_MISMATCH, SECURITY_BLOCKED, LLM_DISABLED, LLM_BUDGET_EXCEEDED, LLM_TIMEOUT, LLM_PROVIDER_ERROR, LLM_INVALID_OUTPUT, LLM_LOW_CONFIDENCE, LLM_TARGET_NOT_FOUND, LLM_TARGET_AMBIGUOUS, LLM_TARGET_TYPE_MISMATCH, LLM_TARGET_SCREEN_MISMATCH, LLM_RISK_BLOCKED`
+  `ELEMENT_NOT_FOUND, AMBIGUOUS_ELEMENT, WAIT_TIMEOUT, ASSERTION_VALUE_MISMATCH, ACTION_OUTCOME_UNKNOWN, CURRENT_SCREEN_UNKNOWN, SCREEN_AMBIGUOUS, APP_CRASH, WDA_FAILURE, APPIUM_FAILURE, DEVICE_UNAVAILABLE, ENV_RESET_FAILED, CLEANUP_FAILED, UNSUPPORTED_RESET, SECRET_NOT_FOUND, BUILD_METADATA_MISMATCH, SECURITY_BLOCKED, LLM_DISABLED, LLM_BUDGET_EXCEEDED, LLM_TIMEOUT, LLM_PROVIDER_ERROR, LLM_INVALID_OUTPUT, LLM_LOW_CONFIDENCE, LLM_TARGET_NOT_FOUND, LLM_TARGET_AMBIGUOUS, LLM_TARGET_TYPE_MISMATCH, LLM_TARGET_SCREEN_MISMATCH, LLM_RISK_BLOCKED, LLM_REDISPATCH_FAILED`
+
+**修订记录（Task 4.3 实现后回填）**：新增 `LLM_REDISPATCH_FAILED`——恢复
+链全部通过后的重发（redispatch）本身失败。真机 Gate 实锤：重发异常若
+逃出 recover()，会被管线外层映射成无 steps 行的用例级 ELEMENT_NOT_FOUND
+（恢复现场全丢）；引擎现把两处 redispatch（settle / llm）包进 miss 语义，
+重发失败=恢复未完成、原症状保留、现场可排障。
 - `failure_attribution`：**归因**，系统默认 `UNTRIAGED`，由人工或后续规则填写。
   `UNTRIAGED, APP_DEFECT, AUTOMATION_DEFECT, ENVIRONMENT_DEFECT, TEST_DATA_DEFECT, INFRASTRUCTURE_DEFECT`
   **系统不得仅凭 `ELEMENT_NOT_FOUND` 判定 `APP_DEFECT`。**
@@ -1140,6 +1146,36 @@ mobile-test-agent/
 | P1-13 | 故障注入（第 18 节）全部通过 |
 
 **Gate M4**：故障矩阵全部符合预期；漂移 build 得到 `RECOVERED` + 退出码 5；`--no-llm` 下同样场景按预期 FAIL；LLM 调用率 ≤ 10%。
+
+**修订记录（Task 4.3 实现后回填）**：Gate 判据机械映射与实测（verify_p1_m4.py，
+out/p1_m4_gate/summary.json）：
+
+- **G1** 矩阵 24 项全过 = `test_matrix_01_12.py` + `test_matrix_13_24.py`
+  （FakeDriver 版 pytest 24/24）。#2 漂移与 #16/#17 WDA 的真机部分在
+  verify_p1_m4.py；WDA 进程击杀不可确定性自动化，重试链由 FakeDriver
+  矩阵覆盖（真机 WDA 会话语义 M2 Gate 已验）。
+- **G2** 漂移方法（F5 同款演进）：源码真改名 `username_field →
+  user_field` → 重编译安装 → **重扫描**（不带 --check：overrides 手工旧 id
+  悬空正是 12.6 应报的缺口）→ 用例仍引旧 id。注意与 9.3 fail-closed 的
+  交互：**新 id 必须已登记且带 risk 声明**（源扫描元素 risk=None →
+  LLM_RISK_BLOCKED 是正确行为），故 overrides 副本（H15：不写原件）附
+  user_field 别名（risk LOW）——语义上即 9.5 review-accept 的人工确认产物；
+  漂移恢复闭环 = 人的确认（risk 声明）+ LLM 桥接运行时命名。实测：
+  RECOVERED + exit 5 + recoveries 行 kind=LLM。
+- **G3** 同场景 `--no-llm` → FAIL + exit 1、llm_calls=0（本地 reconcile
+  只分类不选候选，无 LLM 即不可恢复——设计语义的直接体现）。
+- **G4** 调用率 = runs.llm_calls（budget 实数，本次落库）/ 已执行 steps
+  = 1/12 = 8.3% ≤ 10%。
+- 真机 Gate 挖出并修复的管线缺陷（均已入修订记录）：①cmd_run 真机组件
+  装配从未接线（Task 2.7 遗留，恒 exit 3）——本任务接线（caps 由 simctl
+  解析，session/device_session.resolve_local_caps）；②RecoveryContext
+  .element_id 带容器前缀 → reconcile 恒 UNKNOWN（DRIFT 误判）——改用
+  repo 解析后的裸 id；③动作分派按原 locator 重找 → 恢复重发必然再失败
+  ——Executor 增 `tap_element/input_element`（已定位元素直派，
+  ensure_alive 保留），正常路径同样受益（消除双 find 竞态）；④
+  redispatch 异常逃出 → 无 steps 行假终态（见 8.2 修订）；⑤runs.llm_calls
+  从未落库（rate 恒 0%）+ exit 5 的 run 落 status=FAIL——补
+  update_run_llm 与 _run_status RECOVERED 终态。
 
 ### M5 — 稳定性基线
 

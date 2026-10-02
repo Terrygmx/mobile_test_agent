@@ -53,6 +53,7 @@ FAILURE_TYPES = {
     "LLM_INVALID_OUTPUT", "LLM_LOW_CONFIDENCE", "LLM_TARGET_NOT_FOUND",
     "LLM_TARGET_AMBIGUOUS", "LLM_TARGET_TYPE_MISMATCH",
     "LLM_TARGET_SCREEN_MISMATCH", "LLM_RISK_BLOCKED",
+    "LLM_REDISPATCH_FAILED",
 }
 
 ATTRIBUTIONS = {
@@ -394,6 +395,16 @@ class TraceStore:
         self.conn.execute(
             "UPDATE runs SET end_time=?, status=?, exit_code=? WHERE run_id=?",
             (_now(), status, exit_code, run_id))
+        self.conn.commit()
+
+    def update_run_llm(self, run_id: str, *, llm_calls: int,
+                       llm_enabled: bool) -> None:
+        """10.5/19 节：LLM 调用数（budget 实数）与开关落 runs 行——
+        LLM Invocation Rate 的分子从 trace 可复算，不依赖报告进程内存
+        （M4 Gate 实锤：end_run 不带 llm_calls → 恒 0，rate 被低估）。"""
+        self.conn.execute(
+            "UPDATE runs SET llm_calls=?, llm_enabled=? WHERE run_id=?",
+            (llm_calls, int(llm_enabled), run_id))
         self.conn.commit()
 
     # -- testcase_runs --

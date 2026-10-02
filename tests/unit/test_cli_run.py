@@ -441,13 +441,22 @@ steps:
     assert row[1] == "NON_IDEMPOTENT", f"idempotency 被用例声明放松：{row[1]}"
 
 
-def test_r16_2_no_fake_driver_exits_3_not_fail(tmp_path, capsys):
-    """R16-2（P1 fail-quiet）：真机组件未装配 → PreflightError exit 3，
+def test_r16_2_no_fake_driver_exits_3_not_fail(tmp_path, capsys, monkeypatch):
+    """R16-2（P1 fail-quiet）：真机装配失败 → PreflightError exit 3，
     不再伪装成 5 条 FAIL + exit 1，且不往 trace.db 写假 FAIL 终态。
 
-    Task 3.3 收口后真机路径第一道前置是 12.5 Build Identity 校验（G8）：
-    无 booted 模拟器/App 未安装时报 build identity 错——同为前置配置错误
-    （exit 3），先后取决于环境，断言接受两类文案。"""
+    Task 2.7 接线（Task 4.3）后真机路径真实装配；单测封闭：stub 掉 caps
+    解析与设备连接，装配失败同为前置配置错误（exit 3）。真机路径第一道
+    前置是 12.5 Build Identity 校验（G8）——无 booted 模拟器/App 未安装
+    时先在 gate 报错，断言接受两类文案。"""
+    monkeypatch.setattr("session.device_session.resolve_local_caps",
+                        lambda udid, bundle_id: {"udid": udid})
+    from session.device_session import DeviceSession
+
+    def _no_device(self):
+        raise RuntimeError("unit-test: 无设备会话")
+
+    monkeypatch.setattr(DeviceSession, "connect", _no_device)
     suites = tmp_path / "suites"
     suites.mkdir()
     (suites / "a_001.yaml").write_text(VALID_TC, encoding="utf-8")
@@ -457,7 +466,7 @@ def test_r16_2_no_fake_driver_exits_3_not_fail(tmp_path, capsys):
                  "--db", str(db)])  # 无 --fake-driver
     out = capsys.readouterr().out
     assert code == 3, f"未装配必须 exit 3，got {code}"
-    assert "未装配" in out or "build identity" in out
+    assert "设备会话建立失败" in out or "build identity" in out
     # trace.db 里不得出现假 FAIL 终态
     if db.exists():
         import sqlite3
@@ -671,16 +680,18 @@ def test_dispatch_action_uses_executor_tap_input(tmp_path):
     calls = []
 
     class _RealContractEx:
-        """对齐生产 Executor 的方法面：find/tap/input/swipe，无 perform。"""
+        """对齐生产 Executor 的方法面：find/tap/input/swipe + 已定位元素
+        动作 tap_element/input_element（M4：分派优先用已找到的元素，
+        不按 locator 重找——漂移重发路径 M4 Gate 真机实锤）。"""
 
         def find(self, locator):
             return _StubOKElement()
 
-        def tap(self, locator):
-            calls.append(("tap", tuple(locator)))
+        def tap_element(self, element):
+            calls.append(("tap_element", element))
 
-        def input(self, locator, value):
-            calls.append(("input", tuple(locator), value))
+        def input_element(self, element, value):
+            calls.append(("input_element", element, value))
 
     store = TraceStore(tmp_path / "trace.db")
     store.start_run("run_dispatch")
@@ -700,11 +711,9 @@ steps:
     result = pipe.run_case(runner, Lifecycle(store=store), case,
                            run_id="run_dispatch")
     assert result.status == "PASS", result.detail
-    assert calls[0][0] == "input" and calls[0][2] == "qa_user"
-    assert calls[1][0] == "tap"
-    # locator 契约：list[dict]
-    for c in calls:
-        assert all(isinstance(s, dict) for s in c[1])
+    assert calls[0][0] == "input_element" and calls[0][2] == "qa_user"
+    assert calls[1][0] == "tap_element"
+    # 已定位元素分派：不再按 locator 重找（元素对象直接透传）
 
 
 def test_r18_3_cleanup_failure_written_to_trace(tmp_path):

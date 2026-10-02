@@ -269,7 +269,15 @@ class RecoveryEngine:
                     stages.append({"stage": "settle",
                                    "outcome": "no_redispatch_callable"})
                     break
-                ctx.redispatch(element)
+                try:
+                    ctx.redispatch(element)
+                except Exception as e:  # noqa: BLE001 — 重发失败=恢复未完成，
+                    # 原症状保留（异常逃出会让管线整例崩掉、steps 无行——
+                    # M4 Gate 真机实锤）
+                    stages.append({"stage": "settle", "attempt": attempt,
+                                   "outcome": f"redispatch:"
+                                              f"{type(e).__name__}"})
+                    break
                 return RecoveryResult(
                     recovered=True, kind="settle_retry",
                     detail={"stages": stages, "settle_attempt": attempt})
@@ -539,7 +547,15 @@ class RecoveryEngine:
         if self.budget is not None:
             self.budget.record_success()
         if ctx.redispatch is not None:
-            ctx.redispatch(element)
+            try:
+                ctx.redispatch(element)
+            except Exception as e:  # noqa: BLE001 — 重发失败=恢复未完成
+                # （原症状保留；异常逃出会让管线整例崩掉、steps 无行——
+                # M4 Gate 真机实锤）
+                return miss("LLM_REDISPATCH_FAILED",
+                            {"stage": "redispatch",
+                             "outcome": f"{type(e).__name__}: "
+                                        f"{str(e)[:120]}"})
         result = RecoveryResult(
             recovered=True, kind="llm",
             detail={"stages": stages, "candidate": candidate,

@@ -564,3 +564,37 @@ plan Task 4.2 全部交付 + 4.1 顺延清单 8 项全核销：
   Python 改写一律用 Edit 工具或写完立即 `cat -A` 复核。
 - 实测：pytest 735 passed（+4：泄漏形态 / recon 通道 / P0 豁免 / 报告
   告警）；M3 Gate 9/9；verify_stage8 实跑全绿（P0 豁免真实验证）。
+
+### Task 4.3 完成记录（P1-13 故障注入矩阵 24/24 + Gate M4 真机收口）
+
+- **矩阵 24/24（FakeDriver）**：`tests/fault_injection/test_matrix_01_12.py`
+  + `test_matrix_13_24.py`，共享桩收敛 `fi_support.py`（run_matrix/FakeDS/
+  FakeExecutor/llm_json/drift_repo，消掉三份平行复制）。每行断言
+  failure_type + 8.4 退出码；#22 BLOCKED 映射与 #11/#12 屏等待终态分类
+  是本任务在 cli/pipeline 补齐的管线能力（`_screen_wait_failure`）。
+- **真机 Gate（verify_p1_m4.py，out/p1_m4_gate/summary.json 全绿）**：
+  G1 矩阵 pytest 实跑；G2 真改名重编译+重扫描漂移 → RECOVERED + exit 5
+  （recoveries 行 kind=LLM/candidate=user_field/conf 0.9）；G3 同场景
+  --no-llm → FAIL + exit 1 + llm_calls=0；G4 调用率 1/12=8.3% ≤10%。
+  漂移方法要点：新 id 须登记且带 risk 声明（overrides 副本附 9.5-accept
+  语义的别名，H15 不写原件）；重扫描不带 --check（12.6 报 overrides 悬空
+  正确）；网关模型 step-5-preview 已不可用（火山 Agentplan 404），实测
+  换 glm-5-3-flash（env 可覆盖）。
+- **真机 Gate 挖出并修复的 5 个管线缺陷**：①cmd_run 真机装配从未接线
+  （Task 2.7 遗留恒 exit 3）→ cli/main 接线 + resolve_local_caps（simctl
+  解析 caps，M2/F5 硬编码退役）；②RecoveryContext.element_id 带容器前缀
+  → reconcile 恒 UNKNOWN（DRIFT 误判、LLM 信心被压到 0.8）→ 用 eff.id
+  裸 id；③动作分派按原 locator 重找 → 恢复重发必败 → Executor 增
+  tap_element/input_element（ensure_alive 保留），正常路径同步受益；
+  ④redispatch 异常逃出 recover() → 无 steps 行假终态 → 引擎内 miss 化
+  + 新 failure_type LLM_REDISPATCH_FAILED；⑤runs.llm_calls 恒 0 +
+  exit 5 落 status=FAIL → TraceStore.update_run_llm + _run_status
+  RECOVERED 终态。
+- 实测：pytest 759 passed（全量）；verify_p1_m4 exit 0；真机 profile_001
+  走新管线 PASS（交叉验证装配/分派改造不破坏既有链路）。
+- 流程教训：①「Task 2.7 接线」类 TODO 在后续里程碑被当背景假设——Gate
+  要求 mta run 真机路径可跑时才暴露；Task 依赖要逐条核「真的接了吗」。
+  ②FakeDriver 测试的 perform() 分派路径恰好掩盖生产 tap(locator) 重找
+  路径——替身方法面要与生产契约对齐（_RealContractEx 同步更新）。
+  ③网关类外部依赖会漂移（模型 404/间歇 5xx）——验证脚本对
+  PROVIDER_ERROR 整 run 重试一次，校验链拒绝（确定性语义）不重试。

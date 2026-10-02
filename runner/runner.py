@@ -294,10 +294,25 @@ class StepRunner:
         tap(locator) / input(locator, value) —— 没有统一 perform()。
         测试替身若自带 perform(action, element, value) 仍优先（旧测试
         不断裂）。未知 action fail-loud（不静默跳过）。
+
+        已定位元素（正常路径 run_step find 的产物 / 恢复引擎按恢复后策略
+        找到的候选）优先走 *_element：不按 ctx.strategies 重找——漂移下
+        原 locator 必然再失败（M4 Gate 真机实锤），正常路径也省一次
+        重复 find 的竞态窗口。
         """
         perform = getattr(self.ex, "perform", None)
         if callable(perform):
             perform(ctx.action, element, ctx.value)
+            return
+        if element is not None:
+            if ctx.action == "tap":
+                self.ex.tap_element(element)
+            elif ctx.action == "input":
+                self.ex.input_element(element, ctx.value or "")
+            else:
+                raise ValueError(
+                    f"action {ctx.action!r} has no element dispatch: "
+                    f"Executor exposes tap_element/input_element only")
             return
         if ctx.action == "tap":
             self.ex.tap(ctx.strategies)

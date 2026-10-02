@@ -83,3 +83,46 @@ class DeviceSession:
                 raise InfraError("WDA restart failed")
         assert self.driver is not None
         return self.driver
+
+
+def resolve_local_caps(udid: str, bundle_id: str) -> dict:
+    """真机装配 caps（Task 2.7 接线 / M4 Gate 前置）。
+
+    device_name / platform_version 从 simctl 解析，不再像 M2/F5 那样在
+    脚本里硬编码；udid 必填（无 booted 设备时上层 fail-loud）。
+    """
+    import os
+    import subprocess
+
+    env = dict(os.environ)
+    env.setdefault("DEVELOPER_DIR",
+                   "/Applications/Xcode.app/Contents/Developer")
+    proc = subprocess.run(
+        ["xcrun", "simctl", "list", "devices", "-j", "booted"],
+        capture_output=True, text=True, env=env, timeout=30)
+    if proc.returncode != 0:
+        raise InfraError(f"simctl 查询失败: {proc.stderr[:200]}")
+    name, runtime = None, None
+    devices = json.loads(proc.stdout or "{}").get("devices", {})
+    for runtime_key, lst in devices.items():
+        for dev in lst:
+            if dev.get("udid") == udid and dev.get("state") == "Booted":
+                name = dev.get("name")
+                # com.apple.CoreSimulator.SimRuntime.iOS-18-5 → 18.5
+                runtime = runtime_key.rsplit(".", 1)[-1].replace("iOS-", "")\
+                    .replace("-", ".")
+                break
+        if name:
+            break
+    if name is None:
+        raise InfraError(f"UDID {udid} 不在 booted 设备中")
+    return {
+        "platform_name": "iOS",
+        "automation_name": "XCUITest",
+        "device_name": name,
+        "platform_version": runtime,
+        "udid": udid,
+        "bundle_id": bundle_id,
+        "no_reset": True,
+        "new_command_timeout": 120,
+    }

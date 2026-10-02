@@ -43,12 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
     target.add_argument("--suite", metavar="NAME")
     target.add_argument("--tag", metavar="TAG")
     target.add_argument("--case", metavar="CASE_ID")
-    # R18-4：--no-llm 尚未接线（Recovery 属 M4 语义）。help 如实标注现状
-    # ——「参数存在≠功能存在」（R17-1/2）。不摘除：调用方（脚本/CI）传了
-    # 不该报错，而应 fail-loud 于 warning 并在 trace 记「flag 未生效」。
+    # R18-4 → Task 4.2：--no-llm 已接线（真实禁用 LLM Recovery，确定性恢复
+    # 不受影响；见 cmd_run 内 3. --no-llm 语义段）。
     run_p.add_argument("--no-llm", action="store_true",
-                       help="[未接线/M4] 禁用 LLM recovery；当前管线无 "
-                            "Recovery 调用故 LLM 数恒 0")
+                       help="禁用 LLM Recovery（确定性恢复不受影响；"
+                            "LLM 调用数记 0）")
     run_p.add_argument("--junit", metavar="PATH",
                        help="输出 JUnit XML（8.5）")
     run_p.add_argument("--html", metavar="PATH",
@@ -325,10 +324,10 @@ def cmd_run(args: argparse.Namespace) -> int:
                   "metadata_mismatch=1, override=1")
 
     # 2. 组件装配（fake-driver：最小桩；真机：Appium 会话，Task 2.7 接线）
+    from executor.guard import EnvKind, Guard
+
     store.start_run(run_id, suite=args.suite, **bi_fields)
     if args.fake_driver:
-        from executor.guard import EnvKind, Guard
-
         class _StubEx:
             def find(self, strategies):
                 # Executor 契约：返回单个元素；多匹配抛 AmbiguousElement
@@ -364,17 +363,49 @@ def cmd_run(args: argparse.Namespace) -> int:
         runner = StepRunner(ex, _StubDS(),
                             Guard(EnvKind.SANDBOX), run_id=run_id)
     else:
-        # R16-2：真机组件未装配是前置配置错误 → exit 3，fail-loud。
-        # 原实现继续执行，5 条 NoneType AttributeError 伪装成 FAIL + exit 1，
-        # 且假终态写进了 trace.db（8.2 纪律：配置错误不得伪装成测试失败）。
-        store.end_run(run_id, status="ABORTED", exit_code=3)
-        print("PREFLIGHT ERROR: 真机组件未装配（Task 2.7 接线）——"
-              "当前请使用 --fake-driver")
-        print("run: exit 3")
-        return 3
+        # Task 2.7 接线（M4 Gate 前置）：真机 Appium 会话组件装配。
+        # caps 由 simctl 解析（M2/F5 时代是脚本内硬编码）；Guard 恒
+        # SANDBOX（本地模拟器环境，生产拦截语义见矩阵 #22 与
+        # --allow-production）；DeviceSession 不挂 TraceStore 做 recorder
+        # （record_infra 契约不匹配——infra 落库由 pipeline 负责，JSONL
+        # 留作 debug 副本）。装配失败 = 前置配置错误 → exit 3（fail-loud）。
+        from environment.manager import EnvironmentManager
+        from executor.executor import Executor
+        from session.app_session import AppSession
+        from session.device_session import (DeviceSession,
+                                            resolve_local_caps)
+
+        udid = args.udid or bi.resolve_booted_udid()
+        bundle_id = args.bundle_id or ""
+        if not bundle_id:
+            store.end_run(run_id, status="ABORTED", exit_code=3)
+            print("PREFLIGHT ERROR: 真机路径需要 --bundle-id")
+            print("run: exit 3")
+            return 3
+        try:
+            appium_url = os.environ.get("APPIUM_URL",
+                                        "http://127.0.0.1:4723")
+            ds = DeviceSession(appium_url, resolve_local_caps(udid, bundle_id))
+            ds.connect()
+        except Exception as e:
+            store.end_run(run_id, status="ABORTED", exit_code=3)
+            print(f"PREFLIGHT ERROR: 设备会话建立失败：{e}")
+            print("run: exit 3")
+            return 3
+        app = AppSession(ds, bundle_id)
+        env = EnvironmentManager(app)
+        ex = Executor(ds)
+        runner = StepRunner(ex, ds, Guard(EnvKind.SANDBOX), run_id=run_id)
 
     pipeline.store = store
-    pipeline.deps = PipelineDeps(env=None)  # app 级动作走 pipeline 内建桩
+    if args.fake_driver:
+        pipeline.deps = PipelineDeps(env=None)  # app 级动作走 pipeline 内建桩
+    else:
+        # 真机 deps（M2 Gate 同链路）：EnvironmentManager 真做
+        # precondition.reset / cleanup（R16-4）。
+        pipeline.deps = PipelineDeps(env=env, repo=repo, app=app,
+                                     device_session=ds, executor=ex,
+                                     store=store)
     pipeline._step_runner = runner
     # 9.3-4：LLM 候选的 Guard 复检与动作步同一实例（10.1：Guard 不受 LLM
     # 输出影响——同一策略对象才保证这一点）
@@ -382,14 +413,29 @@ def cmd_run(args: argparse.Namespace) -> int:
     lifecycle = Lifecycle(store=store)
     pipeline._lifecycle = lifecycle
     pipeline._run_id = run_id
+    if not args.fake_driver:
+        # H7 闭环：非幂等动作的 postcondition 真实执行（checker 复用
+        # WaitEngine 条件矩阵，M2 Gate 同款）。
+        from cli.pipeline import make_postcondition_checker
+        runner.postcondition_checker = make_postcondition_checker(
+            pipeline, runner)
 
     # 2. 跑（P3-5：统一走 run_all——H10 中止语义/未执行清单只在套件层可达）
-    run = pipeline.run_all(cases, run_id=run_id)
+    try:
+        run = pipeline.run_all(cases, run_id=run_id)
+    finally:
+        if not args.fake_driver and ds.driver is not None:
+            try:
+                ds.driver.quit()
+            except Exception:
+                pass  # 会话收尾失败不影响结果判定
 
     # 3. --no-llm 语义（R18-4 最终定档，Task 4.2）：flag 真实禁用 LLM
     #    Recovery；确定性恢复（settle/postcondition/memo）不受影响。
     #    LLM 调用数取 budget 实数（报告 LLM Invocation Rate 的分子）。
     llm_calls = budget.calls_used if budget is not None else 0
+    store.update_run_llm(run_id, llm_calls=llm_calls,
+                         llm_enabled=budget is not None)
     if args.no_llm:
         print("note: --no-llm：LLM Recovery 已禁用（确定性恢复不受影响）")
 

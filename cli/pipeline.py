@@ -24,6 +24,7 @@ import yaml
 
 from runner.lifecycle import Lifecycle
 from runner.result import RunResult, TestcaseResult
+from source.screen import current_screen
 from runner.runner import RunStepContext, StepOutcome, StepRunner
 from session.device_session import InfraError
 from testcase.schema import ActionStep, AssertionStep, TestCase, WaitSpec, WaitStep
@@ -258,7 +259,11 @@ class SessionPipeline:
                             step_recovered = None
                         rec = None
                         if not outcome.ok:
-                            status = "FAIL"
+                            # 8.1/8.4：Guard 拦截是安全策略终态——用例
+                            # BLOCKED（exit 4），不是 FAIL（exit 1）。语义
+                            # 分叉只此一处，退出码经 compute_exit_code。
+                            status = ("BLOCKED" if outcome.failure_type
+                                      == "SECURITY_BLOCKED" else "FAIL")
                             failure_type = outcome.failure_type
                             failure_phase = (outcome.phase.value
                                              if outcome.phase else None)
@@ -272,6 +277,24 @@ class SessionPipeline:
                         except InfraError:
                             raise
                         except Exception as e:
+                            # 矩阵 #11/#12：screen 目标超时先做终态分类——
+                            # 页面无任何已登记 marker=CURRENT_SCREEN_UNKNOWN、
+                            # 多 marker 无 modal=SCREEN_AMBIGUOUS；「别的屏
+                            # 在当前」才是 #13 的 WAIT_TIMEOUT（目标屏已登记
+                            # 但未出现）。分类只拉一次 page_source（终态时）。
+                            screen_ftype = self._screen_wait_failure(
+                                runner, step.wait_for, e)
+                            if screen_ftype is not None:
+                                self._record_aux_step(
+                                    lifecycle, idx, "wait_for",
+                                    _target_label(step.wait_for.target),
+                                    latency_ms=int((time.time() - t1) * 1000),
+                                    ok=False, failure_type=screen_ftype,
+                                    detail={"error": str(e)})
+                                status = "FAIL"
+                                failure_type = screen_ftype
+                                detail["error"] = str(e)
+                                break
                             # ⑥（4.2 顺延）：wait 超时进恢复管线——决策表
                             # 默认不准入（on_wait_timeout=false），开了才走
                             rec = self._aux_recover(
@@ -576,6 +599,11 @@ class SessionPipeline:
         if ref is not None and getattr(ref, "type", "element") == "element":
             if self.deps and self.deps.repo is not None:
                 eff = self.deps.repo.resolve(ref, build="local")
+                # element_id 必须是解析后的裸 id（eff.id）——ref.id 是容器
+                # 前缀引用（LoginView.username_field），源 metadata 里只有
+                # 裸 id；带着前缀进恢复上下文，reconcile 会把「源里有、
+                # 运行时没有」的 DRIFT 误判成 UNKNOWN（M4 Gate 真机实锤）。
+                element_id = eff.id
                 strategies = tuple({"type": s.type, "value": s.value}
                                    for s in eff.strategies)
                 meta_risk = getattr(eff, "risk", None)
@@ -655,6 +683,42 @@ class SessionPipeline:
                                 "recovery": rec.detail}),
             step_index=idx, status="RECOVERED")
         self._write_recovery_row(step_row_id, target_id, rec, context)
+
+    def _screen_wait_failure(self, runner, wait_spec, exc) -> str | None:
+        """screen 目标 wait 超时的终态分类（13.2；矩阵 #11/#12 vs #13）。
+
+        - 页面可见 marker 互斥不明（≥2 且无 modal）→ SCREEN_AMBIGUOUS；
+        - 页面无任何已登记 marker 且**目标屏已登记**（app 侧丢了 marker，
+          「Screen marker 缺失」的字面义）→ CURRENT_SCREEN_UNKNOWN；
+        - 目标屏未登记（lint 本应拦的退化形态）或别的屏在当前 → None
+          （维持 WAIT_TIMEOUT，#13）。
+        非 screen 目标 / 非 WaitTimeout / 无 repo → None（不分类）。
+        """
+        from executor.wait import WaitTimeout
+
+        if not isinstance(exc, WaitTimeout):
+            return None
+        if getattr(wait_spec.target, "type", "element") != "screen":
+            return None
+        repo = self.deps.repo if self.deps else None
+        ex = runner.ex if runner is not None else None
+        if repo is None or ex is None \
+                or not callable(getattr(ex, "page_source", None)):
+            return None
+        try:
+            target_registered = repo.resolve(wait_spec.target, build="local")
+        except Exception:  # noqa: BLE001 — 目标屏未登记 → 退化形态不分类
+            return None
+        try:
+            res = current_screen(ex.page_source(), repo)
+        except Exception:  # noqa: BLE001 — page_source 故障不改变症状
+            return None
+        if res.status == "SCREEN_AMBIGUOUS":
+            return "SCREEN_AMBIGUOUS"
+        if res.status == "CURRENT_SCREEN_UNKNOWN" \
+                and getattr(target_registered, "marker", None):
+            return "CURRENT_SCREEN_UNKNOWN"
+        return None
 
     def _aux_recover(self, runner, tc, attempt, target_ref, exc,
                      step_type: str):
@@ -847,6 +911,10 @@ def _run_status(run: RunResult) -> str:
     if any(r.status in ("INFRA_FAILURE", "ENVIRONMENT_FAILURE")
            for r in run.results):
         return "INFRA_FAILURE"
+    if all(r.status in ("PASS", "RECOVERED") for r in run.results):
+        # 8.1：RECOVERED 是独立终态——exit 5 的 run 不能落 FAIL
+        # （M4 Gate 真机实锤：漂移 run exit_code=5 而 runs.status=FAIL）
+        return "RECOVERED"
     return "FAIL"
 
 

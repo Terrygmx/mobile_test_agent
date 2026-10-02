@@ -77,6 +77,20 @@ class Executor:
         el.clear()
         el.send_keys(value)
 
+    # --- 已定位元素上的动作（M4：恢复重发 9.2 用） ---
+    # 恢复引擎按恢复后策略找到元素再重发——若按原 locator 重找，漂移场景
+    # 下原策略必然再失败（M4 Gate 真机实锤：LLM 候选校验全过后死在重发）。
+    # ensure_alive 仍每个动作前执行（设计硬约束，与 find 同源）。
+
+    def tap_element(self, element) -> None:
+        self.ds.ensure_alive()
+        element.click()
+
+    def input_element(self, element, value: str) -> None:
+        self.ds.ensure_alive()
+        element.clear()
+        element.send_keys(value)
+
     def swipe(self, direction: str) -> None:
         self.ds.ensure_alive()
         size = self.driver.get_window_size()

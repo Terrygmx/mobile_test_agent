@@ -291,19 +291,28 @@ def test_cli_run_mismatch_blocked_exit3(tmp_path, monkeypatch, capsys):
 def test_cli_run_allow_records_override_and_proceeds(tmp_path, monkeypatch,
                                                      capsys):
     """放行不是静默：trace 记 metadata_mismatch=1 + override=1，然后按既有
-    真机装配语义继续（组件未装配仍 exit 3）。"""
+    真机装配语义继续（Task 2.7 接线后真机路径真实装配；单测封闭：stub 掉
+    caps 解析与设备连接，装配失败仍为前置配置错误 exit 3）。"""
     from cli.main import main
 
     suites, meta_path = _run_scaffold(tmp_path)
     _patch_app(monkeypatch, "deadbeef", "local")
+    monkeypatch.setattr("session.device_session.resolve_local_caps",
+                        lambda udid, bundle_id: {"udid": udid})
+    from session.device_session import DeviceSession
+
+    def _no_device(self):
+        raise RuntimeError("unit-test: 无设备会话")
+
+    monkeypatch.setattr(DeviceSession, "connect", _no_device)
     db = tmp_path / "trace.db"
     code = main(["run", "--suite", "smoke", "--suites-root", str(suites),
                  "--db", str(db), "--udid", "UDID",
                  "--bundle-id", "com.phaset0.logindemo",
                  "--metadata", str(meta_path), "--allow-metadata-mismatch"])
     out = capsys.readouterr().out
-    assert code == 3  # 放行后走到「真机组件未装配」（既有前置）
-    assert "未装配" in out
+    assert code == 3  # 放行后走到真机装配；装配失败 → 前置 exit 3
+    assert "设备会话建立失败" in out
     conn = sqlite3.connect(db)
     row = conn.execute(
         "SELECT metadata_mismatch, metadata_mismatch_override"
