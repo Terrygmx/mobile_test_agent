@@ -443,7 +443,11 @@ steps:
 
 def test_r16_2_no_fake_driver_exits_3_not_fail(tmp_path, capsys):
     """R16-2（P1 fail-quiet）：真机组件未装配 → PreflightError exit 3，
-    不再伪装成 5 条 FAIL + exit 1，且不往 trace.db 写假 FAIL 终态。"""
+    不再伪装成 5 条 FAIL + exit 1，且不往 trace.db 写假 FAIL 终态。
+
+    Task 3.3 收口后真机路径第一道前置是 12.5 Build Identity 校验（G8）：
+    无 booted 模拟器/App 未安装时报 build identity 错——同为前置配置错误
+    （exit 3），先后取决于环境，断言接受两类文案。"""
     suites = tmp_path / "suites"
     suites.mkdir()
     (suites / "a_001.yaml").write_text(VALID_TC, encoding="utf-8")
@@ -453,7 +457,7 @@ def test_r16_2_no_fake_driver_exits_3_not_fail(tmp_path, capsys):
                  "--db", str(db)])  # 无 --fake-driver
     out = capsys.readouterr().out
     assert code == 3, f"未装配必须 exit 3，got {code}"
-    assert "未装配" in out
+    assert "未装配" in out or "build identity" in out
     # trace.db 里不得出现假 FAIL 终态
     if db.exists():
         import sqlite3
@@ -783,3 +787,36 @@ def test_r18_4_html_rate_denominator_is_steps_not_cases(tmp_path, capsys):
     db_steps = store.conn.execute("SELECT COUNT(*) FROM steps").fetchone()[0]
     assert lifecycle.steps_recorded == db_steps, (
         f"steps_recorded={lifecycle.steps_recorded} db={db_steps}")
+
+
+# --- P2-3（review_m3_task31）核销：mta run --generated 双源接线 ---
+
+
+def test_run_generated_flag_consumes_dual_source(tmp_path):
+    """run 传 --generated 后，generated-only 元素可被 lint/执行解析（5.3
+    双源合并）；不传时同一用例 resolve 不到（overrides 兼职形态的旧 bug
+    是「参数存在=没接」，这里验真消费）。"""
+    gen = tmp_path / "generated" / "local"
+    (gen / "elements").mkdir(parents=True)
+    (gen / "screens").mkdir(parents=True)
+    (gen / "elements" / "HomeView.yaml").write_text(
+        "schema_version: '1.0'\nkind: element\nid: gen_only_cell\n"
+        "screen: HomeView\ntype: cell\nstrategies:\n"
+        "- type: accessibility_id\n  value: gen_only_cell\n  origin: source\n"
+        "metadata:\n  origin: source\n", encoding="utf-8")
+    (gen / "screens" / "HomeView.yaml").write_text(
+        "schema_version: '1.0'\nkind: screen\nid: HomeView\n"
+        "marker: screen.HomeView\nkind_hint: page\nmetadata:\n"
+        "  risk: LOW\n  origin: source\n", encoding="utf-8")
+    suites = tmp_path / "suites"
+    suites.mkdir()
+    (suites / "gen_001.yaml").write_text(
+        'schema_version: "0.2"\nid: gen_001\nname: 双源\nsuite: smoke\n'
+        "tags: [smoke]\nsteps:\n  - action: launch_app\n"
+        "  - action: tap\n    target: HomeView.gen_only_cell\n"
+        "    idempotency: IDEMPOTENT\n", encoding="utf-8")
+    code = main(["run", "--case", "gen_001",
+                 "--suites-root", str(suites),
+                 "--db", str(tmp_path / "trace.db"), "--fake-driver",
+                 "--generated", str(gen)])
+    assert code == 0, "generated-only 元素必须经 --generated 可解析"

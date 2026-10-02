@@ -17,7 +17,9 @@
   G6. Source Coverage（12.7）：报告可产出、五桶加总 == 分母、unknown/missing
       为空、dynamic 可见（12.2 预期形态，不判红）；
   G7. Build-level diff（12.6）：同 build 自比零差异、范围仅用例到达的 Screen、
-      注入删除能报出 REMOVED、且检出漂移不阻塞（默认 ok 仍 True）。
+      注入删除能报出 REMOVED、且检出漂移不阻塞（默认 ok 仍 True）；
+  G8. Build Identity 拦截（12.5 / Gate M3 第 3 判据「build 不匹配被正确
+      拦截」）：一致放行、漂移拦截、未注入 fail-closed（放行开关不豁免）。
 
 产出：out/m3_gate/gate_summary.json；exit 0 = 全绿。
 """
@@ -204,6 +206,41 @@ def main() -> int:
                   f"injected_removed={[f'{s}.{i}' for s, i in drift_diff.removed]}",
         "scope": list(self_diff.scope_screens),
     }
+
+    # ---- G8: Build Identity 拦截（12.5；Gate M3 明文要求「build 不匹配
+    #      被正确拦截」——review_m3_task32 P2-2 教训：判据从设计 Gate 原文
+    #      机械映射，本条即第 3 判据）----
+    # 离设备半边：gate_run_start 判定链（evaluate fail-closed + 放行规则）。
+    # 真机端到端（build+install+读回+四路径）由 phase0/verify_p1_task33.py
+    # 承担，证据落 out/p1_task33_verify/summary.json。
+    from source.build_identity import AppIdentity, gate_run_start, \
+        metadata_identity
+    meta_ident = metadata_identity(GENERATED / "source_metadata.json")
+    injected_ident = AppIdentity(meta_ident.git_commit, meta_ident.build)
+    drift_ident = AppIdentity("deadbeef", meta_ident.build)
+    uninjected_ident = AppIdentity(None, None)
+    g8_matched = gate_run_start(
+        metadata_path=GENERATED / "source_metadata.json", udid="UDID",
+        bundle_id="com.phaset0.logindemo", allow=False, env={},
+        read=lambda u, b: injected_ident)
+    g8_blocked = gate_run_start(
+        metadata_path=GENERATED / "source_metadata.json", udid="UDID",
+        bundle_id="com.phaset0.logindemo", allow=False, env={},
+        read=lambda u, b: drift_ident)
+    g8_uninj = gate_run_start(
+        metadata_path=GENERATED / "source_metadata.json", udid="UDID",
+        bundle_id="com.phaset0.logindemo", allow=True, env={},
+        read=lambda u, b: uninjected_ident)
+    g8_ok = (not g8_matched.mismatch and not g8_matched.blocked
+             and g8_blocked.blocked and g8_blocked.mismatch
+             and not g8_blocked.override
+             and g8_uninj.blocked)
+    results["G8_build_identity"] = {
+        "pass": g8_ok,
+        "detail": f"meta={meta_ident.git_commit}/{meta_ident.build} "
+                  f"matched={not g8_matched.mismatch} "
+                  f"drift_blocked={g8_blocked.blocked} "
+                  f"uninjected_blocked_with_allow={g8_uninj.blocked}"}
 
     # ---- 汇总 ----
     verdict = all(r["pass"] for r in results.values())

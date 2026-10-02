@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -42,20 +43,37 @@ def build_parser() -> argparse.ArgumentParser:
     target.add_argument("--suite", metavar="NAME")
     target.add_argument("--tag", metavar="TAG")
     target.add_argument("--case", metavar="CASE_ID")
-    # R18-4：两个 flag 尚未接线（Recovery 属 M3 语义 / metadata mismatch
-    # 校验属 M3 Build Identity）。help 如实标注现状——「参数存在≠功能
-    # 存在」（R17-1/2）。不摘除：调用方（脚本/CI）传了不该报错，而应
-    # fail-loud 于 warning 并在 trace 记「flag 未生效」。
+    # R18-4：--no-llm 尚未接线（Recovery 属 M4 语义）。help 如实标注现状
+    # ——「参数存在≠功能存在」（R17-1/2）。不摘除：调用方（脚本/CI）传了
+    # 不该报错，而应 fail-loud 于 warning 并在 trace 记「flag 未生效」。
     run_p.add_argument("--no-llm", action="store_true",
-                       help="[未接线/M3] 禁用 LLM recovery；当前管线无 "
+                       help="[未接线/M4] 禁用 LLM recovery；当前管线无 "
                             "Recovery 调用故 LLM 数恒 0")
     run_p.add_argument("--junit", metavar="PATH",
                        help="输出 JUnit XML（8.5）")
     run_p.add_argument("--html", metavar="PATH",
                        help="输出 HTML 报告（14.5）")
+    # 12.5 Build Identity（Task 3.3）：默认 fail-closed；放行必须留痕。
     run_p.add_argument("--allow-metadata-mismatch", action="store_true",
-                       help="[未接线/M3] build metadata 不匹配时放行；"
-                            "metadata 校验在 M3 Build Identity 落地")
+                       help="build metadata 不一致时放行（默认关闭）；"
+                            "trace 记 metadata_mismatch=1, override=1；"
+                            "CI=true 下还需 MTA_ALLOW_METADATA_MISMATCH_CI=1"
+                            "（12.5 第二开关）")
+    run_p.add_argument("--bundle-id", metavar="BID",
+                       help="被测 App bundle id（真机路径必填，12.5 身份"
+                            "读取用；如 com.phaset0.logindemo）")
+    run_p.add_argument("--udid", metavar="UDID",
+                       help="目标模拟器 UDID（默认自动发现 booted 设备）")
+    run_p.add_argument("--metadata", metavar="PATH",
+                       help="12.3 source_metadata.json 路径（默认 "
+                            "<generated>/source_metadata.json 或 "
+                            "repository/generated/local/）")
+    # P2-3（review_m3_task31）核销：run 接 --generated，运行时 Repository
+    # 从「overrides 兼职 generated」升为双源合并（5.3 语义）。
+    run_p.add_argument("--generated", metavar="DIR",
+                       help="generated 根目录（5.3 双源合并：overrides > "
+                            "generated；同时作为 build identity 的 metadata"
+                            " 默认来源）")
     run_p.add_argument("--allow-production", action="store_true",
                        help="允许 production 环境（10.1 总闸；HIGH/CRITICAL 仍拦）")
     run_p.add_argument("--config", metavar="PATH", default="mta.yaml",
@@ -217,11 +235,60 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("run: lint ERROR → exit 3")
         return 3
 
-    # 1. 组件装配（fake-driver：最小桩；真机：Appium 会话，Task 2.7 接线）
     # R16-2/P3-3：run_id 用 uuid——同秒碰撞会覆盖 TraceStore runs 主键。
     run_id = f"run_{uuid.uuid4().hex[:8]}"
     store = TraceStore(args.db)
-    store.start_run(run_id, suite=args.suite)
+
+    # 1. Build Identity（12.5 / Task 3.3 第 1 步）：真机路径启动前
+    #    fail-closed 校验（G8：App/Metadata/commit 可关联）。--fake-driver
+    #    无设备身份可读，跳过且不宣称校验过（H18 边界）。拦截/放行均落
+    #    runs 审计列（metadata_mismatch / metadata_mismatch_override）。
+    from source import build_identity as bi
+
+    bi_fields: dict[str, object] = {}
+    if not args.fake_driver:
+        try:
+            udid = args.udid or bi.resolve_booted_udid()
+            if not udid:
+                raise bi.BuildIdentityError(
+                    "无 booted 模拟器（用 --udid 显式指定或启动一个）")
+            meta_path = (Path(args.metadata) if args.metadata else
+                         Path(args.generated or "repository/generated/local")
+                         / "source_metadata.json")
+            gr = bi.gate_run_start(
+                metadata_path=meta_path, udid=udid,
+                bundle_id=args.bundle_id,
+                allow=args.allow_metadata_mismatch, env=os.environ)
+        except bi.BuildIdentityError as e:
+            store.start_run(run_id, suite=args.suite)
+            store.end_run(run_id, status="ABORTED", exit_code=3)
+            print(f"PREFLIGHT ERROR: build identity 读取失败：{e}")
+            print("run: exit 3")
+            return 3
+        bi_fields = {
+            "app_git_commit": gr.app.git_commit,
+            "metadata_git_commit": gr.meta.git_commit,
+            "metadata_build": gr.meta.build,
+            "metadata_mismatch": int(gr.mismatch),
+            "metadata_mismatch_override": int(gr.override),
+        }
+        if gr.blocked:
+            store.start_run(run_id, suite=args.suite, **bi_fields)
+            store.end_run(run_id, status="ABORTED", exit_code=3)
+            print(f"BUILD_METADATA_MISMATCH: {', '.join(gr.mismatches)}")
+            print(f"  app={gr.app.git_commit}/{gr.app.build}  "
+                  f"metadata={gr.meta.git_commit}/{gr.meta.build}")
+            print(f"  （12.5 fail-closed；本地放行：--allow-metadata-mismatch；"
+                  f"CI 需 {bi.CI_OVERRIDE_ENV}=1）")
+            print("run: exit 3")
+            return 3
+        if gr.mismatch:
+            print(f"note: build identity 不一致已放行"
+                  f"（{', '.join(gr.mismatches)}）——trace 记 "
+                  "metadata_mismatch=1, override=1")
+
+    # 2. 组件装配（fake-driver：最小桩；真机：Appium 会话，Task 2.7 接线）
+    store.start_run(run_id, suite=args.suite, **bi_fields)
     if args.fake_driver:
         from executor.guard import EnvKind, Guard
 
@@ -279,16 +346,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     # 2. 跑（P3-5：统一走 run_all——H10 中止语义/未执行清单只在套件层可达）
     run = pipeline.run_all(cases, run_id=run_id)
 
-    # 3. --no-llm 语义（R18-4）：Recovery 接线在 M3；当前管线 LLM 调用
-    #    恒为 0。flag 接了（不报错、如实读入）但**显式 warn 未生效语义
-    #    边界**——不留「参数存在=功能存在」的静默假象（R17-1/2）。
+    # 3. --no-llm 语义（R18-4）：Recovery 接线在 M4（plan 里程碑重排）；
+    #    当前管线 LLM 调用恒为 0。flag 接了（不报错、如实读入）但**显式
+    #    warn 未生效语义边界**——不留「参数存在=功能存在」的静默假象
+    #    （R17-1/2）。
     llm_calls = 0
     if args.no_llm:
-        print("note: --no-llm：当前管线无 Recovery 接线（M3），"
+        print("note: --no-llm：当前管线无 Recovery 接线（M4），"
               "LLM 调用数结构性为 0")
-    if args.allow_metadata_mismatch:
-        print("note: --allow-metadata-mismatch：metadata 校验在 M3 "
-              "Build Identity 落地，当前无 mismatch 可放行")
 
     # 4. 产物
     if args.junit:

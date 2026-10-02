@@ -691,6 +691,31 @@ CI: git commit → build → { App.ipa/.app, source_metadata.json }   # 测试�
 - 本地开发可用 `--allow-metadata-mismatch`：**默认关闭**；Trace 必须记录 `metadata_mismatch=1, override=1`；CI 环境（检测 `CI=true`）下需要额外显式开关。
 - 无 CI 时的兜底：允许本地脚本生成 metadata 与 plist 注入，同样必须产生一致的 build 标识。
 
+**修订记录（Task 3.3 收口实现后回填）**：落地 `source/build_identity.py`
+（纯判定 + 设备访问隔离）+ `mta run` 真机路径启动前拦截 + `make p1-build /
+p1-install`。P1 实现的口径定档：
+
+- **fail-closed 的完整面**（G8「可关联，不一致 fail closed」的落地解释）：
+  App 未注入（plist 缺 `MTA_*` 键）、metadata 缺身份键、App 未安装/simctl
+  失败/Info.plist 不可解析/metadata 文件缺失——全部按 mismatch 处理。
+  「读不到 ≠ 一致」（12.2 同源纪律）；放行开关只豁免「可关联但不一致」，
+  **不豁免「根本没身份」**，否则未注入的旧 App 永远绕过校验。
+- **放行留痕**：`--allow-metadata-mismatch` 放行时 runs 表记
+  `metadata_mismatch=1, metadata_mismatch_override=1`；拦截路径也落
+  runs 行（`ABORTED`/exit 3/两侧 commit）——矩阵 #21「未启动用例」仍有
+  审计证据。
+- **CI 第二开关**定名 `MTA_ALLOW_METADATA_MISMATCH_CI=1`（`CI=true` 时
+  仅 `--allow-metadata-mismatch` 不够）。
+- **注入方式**：`make p1-build` = xcodebuild（`-target` 模式，项目无
+  shared scheme；`-derivedDataPath` 与 `-target` 互斥，产物目录用
+  SYMROOT/OBJROOT 重定向）+ PlistBuddy 后处理写入两个键。实测
+  `INFOPLIST_KEY_<自定义键>` **不进**生成的 Info.plist（该机制只合并固定
+  白名单键，clean rebuild 复现两次），故走 12.5 本来就允许的「本地脚本
+  plist 注入」兜底；p1-build 后必须 `make repo-generate` 保持同 commit。
+- **真机验证**：`phase0/verify_p1_task33.py` 四路径（注入读回 / 一致放行 /
+  漂移拦截未启动用例 / 放行留痕）全过，证据落
+  `out/p1_task33_verify/summary.json`；Gate M3 对应判据为 G8。
+
 ### 12.6 Reconciliation
 
 | 模式 | 时机 | 范围 |
@@ -864,6 +889,7 @@ CREATE TABLE infra_events (
 mta lint     [--suite X]
 mta run      [--suite X | --tag Y | --case ID] [--no-llm] [--junit report.xml] [--html dir]
              [--allow-metadata-mismatch] [--allow-production] [--config mta.yaml]
+             [--generated DIR] [--bundle-id BID] [--udid UDID] [--metadata PATH]
 mta source scan | mta repo generate | mta source diff
 mta review   list | accept <id> | reject <id>
 mta report   <run_id>
@@ -884,9 +910,13 @@ mta report   <run_id>
   见 12.6 修订记录。3.1 的 `repo generate --check` 走的是
   generated-vs-overrides 轴（consistency Gate），与 build-vs-build diff 不是
   同一件事，两者并存、不能互相顶替。
-- 12.5 Build Identity（plist 注入 `MTA_GIT_COMMIT/MTA_BUILD_ID` + 运行前校验
-  → `BUILD_METADATA_MISMATCH`）**尚未实现**；`mta run --allow-metadata-mismatch`
-  目前是「已读入但无 mismatch 可放行」的显式 warn 状态。
+- 12.5 Build Identity 已落地（Task 3.3 收口）：`mta run` 真机路径启动前
+  fail-closed 校验（拦截/放行规则与注入方式见 12.5 修订记录）；
+  `--allow-metadata-mismatch` 语义反转生效（放行必留痕），CI 需
+  `MTA_ALLOW_METADATA_MISMATCH_CI=1`。
+- `mta run --generated DIR` 接线（review_m3_task31 P2-3 核销）：运行时
+  Repository 升为 5.3 双源合并（overrides > generated），同时作为
+  build identity metadata 的默认来源（`--metadata` 可显式覆盖）。
 
 ---
 

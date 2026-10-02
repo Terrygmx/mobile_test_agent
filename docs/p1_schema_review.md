@@ -387,3 +387,39 @@ P3 八条处置：
   ③SwiftUIVisitor.location(of:) 每 modifier 新建
   SourceLocationConverter 的 O(n²) 隐患——大文件性能项，暂挂
   （正确性无碍；App 源文件 < 千行级）。
+
+### Task 3.3 收口（M3 宣告 PASS 之后的实质缺口补齐，2026-10-02）
+
+M3 复盘发现：Task 3.3 只交付了第 2 步（`mta source diff`，commit a76d449），
+第 1/3/4 步（12.5 Build Identity 拦截、真机验证、tag）**从未实现**——
+`source/build_identity.py` 在 git 历史中不存在、`--allow-metadata-mismatch`
+仍是占位 warn、设计 Gate M3 第 3 判据「build 不匹配被正确拦截」无实现可验。
+305882a 的「M3 Gate 5/5 验收」只是解析回归门，M3 宣告 PASS 属超报（与
+review_m3_task32 P2-2「Gate 判据手工清单漏项」同源，且这次漏的是整个
+Task 3.3 前半）。本轮补齐：
+
+- **12.5 拦截落地**：`source/build_identity.py`（evaluate/override_allowed/
+  metadata_identity 纯逻辑离设备 + read_app_identity/resolve_booted_udid
+  subprocess 隔离 + gate_run_start 编排，read 注入点供单测/Gate）；
+  `mta run` 真机路径启动前 fail-closed 校验，拦截/放行均落 runs 审计列。
+  fail-closed 定档：未注入/缺身份/读不到 ≠ 一致，放行开关不豁免「没身份」。
+  `--allow-metadata-mismatch` 语义反转生效；CI 第二开关
+  `MTA_ALLOW_METADATA_MISMATCH_CI=1`。
+- **P2-3 核销**（review_m3_task31 顺延项）：`mta run --generated DIR` 接线，
+  运行时 Repository 双源合并（5.3），测试
+  `test_run_generated_flag_consumes_dual_source` 实证 generated-only 元素
+  可解析——「实现存在但零消费」平行实现系列第 6 次至此闭环。
+- **注入方式实证**：`INFOPLIST_KEY_<自定义键>` 不进生成的 Info.plist
+  （固定白名单，clean rebuild 复现两次），`make p1-build` 走 12.5 本就允许
+  的本地脚本 PlistBuddy 注入 + `-target`/SYMROOT（无 shared scheme，
+  `-derivedDataPath` 与 `-target` 互斥实测 Error 64）。
+- **真机验证**：`phase0/verify_p1_task33.py` 四路径全过
+  （out/p1_task33_verify/summary.json）：V1 注入读回==HEAD；V2 一致路径
+  放行（mismatch=0）；V3 漂移拦截 exit 3、未启动用例、mismatch=1/override=0
+  （矩阵 #21 预演）；V4 放行留痕 mismatch=1/override=1。
+- **Gate M3 补 G8**（review_m3_task32 P2-2 教训的机械映射：设计 Gate M3
+  第 3 判据「build 不匹配被正确拦截」）：离设备判定链三断言 + 真机四路径
+  由 task33 脚本承担。Gate 重跑 9/9 PASS（G1×2/G2–G8）。
+- `test_r16_2` 文案断言放宽（build identity 前置错误可能先于「组件未装配」
+  触发，两者同为 exit 3 前置配置错误）。
+- 实测：pytest 667 passed（+27：build_identity 21 + CLI 接线 6）。

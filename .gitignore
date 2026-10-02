@@ -12,3 +12,6 @@ out/
 # 常驻 dirty——review P3-4 拍板）。release/staging build 的 generated/
 # 仍可入库；CI 自行 regenerate local。
 repository/generated/local/
+
+# 12.5 p1-build 产物（LoginDemo 注入构建；verify_p1_task33 可重跑再生）
+build/
