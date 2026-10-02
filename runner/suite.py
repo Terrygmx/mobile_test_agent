@@ -131,6 +131,16 @@ class SuiteRunner:
             except SuiteAborted:
                 raise
             run.add(result)
+            if result.detail.get("terminate_run"):
+                # 7.5：wda.max_restart_per_run 耗尽 → 终止 run。比 H10 更硬
+                # 的一档：预算耗尽意味着会话恢复通道已枯竭，继续调度只会
+                # 逐条 INFRA_FAILURE——剩余用例不跑（不算进 total）。
+                run.results[-1].detail.setdefault("aborted_suite", True)
+                run.results[-1].detail.setdefault(
+                    "remaining", len(list(testcases)) - len(run.results))
+                raise SuiteAborted(
+                    f"7.5：{tc.id} wda.max_restart_per_run 耗尽，终止 run",
+                    failed_testcase_id=tc.id)
             if (result.status == "ENVIRONMENT_FAILURE"
                     and self.failure_policy is FailurePolicy.ABORT_SUITE):
                 # 剩余用例标 ABORTED？不标——它们**没跑**，不能算进 total

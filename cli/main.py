@@ -227,6 +227,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("run: exit 3")
         return 3
     repo = _load_repository(args)
+    # Task 4.1：RecoveryEngine 确定性半边接入（决策表 + settle + postcondition
+    # + RUN_MEMO + ExperienceStore 恒空）。llm=None：LLM Recovery 属 4.2，
+    # 当前恢复全部确定性——--no-llm 的「LLM 调用数恒 0」由此结构性成立。
+    from agent.recovery import RecoveryEngine
+    pipeline.recovery = RecoveryEngine(repo=repo)
     issues = lint_cases(cases, repo, EnvSecretProvider())
     for i in issues:
         prefix = "ERROR" if i.severity is Severity.ERROR else "WARN "
@@ -352,8 +357,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     #    （R17-1/2）。
     llm_calls = 0
     if args.no_llm:
-        print("note: --no-llm：当前管线无 Recovery 接线（M4），"
-              "LLM 调用数结构性为 0")
+        print("note: --no-llm：Recovery 确定性半边已接线（4.1），LLM 未接入"
+              "（4.2）——LLM 调用数结构性为 0")
 
     # 4. 产物
     if args.junit:

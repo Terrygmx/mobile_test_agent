@@ -25,6 +25,7 @@ import yaml
 from runner.lifecycle import Lifecycle
 from runner.result import RunResult, TestcaseResult
 from runner.runner import RunStepContext, StepOutcome, StepRunner
+from session.device_session import InfraError
 from testcase.schema import ActionStep, AssertionStep, TestCase, WaitSpec, WaitStep
 
 __all__ = ["SessionPipeline", "PipelineDeps", "make_postcondition_checker"]
@@ -78,6 +79,17 @@ class PipelineDeps:
         """建立设备会话。默认 no-op（FakeDriver 模式）。"""
 
 
+class _WdaRerunRequested(Exception):
+    """内部控制流：WDA 重启成功，用例按 attempt=N 重跑（7.5）。
+
+    不出 SessionPipeline——外部世界看到的是普通 TestcaseResult。
+    """
+
+    def __init__(self, attempt: int):
+        super().__init__(f"rerun testcase with attempt={attempt}")
+        self.attempt = attempt
+
+
 class SessionPipeline:
     """把 TestCase 变成新管线的真实执行。"""
 
@@ -85,10 +97,14 @@ class SessionPipeline:
         """前置配置错误（8.4 exit 3）。"""
 
     def __init__(self, suites_root: Path | str | None, *,
-                 store=None, deps: PipelineDeps | None = None):
+                 store=None, deps: PipelineDeps | None = None,
+                 recovery=None):
         self.suites_root = Path(suites_root) if suites_root else None
         self.store = store
         self.deps = deps
+        # Task 4.1：RecoveryEngine（确定性半边）。None = 不恢复（旧行为，
+        # P0 链路不受影响）——接线由 cmd_run 按组件装配注入。
+        self.recovery = recovery
 
     # --- 发现 ---
 
@@ -131,13 +147,28 @@ class SessionPipeline:
 
         wait/assertion 步骤不在 StepRunner 的 find/perform 管线里（7.1 只管
         动作步骤），走 executor.wait/assertion 引擎；失败映射按 8.2。
+
+        7.5 WDA 中途故障：非幂等未发出 → 重启 + 重跑本条（attempt=2，最多
+        1 次）；已发出 → INFRA_FAILURE 不重跑；重启预算耗尽 → 终止 run。
         """
+        attempt = 1
+        while True:
+            try:
+                return self._run_case_once(
+                    runner, lifecycle, tc, run_id=run_id,
+                    manage_env=manage_env, attempt=attempt)
+            except _WdaRerunRequested as signal:
+                attempt = signal.attempt
+
+    def _run_case_once(self, runner: StepRunner, lifecycle: Lifecycle,
+                       tc: TestCase, *, run_id: str, manage_env: bool,
+                       attempt: int) -> TestcaseResult:
         from executor.assertion import AssertionEngine
         from executor.wait import WaitEngine
 
         t0 = time.time()
         if self.store is not None:
-            lifecycle.begin_testcase(run_id, tc.id)
+            lifecycle.begin_testcase(run_id, tc.id, attempt=attempt)
 
         wait_engine = WaitEngine(
             runner.ex, self._locator_for(runner)) \
@@ -151,6 +182,8 @@ class SessionPipeline:
         failure_phase = None
         cleanup_status: str | None = None
         detail: dict = {}
+        step_recovered: str | None = None   # 本步刚恢复的 kind（record 用）
+        recovered_kinds: list[str] = []     # 8.1：任一步恢复 → 用例 RECOVERED
 
         if manage_env:
             try:
@@ -187,10 +220,46 @@ class SessionPipeline:
                                 detail["error"] = err or ""
                                 break
                             continue
-                        outcome = self._run_action_step(runner, step, idx)
+                        step_ctx, outcome = self._run_action_step(
+                            runner, step, idx)
+                        if (not outcome.ok and self.recovery is not None
+                                and outcome.phase is not None):
+                            rec = self.recovery.recover(self._recovery_context(
+                                runner, step, outcome, step_ctx, tc, attempt))
+                            if rec.recovered:
+                                # 恢复成功：步骤继续，但终态是 RECOVERED 不是
+                                # SUCCESS（8.1；RECOVERED 不得掩盖为 PASS）
+                                outcome.ok = True
+                                outcome.detail["recovery_kind"] = rec.kind
+                                outcome.detail["recovery"] = rec.detail
+                                step_recovered = rec.kind
+                            else:
+                                outcome.detail["recovery_attempted"] = rec.detail
                         # 失败步骤也落 steps 表——只记成功会让 trace
                         # 「看起来跑到一半就没了」，排障无从下手
-                        lifecycle.record_step(outcome, step_index=idx)
+                        step_row_id = lifecycle.record_step(
+                            outcome, step_index=idx,
+                            status="RECOVERED" if step_recovered else None)
+                        if step_recovered:
+                            # 9.2 末步：恢复必须写 recoveries 行（矩阵/报告
+                            # 追溯的唯一证据）。kind 落库用 trace schema 的
+                            # 大写枚举（14.2 契约）；local_reconcile 对应
+                            # DETERMINISTIC_CANDIDATE（无 LLM 的确定性候选）。
+                            if self.store is not None and step_row_id:
+                                rec_kind = {"settle_retry": "SETTLE_RETRY",
+                                            "postcondition": "POSTCONDITION",
+                                            "run_memo": "RUN_MEMO",
+                                            "local_reconcile":
+                                                "DETERMINISTIC_CANDIDATE",
+                                            }.get(step_recovered,
+                                                  step_recovered.upper())
+                                self.store.record_recovery(
+                                    step_row_id, rec_kind,
+                                    expected_target=outcome.element_id,
+                                    app_build="local",
+                                    result="RECOVERED", accepted=True)
+                            recovered_kinds.append(step_recovered)
+                            step_recovered = None
                         if not outcome.ok:
                             status = "FAIL"
                             failure_type = outcome.failure_type
@@ -235,6 +304,26 @@ class SessionPipeline:
                                 "actual": _jsonable(result.actual),
                             }
                             break
+                except InfraError as e:
+                    # 7.5：WDA 中途故障不是测试失败。失败步骤也落 steps 表
+                    # ——异常上附着「非幂等是否已发出」（StepRunner 打标，
+                    # dispatch 中途断连也算已发出），lifecycle 据此判能否重跑。
+                    status, failure_type = "INFRA_FAILURE", "WDA_FAILURE"
+                    detail["error"] = f"{type(e).__name__}: {e}"
+                    detail["wda_died"] = True
+                    lifecycle.record_step(StepOutcome(
+                        ok=False, step_index=idx,
+                        element_id=(step.target.id
+                                    if getattr(step, "target", None) else ""),
+                        action=getattr(step, "action", None),
+                        failure_type="WDA_FAILURE",
+                        error=f"{type(e).__name__}: {e}",
+                        effective_idempotency=getattr(
+                            e, "effective_idempotency", None),
+                        non_idempotent_dispatched=bool(getattr(
+                            e, "non_idempotent_dispatched", False)),
+                        detail={"error": detail["error"]}), step_index=idx)
+                    break
                 except Exception as e:  # noqa: BLE001 — 映射见 _map_exception
                     status, failure_type = _map_exception(e)
                     failure_phase = getattr(e, "phase", None)
@@ -269,6 +358,12 @@ class SessionPipeline:
                 else:
                     raise
 
+        # 8.1 优先级：FAIL > RECOVERED > PASS——有步骤恢复成功且最终没有
+        # 更高优先级失败 → 用例 RECOVERED（exit 5：无 FAIL 但需人工确认）
+        if recovered_kinds and status == "PASS":
+            status = "RECOVERED"
+            detail["recovery_kinds"] = recovered_kinds
+
         result = TestcaseResult(
             testcase_id=tc.id, status=status, failure_type=failure_type,
             failure_phase=failure_phase, cleanup_status=cleanup_status,
@@ -281,7 +376,70 @@ class SessionPipeline:
                 # 套件层成功回 OK / 失败由 R18-3 回写 ENVIRONMENT_FAILURE。
                 cleanup_status=cleanup_status or (
                     None if manage_env else "PENDING"))
+
+        # 7.5：WDA 故障后的重跑/终止判定（result 已落库，attempt 行终态如实）
+        if result.detail.get("wda_died"):
+            return self._wda_aftermath(runner, lifecycle, tc, attempt, result)
         return result
+
+    def _wda_aftermath(self, runner, lifecycle, tc, attempt,
+                       result: TestcaseResult) -> TestcaseResult:
+        """7.5 WDA 故障处置：非幂等已发出 → 不重跑；预算内 → 重跑
+        attempt+1；重跑/重启预算耗尽 → INFRA_FAILURE 终止。"""
+        from runner.lifecycle import NonIdempotentDispatched
+
+        try:
+            lifecycle.handle_wda_failure(
+                tc.id, attempt,
+                device_session=runner.ds if runner is not None else None)
+        except NonIdempotentDispatched as nie:
+            # H7/7.5 最硬约束：后果不可回滚，宁可失败也不猜
+            result.detail["rerun_skipped"] = str(nie)
+            return result
+        except InfraError as ie:
+            result.detail["rerun_skipped"] = f"{type(ie).__name__}: {ie}"
+            # 重启预算（run 级）耗尽 → 终止 run：上层 run_all 据此停调度
+            result.detail["terminate_run"] = (
+                lifecycle.wda_restarts_this_run
+                > lifecycle.policy.max_restart_per_run)
+            return result
+        raise _WdaRerunRequested(attempt=attempt + 1)
+
+    def _recovery_context(self, runner, step, outcome, step_ctx, tc,
+                          attempt):
+        """从步骤执行上下文装配 RecoveryContext（9.1）。
+
+        设备交互端以 callable 注入——引擎不持有 Executor（9.1 隔离纪律）。
+        source_metadata 置 None：12.3 两键 metadata → reconcile_local 子集
+        的适配在 Task 4.2（LLM prompt 同需该切片）一并做。
+        """
+        from agent.context import RecoveryContext
+
+        ex = runner.ex if runner is not None else None
+        checker = getattr(runner, "postcondition_checker", None)             if runner is not None else None
+        post_fn = None
+        if step_ctx.postcondition_spec is not None and checker is not None:
+            post_fn = lambda: checker(step_ctx.postcondition_spec)  # noqa: E731
+        return RecoveryContext(
+            failure_type=outcome.failure_type,
+            phase=outcome.phase,
+            element_id=step_ctx.element_id,
+            screen_id=step_ctx.screen_id,
+            strategies=step_ctx.strategies,
+            action=step_ctx.action,
+            value=step_ctx.value,
+            effective_risk=step_ctx.risk,
+            effective_idempotency=step_ctx.idempotency,
+            has_postcondition=step_ctx.has_postcondition,
+            source_metadata=None,
+            refind=(lambda: ex.find(step_ctx.strategies))
+            if ex is not None else None,
+            redispatch=(lambda element: runner.dispatch(step_ctx, element))
+            if runner is not None else None,
+            page_source=(getattr(ex, "page_source", None)
+                         if ex is not None else None),
+            postcondition_check=post_fn,
+            testcase_id=tc.id, attempt=attempt, app_build="local")
 
     def _run_app_level_action(self, runner: StepRunner, action: str,
                               step: ActionStep) -> tuple[bool, str | None]:
@@ -394,7 +552,7 @@ class SessionPipeline:
             # make_postcondition_checker / StepRunner.postcondition_checker
             postcondition_spec=step.postcondition,
             step_index=idx)
-        return runner.run_step(ctx)
+        return ctx, runner.run_step(ctx)
     def _record_aux_step(self, lifecycle: Lifecycle, idx: int, step_type: str,
                          target_id: str, *, ok: bool = True,
                          failure_type: str | None = None,

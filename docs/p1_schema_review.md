@@ -423,3 +423,27 @@ Task 3.3 前半）。本轮补齐：
 - `test_r16_2` 文案断言放宽（build identity 前置错误可能先于「组件未装配」
   触发，两者同为 exit 3 前置配置错误）。
 - 实测：pytest 667 passed（+27：build_identity 21 + CLI 接线 6）。
+
+### Task 4.1 完成态（P1-11 RecoveryEngine 非 LLM 部分，2026-10-02）
+
+- **交付**：agent/policy.py（9.2 前半决策表：admitted_actions 纯函数 +
+  RecoveryConfig 默认值即设计值）+ agent/context.py（RecoveryContext/
+  RecoveryResult + ExperienceStore/EmptyExperienceStore 预留）+
+  agent/risk.py（候选风险门控：仅 LOW，None 按 fail-closed 不放行）+
+  agent/recovery.py 重构（RecoveryEngine 确定性半边 + RunMemo 9.4 骨架；
+  P0 recover() 保留至 4.2 迁移，消费只有一条：P1 管线只走引擎）。
+- **7.5 WDA 规则接线**（handle_wda_failure 此前零消费——平行实现第 7 次，
+  M2 只交付了判定逻辑没接管线）：run_case 改 attempt 循环；InfraError 上
+  附着 non_idempotent_dispatched（StepRunner 打标：dispatch 中途断连算
+  已发出）；非幂等已发出 → SKIP_RERUN；预算内重启重跑 attempt=2（
+  testcase_runs.attempt 落库）；预算耗尽 → detail.terminate_run →
+  SuiteRunner SuiteAborted 终止 run（剩余用例不跑不算 total）。
+- **恢复接线**：cmd_run 装配 RecoveryEngine(repo)；动作步失败 → 决策表
+  准入 → postcondition/settle/memo/experience 确定性半边；恢复成功步骤
+  终态 RECOVERED（record_step 新增 status 覆盖参数）+ recoveries 行落库
+  （kind 大写枚举映射）+ 用例 RECOVERED（exit 5 走 8.4 既有优先级）。
+- **顺延 4.2**（记账）：12.3 两键 metadata → reconcile_local 子集的适配
+  （LLM prompt 同需）；LLM 调用 + 9.3 五项候选校验链；review CLI；
+  budget/熔断。P0 recover() 退役随迁移一并做（P0 verify 脚本回归路径）。
+- 实测：pytest 694 passed（+27：决策表/引擎 19 + 故障注入 8，FakeDriver
+  矩阵 #13/#14/#16/#17/#18/#19 预演全过）。

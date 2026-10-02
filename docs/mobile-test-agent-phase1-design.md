@@ -488,6 +488,37 @@ Failure
 
 注意：locator chain 的"备用策略"已在 `find()` 内部用尽，Recovery 里**不再重复**"Alternative Locator"。
 
+**修订记录（Task 4.1 实现后回填）**：落地 `agent/policy.py`（决策表纯函数）
++ `agent/context.py`（RecoveryContext/Result + ExperienceStore 预留）+
+`agent/recovery.py`（RecoveryEngine 确定性半边 + RunMemo）。P1 口径定档：
+
+- **决策表只答「允许做什么」**：`admitted_actions(failure_type, phase,
+  idempotency, has_postcondition, config)` → 动作集合（顺序=执行顺序）或
+  None（不进恢复）。H6 断言值失败、`SECURITY_BLOCKED`（Guard 确定性）、
+  WAIT_TIMEOUT（默认）恒不准入；POST_DISPATCH 无幂等信息按 UNKNOWN
+  （=非幂等）处理——证明不了幂等就不许重发（fail-closed）。
+- **引擎不持有 Executor/LLM**（9.1 隔离纪律的落地）：re-find / 重发 /
+  page_source / postcondition 检查经 ctx 注入 callable；管线侧
+  `_recovery_context` 负责装配。StepRunner 的 InfraError 上附着
+  `non_idempotent_dispatched` 标记——dispatch 中途断连算「已发出」，
+  7.5 判重跑依赖它，漏了会把断连误判成可重跑。
+- **确定性候选（9.2 stretch）不自动执行**：运行时候选无 metadata，risk
+  未知按最高处理（agent/risk.candidate_risk_allowed）——候选留给 4.2 LLM。
+  Local Reconciliation 的输入适配（12.3 两键 metadata → reconcile 子集）
+  随 4.2 LLM prompt 一并做。
+- **7.5 接线**（handle_wda_failure 此前零消费，平行实现第 7 次）：run_case
+  改 attempt 循环——WDA 死亡行落库（INFRA_FAILURE/WDA_FAILURE）→
+  handle_wda_failure 判定 → 预算内 `_WdaRerunRequested(attempt=2)` 重跑；
+  非幂等已发出 → SKIP_RERUN；预算耗尽 → `detail.terminate_run` →
+  SuiteRunner 据此 SuiteAborted（剩余用例不跑、不算 total）。
+- **恢复可见性**：恢复成功的步骤终态 RECOVERED（8.1，不是 SUCCESS），
+  用例 RECOVERED（exit 5），recoveries 行落库（kind 用 14.2 大写枚举，
+  local_reconcile ↔ DETERMINISTIC_CANDIDATE）。
+- **postcondition 优先**：POST_DISPATCH 失败且声明了 postcondition 时
+  最先查（幂等与否都查）——成立即 RECOVERED(kind=postcondition) 不重发
+  （矩阵 #18）；此前 StepRunner 只在 dispatch 成功路径查，dispatch 异常
+  路径无处可判定。
+
 ### 9.3 候选校验（全部通过才执行）
 
 | 检查 | 失败的 failure_type |

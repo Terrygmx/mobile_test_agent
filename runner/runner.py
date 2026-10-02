@@ -185,8 +185,13 @@ class StepRunner:
         # 3. find —— PRE_DISPATCH：任何失败都说明动作从未发出
         try:
             found = self.ex.find(ctx.strategies)
-        except InfraError:
-            raise  # 设备层故障向上冒，不归测试失败
+        except InfraError as e:
+            # 设备层故障向上冒，不归测试失败。附着幂等性信息：调用方（7.5
+            # WDA 判定）要靠它记录「故障时非幂等是否已发出」——find 阶段
+            # 动作必然未发出，flag 恒 False。
+            e.non_idempotent_dispatched = False
+            e.effective_idempotency = ctx.idempotency
+            raise
         except Exception as e:
             return _done(ok=False, phase=FailurePhase.PRE_DISPATCH,
                          failure_type=_classify_find_error(e),
@@ -229,8 +234,13 @@ class StepRunner:
             # perform 契约调，接真实 Executor 必 AttributeError。这里按
             # action 分派；测试替身若提供 perform 仍优先（兼容旧测试）。
             self._dispatch_action(ctx, element)
-        except InfraError:
-            raise  # 设备层故障：动作可能已发出 → 标记置位后上抛
+        except InfraError as e:
+            # 设备层故障：动作可能已发出 → 标记置位后上抛。flag 挂在异常上
+            # （StepOutcome 没机会产出）：7.5 判「能否重跑」依赖它，漏了
+            # 就会把「tap 中途断连」误判成可重跑 → 重复点击。
+            e.non_idempotent_dispatched = non_idem_dispatched
+            e.effective_idempotency = ctx.idempotency
+            raise
         except Exception as e:
             return _done(ok=False, phase=FailurePhase.POST_DISPATCH,
                          failure_type="ACTION_OUTCOME_UNKNOWN",
@@ -295,6 +305,14 @@ class StepRunner:
             raise ValueError(
                 f"action {ctx.action!r} has no dispatch: Executor exposes "
                 f"tap(locator)/input(locator, value) only")
+
+    def dispatch(self, ctx: RunStepContext, element) -> None:
+        """恢复路径重发动作的公开入口（9.2 settle 重试 / run_memo）。
+
+        与 `_dispatch_action` 同一分派逻辑；公开别名是因为 Recovery 的
+        `redispatch` callable 由 pipeline 装配，摸私有方法是坏邻居。
+        """
+        self._dispatch_action(ctx, element)
 
     @staticmethod
     def _first_strategy_type(ctx: RunStepContext) -> str | None:

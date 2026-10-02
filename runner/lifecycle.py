@@ -201,15 +201,20 @@ class Lifecycle:
                                                    attempt=attempt)
         return self.tc_run_id
 
-    def record_step(self, out, step_index: int = 0) -> None:
+    def record_step(self, out, step_index: int = 0,
+                    status: str | None = None) -> None:
         """把 StepOutcome 写进 TraceStore（R14-2）。
 
         `detail` 透传断言结构化结果（R12-3/5 的端到端落点）。Redactor 前置
         由 TraceStore 保证（H8），这里不预脱敏——避免出现第二条路径。
+
+        `status` 覆盖：Recovery Engine 恢复成功的步骤终态是 RECOVERED
+        （8.1 步骤状态），不是 SUCCESS——「失败后恢复」与「一次成功」在
+        trace 上必须可区分（RECOVERED 不得掩盖 flaky，19 节）。
         """
         self.note_dispatch(step_index, _is_non_idempotent(out))
         if self.store is None or self.tc_run_id is None:
-            return
+            return None
         # R18-4/R17-3：无条件累计步骤数（LLM Invocation Rate 分母）
         self.steps_recorded += 1
         # locator 兜底：StepOutcome.locator_strategy 只在成功路径填；失败
@@ -223,7 +228,7 @@ class Lifecycle:
                        "value": out.element_id}
         elif out.element_id:
             locator = {"strategy": "target", "value": out.element_id}
-        self.store.record_step(
+        row_id = self.store.record_step(
             self.tc_run_id,
             step_index=step_index,
             step_type=out.action,
@@ -235,11 +240,14 @@ class Lifecycle:
                                    if out.effective_idempotency else None),
             effective_risk=(out.effective_risk.name
                             if out.effective_risk else None),
-            status="SUCCESS" if out.ok else "FAILED",
+            status=status or ("SUCCESS" if out.ok else "FAILED"),
             failure_type=out.failure_type,
             failure_phase=(out.phase.value if out.phase else None),
             latency_ms=out.latency_ms,
             detail=out.detail or None)
+        # 返回 steps 行 id：恢复成功的步骤要落 recoveries 行（9.2），行关联
+        # 需要精确 id（P0-2 教训：不要拿 MAX(id) 猜）。
+        return row_id
 
     def end_testcase(self, status: str, failure_type: str | None = None,
                      cleanup_status: str | None = None) -> None:
