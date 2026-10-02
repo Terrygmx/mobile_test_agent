@@ -15,7 +15,9 @@
   G4. 兼容性：只用 overrides 的既有行为不受影响（单源模式仍可用）；
   G5. build 维度：12.4 generated/<build>/ 布局，resolve(build=...) 不炸；
   G6. Source Coverage（12.7）：报告可产出、五桶加总 == 分母、unknown/missing
-      为空、dynamic 可见（12.2 预期形态，不判红）。
+      为空、dynamic 可见（12.2 预期形态，不判红）；
+  G7. Build-level diff（12.6）：同 build 自比零差异、范围仅用例到达的 Screen、
+      注入删除能报出 REMOVED、且检出漂移不阻塞（默认 ok 仍 True）。
 
 产出：out/m3_gate/gate_summary.json；exit 0 = 全绿。
 """
@@ -171,6 +173,36 @@ def main() -> int:
                   f"ambiguous={cov.ambiguous} missing={cov.missing} "
                   f"screen_coverage={cov.screen_coverage:.3f}",
         "dynamic_refs": [f"{s}.{i}" for s, i in cov.dynamic_refs],
+    }
+
+    # ---- G7: Build-level diff 可用性（12.6；Task 3.3 第 2 步）----
+    # 判据：① 同 build 自比必须零差异（工具自身无噪声，否则没法用）；
+    #      ② 范围必须只含用例到达的屏（Spike* 屏用例没碰，不该进 scope）；
+    #      ③ 人工注入删除后必须报出 REMOVED（真能检出漂移）。
+    from source.build_diff import diff_builds
+    cases_all = SessionPipeline(suites_root=SUITES).discover()
+    self_diff = diff_builds(meta, meta, cases_all)
+    injected = json.loads(json.dumps(meta))
+    victim = next(s for s in injected["screen_elements"]
+                  if s["name"] == "HomeView")
+    victim["elements"] = [e for e in victim["elements"]
+                          if e["id"] != "go_profile"]
+    # 注入漂移 = 「新 build 少了一个元素」→ old=meta, new=injected，
+    # 方向反了会得到 ADDED 而不是 REMOVED（G7 首次跑就踩到）
+    drift_diff = diff_builds(meta, injected, cases_all)
+    g7_ok = (self_diff.counts.get("REMOVED", 0) == 0
+             and self_diff.counts.get("ADDED", 0) == 0
+             and not self_diff.unknown_screens
+             and "SpikeTab" not in self_diff.scope_screens
+             and drift_diff.removed == (("HomeView", "go_profile"),)
+             # 12.6 不阻塞：检出漂移本身不该让默认 ok 变 False
+             and drift_diff.ok is True)
+    results["G7_source_diff"] = {
+        "pass": g7_ok,
+        "detail": f"self_diff={self_diff.counts or '{}'} "
+                  f"scope={len(self_diff.scope_screens)} screens "
+                  f"injected_removed={[f'{s}.{i}' for s, i in drift_diff.removed]}",
+        "scope": list(self_diff.scope_screens),
     }
 
     # ---- 汇总 ----

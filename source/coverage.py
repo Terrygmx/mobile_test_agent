@@ -226,7 +226,7 @@ def compute_coverage(metadata: dict, cases: Iterable[Any]) -> CoverageReport:
     screens = {s for s in (metadata.get("screens") or []) if s}
     # screen 引用从 TargetRef.type 判（不是字符串前缀——schema 已把
     # "screen:X" 解析成 type=screen/id=X，再去前缀是重复实现）
-    screen_refs = sorted({r.id for r in _all_typed_refs(cases)
+    screen_refs = sorted({r.id for r in iter_refs(cases)
                           if r.type == "screen"})
     screens_missing = tuple(s for s in screen_refs if s not in screens)
 
@@ -252,8 +252,11 @@ def compute_coverage(metadata: dict, cases: Iterable[Any]) -> CoverageReport:
     )
 
 
-def _all_typed_refs(cases: Iterable[Any]) -> list:
-    """全部 TargetRef（含 screen）。collect_refs 的无过滤版。"""
+def iter_refs(cases: Iterable[Any]) -> list:
+    """全部 TargetRef（含 screen），按步骤顺序。collect_refs 的无过滤版 ——
+    公共入口：build_diff 的「用例到达了哪些 Screen」要用它（需要 screen
+    引用，collect_refs 恰好把 screen 滤掉了）。单点真源：过滤/不分派逻辑
+    只在 _step_refs 一处。"""
     out: list = []
     for tc in cases:
         for step in getattr(tc, "steps", []) or []:

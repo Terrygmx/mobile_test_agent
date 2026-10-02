@@ -113,9 +113,22 @@ def build_parser() -> argparse.ArgumentParser:
                             "G6 判据一致：只对 unknown/ambiguous/missing 卡 "
                             "exit 3——dynamic 是 12.2 预期形态（插值不猜值），"
                             "判红会逼人猜值")
-    src_sub.add_parser(
-        "diff", help="[未接线/Task 3.3 已有 build_identity 路径] "
-                     "Build-level source diff（12.6）")
+    dif_p = src_sub.add_parser(
+        "diff", help="Build-level source diff（12.6）：比两个 build 的 "
+                     "source_metadata.json，范围仅限用例实际到达的 Screen")
+    dif_p.add_argument("--old", metavar="PATH", required=True,
+                       help="基线 build 的 source_metadata.json")
+    dif_p.add_argument("--new", metavar="PATH",
+                       help="新 build 的 source_metadata.json"
+                            "（默认 repository/generated/local/"
+                            "source_metadata.json）")
+    dif_p.add_argument("--suites-root", metavar="DIR", default="suites",
+                       help="用例根目录（决定 diff 范围，默认 ./suites）")
+    dif_p.add_argument("--json", metavar="PATH",
+                       help="diff 结果 JSON 落盘")
+    dif_p.add_argument("--fail-on-drift", action="store_true",
+                       help="REMOVED 非空也返回非零（默认不阻塞：12.6 "
+                            "「独立任务，不阻塞日常回归」）")
 
     # --- 占位子命令（后续任务填充） ---
     for name, help_text in (
@@ -372,6 +385,8 @@ def cmd_source(args: argparse.Namespace) -> int:
     逼人去猜值——那是设计禁止的。判据与 Gate M3 的 G6 逐项对齐（同一份
     语义的两个消费点，不许一个卡一个不卡）。要卡就显式 `--strict`。
     """
+    if getattr(args, "source_command", None) == "diff":
+        return cmd_source_diff(args)
     if getattr(args, "source_command", None) != "coverage":
         print("usage: mta source coverage --metadata PATH "
               "[--suites-root DIR] [--json PATH] [--html PATH] [--strict]")
@@ -442,6 +457,66 @@ def cmd_source(args: argparse.Namespace) -> int:
         print(f"note: {report.dynamic} 个 dynamic 未计入未达标"
               f"（12.2 插值不猜值，人工登记实例）——需要卡它请加 --strict")
     print("source coverage: exit 0")
+    return 0
+
+
+def cmd_source_diff(args: argparse.Namespace) -> int:
+    """`mta source diff`（12.6 Build-level Reconciliation）。
+
+    与 `repo generate --check` **不是一回事**（3.1 consistency 比的是
+    generated-vs-overrides；这里比的是 old build metadata vs new build
+    metadata），不能互相顶替。
+
+    退出码（8.4）：路径/用例读不到 → 3（配置错误，fail-loud）；UNKNOWN
+    非空 → 1（用例引用了不可判定的屏，必须人工确认——不阻塞回归但不能
+    当通过）；REMOVED 默认 **0**（12.6「独立任务，不阻塞日常回归」），
+    `--fail-on-drift` 时 → 1。
+    """
+    import json as _json
+
+    from cli.pipeline import SessionPipeline
+    from source.build_diff import diff_builds, format_report
+
+    old_path = Path(args.old)
+    new_path = Path(args.new or "repository/generated/local/"
+                              "source_metadata.json")
+    suites_root = Path(args.suites_root)
+    for label, p in (("--old", old_path), ("--new", new_path)):
+        if not p.is_file():
+            print(f"PREFLIGHT ERROR: {label} metadata 不存在: {p}")
+            print("source diff: exit 3")
+            return 3
+    if not suites_root.is_dir():
+        print(f"PREFLIGHT ERROR: suites root 不存在: {suites_root} "
+              f"（diff 范围由用例决定，缺了就没法算范围）")
+        print("source diff: exit 3")
+        return 3
+
+    try:
+        cases = SessionPipeline(suites_root=suites_root).discover()
+    except SessionPipeline.PreflightError as e:
+        print(f"PREFLIGHT ERROR: {e}")
+        print("source diff: exit 3")
+        return 3
+
+    old = _json.loads(old_path.read_text(encoding="utf-8"))
+    new = _json.loads(new_path.read_text(encoding="utf-8"))
+    report = diff_builds(old, new, cases, fail_on_drift=args.fail_on_drift)
+    print(f"inputs: old={old_path} new={new_path} "
+          f"suites_root={suites_root}")
+    print(format_report(report))
+
+    if args.json:
+        p = Path(args.json)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_json.dumps(report.to_dict(), indent=2,
+                                 ensure_ascii=False), encoding="utf-8")
+        print(f"json: {p}")
+
+    if not report.ok:
+        print("source diff: exit 1")
+        return 1
+    print("source diff: exit 0")
     return 0
 
 

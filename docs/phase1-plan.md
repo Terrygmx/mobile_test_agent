@@ -357,7 +357,7 @@ M0 基建(0.5d) ─► M1 Schema/Repo/Screen(3d) ─► M2 确定性平台(4d) �
 
 **Steps:**
 1. 失败测试：一致 → 通过；不一致 → `BUILD_METADATA_MISMATCH`；`--allow-metadata-mismatch` → 放行但 Trace 记 `metadata_mismatch=1, override=1`；`CI=true` 时需第二开关（12.5）。
-2. `mta source diff`：只比已有用例实际到达的 Screen（12.6 表），输出 ADDED/REMOVED/RENAMED?/UNCHANGED/UNKNOWN。
+2. `mta source diff`：只比已有用例实际到达的 Screen（12.6 表），输出 ADDED/REMOVED/RENAMED?/UNCHANGED/UNKNOWN。**已完成**（`source/build_diff.py` + CLI + Gate G7，口径见设计 12.6 修订记录）。
 3. 真机验证：改源码不重编 metadata → `mta run` 启动即退出码 3。
 4. Commit: `feat(p1): build identity + source diff (P1-10)` + tag `checkpoint-p1-m3`
 

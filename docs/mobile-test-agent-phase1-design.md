@@ -700,6 +700,22 @@ CI: git commit → build → { App.ipa/.app, source_metadata.json }   # 测试�
 
 输出 diff：`ADDED / REMOVED / RENAMED? / UNCHANGED / UNKNOWN`（P1 只要求前三类中可判定的部分）。
 
+**修订记录（Task 3.3 实现后回填）**：`mta source diff --old PATH [--new PATH]
+[--suites-root DIR] [--json PATH] [--fail-on-drift]`。P1 实现的口径定档：
+
+- **范围** = 用例实际到达的 Screen，三种到达方式：`screen:X` 显式等待、
+  `X.elem` 限定名、**全局唯一的短名**（唯一时可确定，与 4.1 同一判据；
+  跨屏同名则不猜、不贡献屏）。按 **old 侧** metadata 解析短名——用新 build
+  解析会让范围随漂移缩水，漂移自己把自己藏掉。
+- **RENAMED? 是候选不是判定结论**：同屏恰好一增一删且元素类型相同才列，
+  且**不**从 ADDED/REMOVED 里摘掉那一对（摘掉等于报告只讲猜测、丢掉事实）。
+  增删数不等一律不猜，各条按独立 ADDED/REMOVED 上报。
+- **UNKNOWN** = 用例引用了任一侧 metadata 都没有的 screen。不是 REMOVED
+  （没扫到 ≠ 被删，12.2 不得猜），但必须让人看见。
+- **dynamic/unknown 不参与判定**（无可定位 id，比了是假漂移），两侧计数可见。
+- **不阻塞**（12.6「独立任务」）：REMOVED 默认 exit 0，`--fail-on-drift`
+  才 exit 1；UNKNOWN 恒 exit 1（待人工确认）；路径/用例读不到 exit 3。
+
 ### 12.7 覆盖率指标
 
 ```
@@ -864,9 +880,13 @@ mta report   <run_id>
   退出码：`unknown/ambiguous/missing` 非空 → 3；`--strict` 时 dynamic 也算
   未达标。**dynamic 默认不判红**——12.2 插值不猜值是设计预期形态，判红会
   逼人猜值；它仍逐条打印（不失败 ≠ 不显示）。
-- `mta source diff`（12.6 Build-level diff）**尚未接线**，当前是占位子命令。
-  3.1 的 `repo generate --check` 走的是 generated-vs-overrides 轴
-  （consistency Gate），与 build-vs-build diff 不是同一件事，不能互相顶替。
+- `mta source diff`（12.6 Build-level diff）已接线（Task 3.3 第 2 步），口径
+  见 12.6 修订记录。3.1 的 `repo generate --check` 走的是
+  generated-vs-overrides 轴（consistency Gate），与 build-vs-build diff 不是
+  同一件事，两者并存、不能互相顶替。
+- 12.5 Build Identity（plist 注入 `MTA_GIT_COMMIT/MTA_BUILD_ID` + 运行前校验
+  → `BUILD_METADATA_MISMATCH`）**尚未实现**；`mta run --allow-metadata-mismatch`
+  目前是「已读入但无 mismatch 可放行」的显式 warn 状态。
 
 ---
 
