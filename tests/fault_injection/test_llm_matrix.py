@@ -11,123 +11,28 @@ import sqlite3
 
 import yaml
 
-from cli.pipeline import PipelineDeps, SessionPipeline
 from executor.executor import ElementNotFound
-from executor.guard import EnvKind, Guard
 from llm.budget import BudgetConfig, LLMBudget
-from repository.resolver import Repository
-from runner.lifecycle import Lifecycle
-from runner.runner import StepRunner
-from tracer.storage import TraceStore
 
-PAGE_HOME = ("<App><Node name='screen.HomeView' visible='true'/></App>")
+from tests.fault_injection.fi_support import (
+    El as _El,
+    FakeExecutor,
+    FakeLLM,
+    drift_repo as _repo,
+    llm_json as _llm_json,
+    run_matrix as _run,
+    load_case as _case,
+)
 
-
-def _llm_json(value="signin_button", conf=0.93, action="tap"):
-    return json.dumps({"action": action,
-                       "target": {"type": "accessibility_id",
-                                  "value": value},
-                       "scope": "HomeView", "reason": "renamed",
-                       "confidence": conf})
-
-
-class FakeLLM:
-    def __init__(self, script=None):
-        self.script = list(script or [])
-        self.calls: list[str] = []
-
-    def complete(self, prompt: str, timeout: int = 20) -> str:
-        self.calls.append(prompt)
-        item = self.script[min(len(self.calls) - 1, len(self.script) - 1)]
-        if isinstance(item, Exception):
-            raise item
-        return item
-
-
-class FakeExecutor:
-    """find 按调用序弹脚本；tap 计数。page_source 恒 HomeView（漂移后）。"""
-
-    def __init__(self, find_script=None, tap_fail_times=0):
-        self.find_script = list(find_script or [])
-        self.find_calls = 0
-        self.tap_calls = 0
-        self.tap_fail_times = tap_fail_times
-
-    def find(self, strategies):
-        idx = min(self.find_calls, len(self.find_script) - 1)
-        self.find_calls += 1
-        item = self.find_script[idx]
-        if isinstance(item, Exception):
-            raise item
-        return item
-
-    def tap(self, strategies):
-        self.tap_calls += 1
-        if self.tap_calls <= self.tap_fail_times:
-            raise RuntimeError("dispatch died")
-
-    def input(self, strategies, value):
-        pass
-
-    def swipe(self, direction):
-        pass
-
-    def page_source(self):
-        return PAGE_HOME
-
-
-class _El:
-    def get_attribute(self, name):
-        return "XCUIElementTypeButton" if name == "type" else ""
-
-    def is_displayed(self):
-        return True
-
-    def is_enabled(self):
-        return True
-
-
-def _repo(tmp_path):
-    """漂移形态的 Repository：login_button（旧 build 登记，lint 必须过）+
-    signin_button（新 build 元素）。App 侧只有 signin_button。"""
-    gen = tmp_path / "generated" / "local"
-    (gen / "elements").mkdir(parents=True, exist_ok=True)
-    (gen / "screens").mkdir(parents=True, exist_ok=True)
-    # risk: LOW 显式声明——9.3-4 的候选风险门控是 fail-closed（无声明=None
-    # 不放行），fixture 元素必须带与真实仓库一致的确定性声明
-    (gen / "elements" / "HomeView.yaml").write_text(
-        "schema_version: '1.0'\nkind: element\nid: login_button\n"
-        "screen: HomeView\ntype: button\nstrategies:\n"
-        "- type: accessibility_id\n  value: login_button\n  origin: source\n"
-        "metadata:\n  origin: source\n  risk: LOW\n"
-        "---\n"
-        "schema_version: '1.0'\nkind: element\nid: signin_button\n"
-        "screen: HomeView\ntype: button\nstrategies:\n"
-        "- type: accessibility_id\n  value: signin_button\n  origin: source\n"
-        "metadata:\n  origin: source\n  risk: LOW\n", encoding="utf-8")
-    (gen / "screens" / "HomeView.yaml").write_text(
-        "schema_version: '1.0'\nkind: screen\nid: HomeView\n"
-        "marker: screen.HomeView\nkind_hint: page\nmetadata:\n"
-        "  risk: LOW\n  origin: source\n", encoding="utf-8")
-    return Repository.from_dirs(generated_root=str(gen))
-
-
-def _run(tmp_path, case_yaml, *, ex, repo, recovery, cases=None):
-    store = TraceStore(tmp_path / "trace.db")
-    store.start_run("run_llm")
-    sdir = tmp_path / "suites"
-    sdir.mkdir(exist_ok=True)
-    (sdir / "llm_001.yaml").write_text(case_yaml, encoding="utf-8")
-    pipe = SessionPipeline(suites_root=sdir, store=store, recovery=recovery)
-    pipe.deps = PipelineDeps(env=None, repo=repo)
-    ds = type("DS", (), {"ensure_alive": lambda self: None})()
-    runner = StepRunner(ex, ds, Guard(EnvKind.SANDBOX))
-    pipe._step_runner = runner
-    lifecycle = Lifecycle(store=store)
-    pipe._lifecycle = lifecycle
-    cases = cases if cases is not None else pipe.discover()
-    return pipe.run_all(cases, run_id="run_llm"), store
-
+from tests.fault_injection.fi_support import (
+    El as _El,
+    FakeExecutor,
+    FakeLLM,
+    drift_repo as _repo,
+    llm_json as _llm_json,
+    run_matrix as _run,
+    load_case as _case,
+)
 
 DRIFT_CASE = """\
 schema_version: "0.2"
@@ -154,7 +59,7 @@ def test_fi_02_llm_recovery_recovered_exit5(tmp_path):
     llm = FakeLLM([_llm_json()])
     recovery = RecoveryEngine(repo=_repo(tmp_path), llm=llm,
                               budget=LLMBudget(), sleep=lambda s: None)
-    run, store = _run(tmp_path, DRIFT_CASE, ex=ex, repo=_repo(tmp_path),
+    run, store, _, _ = _run(tmp_path, DRIFT_CASE, ex=ex, repo=_repo(tmp_path),
                       recovery=recovery)
     r = run.results[0]
     assert r.status == "RECOVERED", r.detail
@@ -219,7 +124,7 @@ def test_fi_10_budget_exhausted_no_new_api_calls(tmp_path):
     from testcase.schema import parse_testcase_dict
     cases = [parse_testcase_dict(yaml.safe_load(v))
              for v in cases_yaml.values()]
-    run, store = _run(tmp_path, DRIFT_CASE, ex=ex, repo=_repo(tmp_path),
+    run, store, _, _ = _run(tmp_path, DRIFT_CASE, ex=ex, repo=_repo(tmp_path),
                       recovery=recovery, cases=cases)
     # 用例 1：预算 1 次给了 LLM，但 find 序耗尽后恒 ENF → 校验链拒绝
     assert run.results[0].failure_type == "LLM_TARGET_NOT_FOUND"
@@ -252,7 +157,7 @@ steps:
                                    ElementNotFound("drifted"), _El(), _El()])
     recovery = RecoveryEngine(repo=_repo(tmp_path), llm=FakeLLM([_llm_json()]),
                               budget=LLMBudget(), sleep=lambda s: None)
-    run, store = _run(tmp_path, case, ex=ex, repo=_repo(tmp_path),
+    run, store, _, _ = _run(tmp_path, case, ex=ex, repo=_repo(tmp_path),
                       recovery=recovery)
     r = run.results[0]
     assert r.status == "RECOVERED", r.detail
@@ -294,7 +199,7 @@ steps:
         config=RecoveryConfig(on_wait_timeout=True),
         repo=_repo(tmp_path), llm=FakeLLM([_llm_json()]),
         budget=LLMBudget(), sleep=lambda s: None)
-    run, store = _run(tmp_path, case, ex=ex, repo=_repo(tmp_path),
+    run, store, _, _ = _run(tmp_path, case, ex=ex, repo=_repo(tmp_path),
                       recovery=recovery)
     r = run.results[0]
     assert r.status == "RECOVERED", r.detail

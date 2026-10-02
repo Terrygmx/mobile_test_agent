@@ -16,127 +16,15 @@ import sqlite3
 
 import yaml
 
-from cli.pipeline import SessionPipeline
-from executor.guard import EnvKind, Guard
-from executor.policy import Idempotency
 from runner.lifecycle import Lifecycle, WdaPolicy
-from runner.runner import StepRunner
-from session.device_session import InfraError
 from tracer.storage import TraceStore
-
-PAGE_XML = """\
-<XCUIElementApplication>
-  <XCUIElementTypeOther name="screen.HomeView" visible="true"/>
-  <XCUIElementTypeButton name="go_profile"/>
-</XCUIElementApplication>
-"""
-
-
-class FakeExecutor:
-    """可编排故障的 Executor 替身。
-
-    find_script: 每次 find 弹出一项——Exception 抛出、其他值返回；
-    耗尽后恒返回最后一项。tap_fail_times: 前 N 次 tap 抛 RuntimeError
-    （模拟 POST_DISPATCH 中途故障）。
-    """
-
-    def __init__(self, find_script=None, tap_fail_times=0,
-                 page_source=PAGE_XML):
-        self.find_script = list(find_script or [])
-        self.find_calls = 0
-        self.tap_calls = 0
-        self.tap_fail_times = tap_fail_times
-        self.page_source = page_source
-
-    def find(self, strategies):
-        idx = min(self.find_calls, len(self.find_script) - 1)
-        self.find_calls += 1
-        if not self.find_script:
-            return _El()
-        item = self.find_script[idx]
-        if isinstance(item, Exception):
-            raise item
-        return item
-
-    def tap(self, strategies):
-        self.tap_calls += 1
-        if self.tap_calls <= self.tap_fail_times:
-            raise RuntimeError("dispatch died mid-tap")
-
-    def input(self, strategies, value):
-        pass
-
-    def swipe(self, direction):
-        pass
-
-
-class _El:
-    def is_displayed(self):
-        return True
-
-    def is_enabled(self):
-        return True
-
-    @property
-    def text(self):
-        return ""
-
-    def get_attribute(self, name):
-        return ""
-
-
-class FakeDS:
-    """ensure_alive 第 die_on_alive 次调用抛 InfraError（WDA 中途死亡）。
-
-    `die_on_alive` 支持 int 或 set[int]——重启后 ensure 计数继续累加
-    （attempt2/后续用例都是同一会话计数器），跨用例死亡场景用 set 编排。
-    """
-
-    def __init__(self, die_on_alive=None):
-        self.ensure_calls = 0
-        self.die_on = ({die_on_alive} if isinstance(die_on_alive, int)
-                       else set(die_on_alive or ()))
-        self.restarts = 0
-
-    def ensure_alive(self):
-        self.ensure_calls += 1
-        if self.ensure_calls in self.die_on:
-            raise InfraError("WDA session died")
-
-    def restart_wda(self):
-        self.restarts += 1
-
-
-def _case(text: str):
-    from testcase.schema import parse_testcase_dict
-    return parse_testcase_dict(yaml.safe_load(text))
-
-
-def _suite_dir(tmp_path, text: str):
-    d = tmp_path / "suites"
-    d.mkdir(exist_ok=True)
-    (d / "fi_001.yaml").write_text(text, encoding="utf-8")
-    return d
-
-
-def _run(tmp_path, case_yaml, *, ds=None, ex=None, lifecycle=None,
-         recovery=None, failure_policy="ABORT_SUITE", cases=None):
-    store = TraceStore(tmp_path / "trace.db")
-    store.start_run("run_fi")
-    sdir = _suite_dir(tmp_path, case_yaml)
-    pipe = SessionPipeline(suites_root=sdir, store=store, recovery=recovery)
-    ds = ds or FakeDS()
-    ex = ex or FakeExecutor()
-    runner = StepRunner(ex, ds, Guard(EnvKind.SANDBOX))
-    lifecycle = lifecycle or Lifecycle(store=store)
-    # run_all → SuiteRunner → _suite_run_one 消费的是 pipeline 装配（同 cmd_run）
-    pipe._step_runner = runner
-    pipe._lifecycle = lifecycle
-    cases = cases if cases is not None else pipe.discover()
-    run = pipe.run_all(cases, run_id="run_fi",
-                       failure_policy=failure_policy)
-    return run, store, ds, ex
-
+from tests.fault_injection.fi_support import (
+    El,
+    FakeDS,
+    FakeExecutor,
+    load_case as _case,
+    run_matrix as _run,
+)
 
 TWO_TAPS = """\
 schema_version: "0.2"
@@ -177,7 +65,7 @@ steps:
 def test_fi_16_wda_rerun_attempt2(tmp_path):
     from agent.recovery import RecoveryEngine
 
-    ds = FakeDS(die_on_alive=2)   # launch 不 ensure（app 级）；tap2 的 ensure 死
+    ds = FakeDS(die_on=2)   # launch 不 ensure（app 级）；tap2 的 ensure 死
     run, store, ds, ex = _run(
         tmp_path, TWO_TAPS, ds=ds, recovery=RecoveryEngine(sleep=lambda s: None))
     assert run.passed, f"重启后重跑应全绿: {run.results[0].detail}"
@@ -198,7 +86,7 @@ def test_fi_16_wda_rerun_attempt2(tmp_path):
 def test_fi_17_wda_after_non_idempotent_no_rerun(tmp_path):
     from agent.recovery import RecoveryEngine
 
-    ds = FakeDS(die_on_alive=2)   # tap1（pay_button 非幂等）已发出后 tap2 前死
+    ds = FakeDS(die_on=2)   # tap1（pay_button 非幂等）已发出后 tap2 前死
     run, store, ds, ex = _run(
         tmp_path, NON_IDEM_THEN_TAP, ds=ds,
         recovery=RecoveryEngine(sleep=lambda s: None))
@@ -227,7 +115,7 @@ def test_fi_wda_restart_budget_exhausted_terminates_run(tmp_path):
     # max_restart_per_run=1：case_a 重启 1 次后重跑绿；case_b 再死 → 预算耗尽。
     # 计数全程累加：case_a attempt1 死于 #2（tap2 ensure）；attempt2 用 #3/#4；
     # case_b 死于 #5（tap1 ensure）→ 预算 2 > 1 → TERMINATE_RUN
-    ds = FakeDS(die_on_alive={2, 5})
+    ds = FakeDS(die_on={2, 5})
     lifecycle = Lifecycle(store=TraceStore(tmp_path / "trace.db"),
                           policy=WdaPolicy(max_restart_per_run=1))
     run, store, ds, ex = _run(
@@ -261,7 +149,7 @@ steps:
     idempotency: IDEMPOTENT
 """
     # find 第 1 次（初执行）失败，settle 的 re-find（第 2 次）命中
-    ex = FakeExecutor(find_script=[ElementNotFound("render delay"), _El()])
+    ex = FakeExecutor(find_script=[ElementNotFound("render delay"), El()])
     run, store, ds, ex = _run(
         tmp_path, case, ex=ex,
         recovery=RecoveryEngine(sleep=lambda s: None))
@@ -392,7 +280,7 @@ steps:
     from executor.executor import ElementNotFound
     # 主步骤 find#1 放行（tap 中途炸）；postcondition 检查（screen:GhostView
     # active）经 WaitEngine → find 恒失败 → WaitTimeout → 检查为 False
-    ex = FakeExecutor(find_script=[_El(), ElementNotFound("ghost")],
+    ex = FakeExecutor(find_script=[El(), ElementNotFound("ghost")],
                       tap_fail_times=1,
                       page_source="<App><Node name='screen.HomeView'/></App>")
     run, store, ds, ex = _run(
