@@ -192,28 +192,66 @@ def test_engine_experience_store_consulted_after_reconcile_before_llm():
         "ExperienceStore 必须在 reconciliation 后、LLM 前（20 节）"
 
 
-def test_engine_run_memo_reuses_within_run():
+def test_engine_experience_position_after_reconciliation_with_repo():
+    """review P3-4：repo=None 的用例只证明了 experience 在 settle 后、llm
+    前——「reconciliation 之后」这个位置约束要用带 fake repo 的用例闭环：
+    stages 顺序必须含 screen → reconcile，且 experience 在 reconcile 之后。"""
+    from types import SimpleNamespace
+
+    repo = SimpleNamespace(
+        generated_screens={
+            "HomeView": SimpleNamespace(marker="screen.HomeView")},
+        override_screens={},
+        screen_kind_hint=lambda s: "page")
+    # go_profile 在源码 metadata 里（literal）但运行时不在 → DRIFT
+    page = ("<App><Node name='screen.HomeView'/>"
+            "<Node name='signin_button'/></App>")
+    source_metadata = {
+        "elements": [{"accessibilityId": "go_profile",
+                      "resolution_type": "literal", "screen": "HomeView"}],
+        "screens": ["HomeView"]}
+    ctx = _ctx(
+        refind=lambda: (_ for _ in ()).throw(LookupError("drifted")),
+        page_source=lambda: page,
+        source_metadata=source_metadata)
+    r = RecoveryEngine(repo=repo, sleep=lambda s: None).recover(ctx)
+    stages = [st["stage"] for st in r.detail["stages"]]
+    assert stages == ["settle", "screen", "reconcile", "experience", "llm"], \
+        f"ExperienceStore 必须在 reconciliation 之后（20 节）: {stages}"
+    recon = next(st for st in r.detail["stages"] if st["stage"] == "reconcile")
+    assert recon["outcome"] == "DRIFT"
+
+
+def test_engine_run_memo_consumes_saved_strategy():
     """9.4：同 run 内 (screen, target, build) 复用已校验恢复 →
-    RECOVERED(kind=run_memo)；新引擎（新 memo）不可见——不跨 run。
-    真实时序：漂移下 settle 的 re-find 先失败，memo 命中后用恢复策略重找。"""
+    RECOVERED(kind=run_memo)，且**按 memo 保存的恢复策略重找**（不是原始
+    strategies——漂移下按原策略找必然再失败，review P3-1）；新引擎（新
+    memo）不可见——不跨 run。"""
     memo = RunMemo()
-    memo.save("HomeView", "go_profile", "local",
-              {"type": "accessibility_id", "value": "go_profile_v2"})
+    memo_strategy = {"type": "accessibility_id", "value": "go_profile_v2"}
+    memo.save("HomeView", "go_profile", "local", memo_strategy)
     engine = RecoveryEngine(sleep=lambda s: None, run_memo=memo)
-    finds: list[int] = []
+    finds: list = []
 
-    def refind():
-        finds.append(1)
-        if len(finds) == 1:
-            raise LookupError("drifted")   # settle：原目标已漂移
-        return object()                    # memo：按恢复策略重找命中
+    def find_with(strategies):
+        finds.append(list(strategies))
+        return object()
 
-    r = engine.recover(_ctx(refind=refind, redispatch=lambda el: None))
+    ctx = _ctx(
+        failure_type="ELEMENT_NOT_FOUND", phase=PRE,
+        refind=lambda: (_ for _ in ()).throw(LookupError("drifted")),
+        find_with=find_with, redispatch=lambda el: None)
+    r = engine.recover(ctx)
     assert r.recovered and r.kind == "run_memo"
-    assert len(finds) == 2
+    # refind（settle）按原始策略失败；memo 消费走 find_with 且收到 memo 策略
+    assert finds == [[memo_strategy]], \
+        f"memo 恢复策略必须被消费: {finds}"
+    assert r.detail["memo_strategy"] == memo_strategy
 
     fresh = RecoveryEngine(sleep=lambda s: None)
-    r2 = fresh.recover(_ctx(refind=refind, redispatch=lambda el: None))
+    r2 = fresh.recover(_ctx(
+        refind=lambda: (_ for _ in ()).throw(LookupError("drifted")),
+        find_with=find_with, redispatch=lambda el: None))
     assert not r2.recovered or r2.kind != "run_memo"
 
 

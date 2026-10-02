@@ -442,8 +442,50 @@ Task 3.3 前半）。本轮补齐：
   准入 → postcondition/settle/memo/experience 确定性半边；恢复成功步骤
   终态 RECOVERED（record_step 新增 status 覆盖参数）+ recoveries 行落库
   （kind 大写枚举映射）+ 用例 RECOVERED（exit 5 走 8.4 既有优先级）。
-- **顺延 4.2**（记账）：12.3 两键 metadata → reconcile_local 子集的适配
-  （LLM prompt 同需）；LLM 调用 + 9.3 五项候选校验链；review CLI；
-  budget/熔断。P0 recover() 退役随迁移一并做（P0 verify 脚本回归路径）。
+- **顺延 4.2**（记账，review_m4_task41 补点名后）：①12.3 两键 metadata →
+  reconcile_local 子集的适配（LLM prompt 同需）；②LLM 调用 + 9.3 五项候选
+  校验链；③review CLI；④budget/熔断；⑤**矩阵 #15**（断言目标 ID 漂移 →
+  RECOVERED kind=assertion_target，exit 5）——需要 LLM 候选 + **断言步骤
+  接入恢复管线**（现 assert 分支与 wait 一样走 aux 分支不进引擎），
+  4.3 要 24/24 全过，此处不点名必漏；⑥`recovery.on_wait_timeout` 死旋钮
+  接通：wait 步骤恢复管线与 ⑤ 同一套接线，接通前配置项不得宣称可用
+  （review P3-2）；⑦**memo save 时机**：LLM 校验通过后写入 RUN_MEMO
+  （消费端 find_with 已在 4.1 闭环，P3-1）；⑧**postcondition 双查定档**：
+  StepRunner 成功路径与引擎各查一次、两次结果不一致以第二次为准（时间
+  窗口）——校验链设计时显式拍板是否合并/去重（review P3-4）。
+  P0 recover() 退役随迁移一并做（P0 verify 脚本回归路径）。
 - 实测：pytest 694 passed（+27：决策表/引擎 19 + 故障注入 8，FakeDriver
   矩阵 #13/#14/#16/#17/#18/#19 预演全过）。
+
+
+### review_m4_task41_2026-10-02 核销记录（5×P3，无 P0/P1/P2）
+
+- P3-1（已修）：RUN_MEMO 命中路径不消费 memo 策略——引擎此前命中后调
+  refind（闭包捕获原始 strategies），memo 里存的恢复策略从未用于定位。
+  修复：RecoveryContext 新增 `find_with(strategies)` 注入端（管线侧
+  ex.find 透传），memo 命中后按保存的策略重找 + redispatch；测试断言
+  find_with 收到的恰是 memo 策略（不再是 stub 恒成功、与内容无关）。
+  memo save 时机（LLM 校验后写入）仍属 4.2（顺延清单 ⑦）。
+- P3-2（已定档）：`recovery.on_wait_timeout` 端到端死旋钮——决策表可
+  放行但 wait 步骤不进恢复管线。RecoveryConfig docstring 显式标注 P1
+  预留语义（不宣称可用）；接通进 4.2 顺延清单 ⑥（与矩阵 #15 同一套
+  aux 分支接线）。
+- P3-3（已记账）：矩阵 #15 顺延未点名——补入 4.2 清单 ⑤（含断言步骤
+  接恢复管线的接线需求）。
+- P3-4（已修/已定档）：①ExperienceStore 位置测试补 fake repo 用例——
+  stages 实证 settle → screen → reconcile(DRIFT) → experience → llm，
+  「reconciliation 之后」不再靠测试名声称；②postcondition 双查语义差
+  定档进 4.2 清单 ⑧。
+- P3-5（已修）：①agent/recovery.py 模块 docstring 两段式（P1 引擎主体
+  在前、P0 遗留函数与退役路径在后）；②pipeline.py:419 条件表达式的
+  13 个多余空格格式化（heredoc 写入时折行被压平所致）；③suite.py
+  run_suite 循环前 list() 物化一次（generator 半路消费会让 remaining
+  统计静默失真）。
+- P0 回归（review 建议动作 4）：verify_stage8 重跑通过（budget/risk/
+  唯一性/RECOVERED 分支全绿；P0 recover() 未动，import 路径实测无损）。
+  **过程中挖出并修复 P0/P1 schema 漂移一处**：tracer/recorder.py（P0
+  写入层）start_run/record_recovery 用定位 INSERT（runs 8 值 vs 并集
+  schema 27 列、recoveries 7 值 vs 26 列）——M1 扩列时即断，因 P0 链路
+  此前无人对 live 库跑过而未暴露（又一例「真机项不跑就没有证据」）。
+  改命名列 INSERT（P0 的 8 列在 M1 迁移中全部保留，命名列对纯净库与
+  并集库都成立）。

@@ -41,8 +41,13 @@ class Recorder:
 
     def start_run(self, test_case: str) -> str:
         run_id = str(uuid.uuid4())[:8]
+        # schema 0.1 扩列后（runs 27 列）P0 定位 INSERT 不再成立——改命名
+        # 列。P0 的 8 列在并集 schema 里全部保留（M1 迁移只加不删），命名
+        # 列对 P0 纯净库与 P1 并集库都成立。
         self.conn.execute(
-            "INSERT INTO runs VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO runs (run_id, test_case, app_version, app_build,"
+            " source_commit, start_time, end_time, status)"
+            " VALUES (?,?,?,?,?,?,?,?)",
             (run_id, test_case, "debug", "local", _git_commit(),
              _now(), None, "RUNNING"),
         )
@@ -74,8 +79,12 @@ class Recorder:
     def record_recovery(self, step_id: int, strategy: str, llm_target: str | None,
                         confidence: float, risk_level: str, latency_ms: int,
                         accepted: bool) -> int:
+        # 同 start_run：14.2 扩列后（recoveries 26 列）定位 INSERT 失效，
+        # 命名列写 P0 语义列（并集 schema 全保留）。
         cur = self.conn.execute(
-            "INSERT INTO recoveries VALUES (NULL,?,?,?,?,?,?,?)",
+            "INSERT INTO recoveries (step_id, strategy, llm_target,"
+            " confidence, risk_level, latency_ms, accepted)"
+            " VALUES (?,?,?,?,?,?,?)",
             (step_id, strategy, llm_target, confidence, risk_level, latency_ms, accepted),
         )
         self.conn.commit()

@@ -1,11 +1,18 @@
-"""Recovery Engine（Stage 8，设计文档 4.8.3）。
+"""agent.recovery — P1 RecoveryEngine（设计 9.2，本模块主体）+ P0 遗留函数。
 
-流程：budget → prompt → LLM → 解析 → risk 检查（只 LOW 自动执行）
-→ 唯一性校验（0/1/2+）→ 执行 → 记录 recoveries。
+**P1（下方 RecoveryEngine / RunMemo）**：Task 4.1 起的确定性恢复半边——
+决策表准入 → postcondition → settle → 当前屏识别 → Local Reconciliation →
+RUN_MEMO → ExperienceStore → LLM 钩子（4.2 接入）。引擎不持有
+Executor/LLM，设备交互经 RecoveryContext 注入 callable。
 
-review 修复：P1-2 action 白名单透传（input 恢复不再误 tap）；
-P0-2 step_id 由调用方传入，recoveries 与 steps 真正关联；
-P2-6 JSON 正则非贪婪。
+**P0（模块级 `recover()` 函数，Stage 8 / 设计 4.8.3 遗留）**：budget →
+prompt → LLM → 解析 → risk 检查（只 LOW 自动执行）→ 唯一性校验 → 执行 →
+记录 recoveries。仅供 P0 verify_stage8 回归路径消费，Task 4.2 LLM 校验链
+迁入引擎后退役——**P1 管线不得调用它**（单消费原则，防平行实现）。
+
+P0 review 修复存档：P1-2 action 白名单透传（input 恢复不再误 tap）；
+P0-2 step_id 由调用方传入，recoveries 与 steps 真正关联；P2-6 JSON 正则
+非贪婪。
 """
 
 from __future__ import annotations
@@ -283,23 +290,29 @@ class RecoveryEngine:
                 # （agent/risk.candidate_risk_allowed）。候选留给 4.2 LLM。
 
         # --- RUN_MEMO（9.4：同 run 复用，reconciliation 后、LLM 前） ---
+        # 命中后必须按 memo 保存的**恢复策略**重找（ctx.find_with）——
+        # refind 捕获的是原始 strategies，漂移下按原策略找必然再失败；
+        # 复用语义 = 策略被消费，不是「查得到」（review P3-1 定档）。
         if RecoveryAction.RUN_MEMO in allowed and ctx.element_id:
             memo = self.run_memo.lookup(
                 ctx.screen_id or "", ctx.element_id, ctx.app_build)
-            if memo is not None and ctx.refind is not None:
-                stages.append({"stage": "run_memo", "outcome": "hit"})
-                try:
-                    element = _single_element(ctx.refind())
-                    if ctx.redispatch is not None:
-                        ctx.redispatch(element)
-                        return RecoveryResult(
-                            recovered=True, kind="run_memo",
-                            detail={"stages": stages})
-                except Exception as e:  # noqa: BLE001
-                    stages.append({"stage": "run_memo",
-                                   "outcome": f"{type(e).__name__}"})
-            elif memo is not None:
-                stages.append({"stage": "run_memo", "outcome": "hit"})
+            if memo is not None:
+                if ctx.find_with is None:
+                    stages.append({"stage": "run_memo", "outcome": "hit",
+                                   "consumed": "no_find_with_callable"})
+                else:
+                    stages.append({"stage": "run_memo", "outcome": "hit"})
+                    try:
+                        element = _single_element(ctx.find_with((memo,)))
+                        if ctx.redispatch is not None:
+                            ctx.redispatch(element)
+                            return RecoveryResult(
+                                recovered=True, kind="run_memo",
+                                detail={"stages": stages,
+                                        "memo_strategy": memo})
+                    except Exception as e:  # noqa: BLE001
+                        stages.append({"stage": "run_memo",
+                                       "outcome": f"{type(e).__name__}"})
 
         # --- ExperienceStore（20 节预留位：reconciliation 后、LLM 前；P1 恒 []） ---
         if ctx.element_id:

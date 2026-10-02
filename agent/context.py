@@ -63,6 +63,10 @@ class RecoveryContext:
     source_metadata: dict | None = None
     # --- 设备交互端（调用方注入，引擎不摸 Executor） ---
     refind: Callable[[], object] | None = None
+    # 按给定策略定位（RUN_MEMO 恢复策略的消费端，9.4）：memo 存的是「用哪条
+    # 定位能找到漂移后的目标」，必须按它重找——refind 闭包捕获的是原始
+    # strategies，漂移场景下按原策略重找必然再次失败（review P3-1）。
+    find_with: Callable[[tuple], object] | None = None
     redispatch: Callable[[object], None] | None = None
     page_source: Callable[[], str] | None = None
     postcondition_check: Callable[[], bool | None] | None = None

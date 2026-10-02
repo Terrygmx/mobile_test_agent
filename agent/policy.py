@@ -38,7 +38,13 @@ class RecoveryAction(str, Enum):
 
 @dataclass
 class RecoveryConfig:
-    """恢复配置。默认值即设计值（9.2 / 7.5），mta.yaml 可覆盖（15 节）。"""
+    """恢复配置。默认值即设计值（9.2 / 7.5），mta.yaml 可覆盖（15 节）。
+
+    `on_wait_timeout` 是 **P1 预留旋钮**（review_m4_task41 P3-2 定档）：
+    决策表按它放行，但 wait 步骤走 aux 分支不进恢复管线——Task 4.2 接通
+    前，端到端置 True 也没有代码路径能兑现（不宣称可用，防「参数存在=
+    功能存在」，R17-1/2 同纪律）。
+    """
 
     on_wait_timeout: bool = False       # 9.2：Wait Timeout 默认不进 Recovery
     settle_max_attempts: int = 1        # 9.2：有界，默认 1 次

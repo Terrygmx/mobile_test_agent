@@ -416,7 +416,8 @@ class SessionPipeline:
         from agent.context import RecoveryContext
 
         ex = runner.ex if runner is not None else None
-        checker = getattr(runner, "postcondition_checker", None)             if runner is not None else None
+        checker = (getattr(runner, "postcondition_checker", None)
+                   if runner is not None else None)
         post_fn = None
         if step_ctx.postcondition_spec is not None and checker is not None:
             post_fn = lambda: checker(step_ctx.postcondition_spec)  # noqa: E731
@@ -433,6 +434,9 @@ class SessionPipeline:
             has_postcondition=step_ctx.has_postcondition,
             source_metadata=None,
             refind=(lambda: ex.find(step_ctx.strategies))
+            if ex is not None else None,
+            # RUN_MEMO 策略消费端（9.4）：memo 存的恢复策略经它重找
+            find_with=(lambda strategies: ex.find(list(strategies)))
             if ex is not None else None,
             redispatch=(lambda element: runner.dispatch(step_ctx, element))
             if runner is not None else None,

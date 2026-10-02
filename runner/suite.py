@@ -125,6 +125,10 @@ class SuiteRunner:
         # （每个 SuiteRunner 都从 0 开始数）。用 uuid + 时间戳，形状与 P0
         # Recorder 的 `start_run` 一致。
         run = RunResult(run_id=f"suite_{uuid.uuid4().hex[:8]}")
+        # 防御性收口：循环内 len(list(testcases)) 会重复消费——调用方传
+        # generator 时第二次 list() 得到空集，remaining 统计静默失真。
+        # 现调用方都传 list，这里物化一次杜绝隐患。
+        testcases = list(testcases)
         for tc in testcases:
             try:
                 result = self.run_testcase(tc)
