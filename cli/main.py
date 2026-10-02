@@ -108,9 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
                        help="指标 JSON 落盘（默认 out/source_coverage.json）")
     cov_p.add_argument("--html", metavar="PATH",
                        help="HTML 覆盖率报告（14.5 报告页的 coverage 段）")
-    cov_p.add_argument("--allow-partial", action="store_true",
-                       help="informational 模式：dynamic/unknown/missing "
-                            "非空也返回 0（默认按 Gate 语义 exit 3）")
+    cov_p.add_argument("--strict", action="store_true",
+                       help="把 dynamic 也算作未达标（exit 3）。默认与 Gate M3 "
+                            "G6 判据一致：只对 unknown/ambiguous/missing 卡 "
+                            "exit 3——dynamic 是 12.2 预期形态（插值不猜值），"
+                            "判红会逼人猜值")
     src_sub.add_parser(
         "diff", help="[未接线/Task 3.3 已有 build_identity 路径] "
                      "Build-level source diff（12.6）")
@@ -362,13 +364,17 @@ def cmd_source(args: argparse.Namespace) -> int:
 
     退出码：metadata/suites 读不到 → 3（前置配置错误，fail-loud——绝不能把
     「没读到」显示成「覆盖率 0%」，那会把构建问题伪装成覆盖率问题，坑 10d
-    同款纪律）；指标有未覆盖项 → 3（Gate 语义，同 consistency check）；
-    `--allow-partial` 退化为 informational（0）。
+    同款纪律）；有 **unknown/ambiguous/missing** → 3；`--strict` 时 dynamic
+    也算未达标。
+
+    dynamic **默认不判红**（review P2-1）：它是 12.2 的预期形态（插值不猜
+    值、人工登记实例），拿它卡 exit 会让本命令在设计预期的仓库上永远红，
+    逼人去猜值——那是设计禁止的。判据与 Gate M3 的 G6 逐项对齐（同一份
+    语义的两个消费点，不许一个卡一个不卡）。要卡就显式 `--strict`。
     """
     if getattr(args, "source_command", None) != "coverage":
         print("usage: mta source coverage --metadata PATH "
-              "[--suites-root DIR] [--json PATH] [--html PATH] "
-              "[--allow-partial]")
+              "[--suites-root DIR] [--json PATH] [--html PATH] [--strict]")
         return 3
 
     import json as _json
@@ -414,13 +420,27 @@ def cmd_source(args: argparse.Namespace) -> int:
         write_source_coverage_report(report, args.html)
         print(f"html: {args.html}")
 
-    uncovered = report.dynamic + report.unknown + report.ambiguous \
-        + report.missing
-    if uncovered and not args.allow_partial:
-        print(f"source coverage: {uncovered} 个 identifier 未被 metadata 解析"
-              f"（Gate 未达标；--allow-partial 仅作信息参考）")
+    # 判据与 Gate M3 G6 同源（review P2-1）：dynamic 是 12.2 预期形态，
+    # 默认不判红；unknown/ambiguous/missing 是真缺口，一律卡 exit 3。
+    # **唯一豁免**是 screen 缺口——用例里 `screen:X` 引用未登记的 X 时
+    # current_screen 永远判不出（13.2），但那是「页面还没做」的待办而非
+    # 解析缺口，Gate G6 因此也不卡它；这里对齐，不自作主张加严。
+    gaps = (report.unknown, report.ambiguous, report.missing)
+    if args.strict:
+        gaps = gaps + (report.dynamic,)
+    n_gaps = sum(gaps)
+    if n_gaps:
+        print(f"source coverage: {n_gaps} 个 identifier 未被 metadata 解析"
+              f"（unknown/ambiguous/missing"
+              f"{' + dynamic(--strict)' if args.strict else ''}）"
+              f"→ Gate 未达标")
         print("source coverage: exit 3")
         return 3
+    if report.dynamic:
+        # 豁免但**必须可见**（不失败 ≠ 不显示，consistency prefix_matched
+        # 同纪律）：否则 dynamic 会在 CI 日志里彻底消失。
+        print(f"note: {report.dynamic} 个 dynamic 未计入未达标"
+              f"（12.2 插值不猜值，人工登记实例）——需要卡它请加 --strict")
     print("source coverage: exit 0")
     return 0
 

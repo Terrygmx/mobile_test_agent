@@ -664,6 +664,20 @@ class SecretProvider(Protocol):
 }
 ```
 
+**修订记录（Task 3.1 实现后回填）**：实现拆成**两个顶层键**，而非上面示例的
+单一 `screens` 数组——
+
+```json
+{"screens": ["LoginView", "HomeView"],
+ "screen_elements": [{"name": "LoginView", "elements": [ … ]}]}
+```
+
+`screens` 只装 **marker 声明的 screen 名**（`screen_elements[].name` 是元素
+归属的 container struct 名，两者在 IB/SwiftUI 下可能不同）。
+12.7 覆盖率要分别统计「页面 marker 覆盖率」与「identifier 覆盖率」——后者
+的分母只认 container 下的元素，混在一个数组里两者无法分离。`screen_elements`
+即 12.3 示例中那个数组的提升，与 12.4 的 CI 产物互操作契约等价。
+
 ### 12.4 构建产物
 
 ```text
@@ -838,6 +852,21 @@ mta source scan | mta repo generate | mta source diff
 mta review   list | accept <id> | reject <id>
 mta report   <run_id>
 ```
+
+**修订记录（Task 3.1/3.2 实现后回填）**
+
+- 扫描侧落地为 `mta repo generate <SRC...> [--out DIR] [--build ID] [--check]`
+  （Task 3.1）；`mta source scan` 是同一件事的设计原名，实现取
+  `repo generate` 以便把「Repository 管理」归到同一子命令下。
+- 覆盖率侧新增 `mta source coverage [--metadata PATH] [--suites-root DIR]
+  [--json PATH] [--html PATH] [--strict]`（Task 3.2，Gate M3 要求「Coverage
+  与 unknown/dynamic 占比有报告」需要一个可执行入口）。
+  退出码：`unknown/ambiguous/missing` 非空 → 3；`--strict` 时 dynamic 也算
+  未达标。**dynamic 默认不判红**——12.2 插值不猜值是设计预期形态，判红会
+  逼人猜值；它仍逐条打印（不失败 ≠ 不显示）。
+- `mta source diff`（12.6 Build-level diff）**尚未接线**，当前是占位子命令。
+  3.1 的 `repo generate --check` 走的是 generated-vs-overrides 轴
+  （consistency Gate），与 build-vs-build diff 不是同一件事，不能互相顶替。
 
 ---
 

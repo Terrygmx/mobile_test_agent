@@ -47,21 +47,44 @@ def _write_suites(root: Path) -> None:
         "      condition: active\n", encoding="utf-8")
 
 
-def test_coverage_reports_dynamic_bucket(tmp_path, capsys):
+def test_dynamic_alone_exits_zero_but_stays_visible(tmp_path, capsys):
+    """review P2-1：dynamic 是 12.2 预期形态，默认**不**判红（否则本命令在
+    设计预期的仓库上永远红，CI 没法用），但必须留在输出里（不失败≠不显示）。"""
     _write_metadata(tmp_path / "meta.json")
     _write_suites(tmp_path / "suites")
     code = main(["source", "coverage",
                  "--metadata", str(tmp_path / "meta.json"),
-                 "--suites-root", str(tmp_path / "suites"),
-                 "--json", str(tmp_path / "cov.json")])
+                 "--suites-root", str(tmp_path / "suites")])
     out = capsys.readouterr().out
-    data = json.loads((tmp_path / "cov.json").read_text())
-    assert code == 3                       # dynamic 非空 → Gate 未达标
-    assert data["coverage"] == 0.5         # 1/2：literal 命中，dynamic 不算
-    assert data["dynamic"] == 1
-    assert data["screens_total"] == 1 and data["screens_resolved"] == 1
-    assert "coverage: 50.0%" in out
+    assert code == 0
     assert "DYNAMIC" in out
+    assert "1 个 dynamic 未计入未达标" in out and "--strict" in out
+
+
+def test_strict_makes_dynamic_fatal(tmp_path, capsys):
+    _write_metadata(tmp_path / "meta.json")
+    _write_suites(tmp_path / "suites")
+    code = main(["source", "coverage",
+                 "--metadata", str(tmp_path / "meta.json"),
+                 "--suites-root", str(tmp_path / "suites"), "--strict"])
+    assert code == 3
+    assert "--strict" in capsys.readouterr().out
+
+
+def test_missing_identifier_is_fatal_without_strict(tmp_path, capsys):
+    """真缺口（metadata 无此 id）不因默认放宽而放过。"""
+    _write_metadata(tmp_path / "meta.json")
+    d = tmp_path / "suites" / "smoke"
+    d.mkdir(parents=True)
+    (d / "a.yaml").write_text(
+        "schema_version: \"0.2\"\nid: a\nname: a\nsuite: smoke\n"
+        "steps:\n  - action: tap\n    target: LoginView.ghost\n",
+        encoding="utf-8")
+    code = main(["source", "coverage",
+                 "--metadata", str(tmp_path / "meta.json"),
+                 "--suites-root", str(tmp_path / "suites")])
+    assert code == 3
+    assert "MISSING" in capsys.readouterr().out
 
 
 def test_coverage_all_resolved_exits_zero(tmp_path, capsys):
@@ -71,14 +94,24 @@ def test_coverage_all_resolved_exits_zero(tmp_path, capsys):
     (d / "a.yaml").write_text(
         "schema_version: \"0.2\"\nid: a\nname: a\nsuite: smoke\n"
         "steps:\n  - action: input\n"
-        "    target: LoginView.username_field\n    value: x\n",
+        "    target: LoginView.username_field\n    value: x\n"
+        "  - wait_for:\n      target: screen:HomeView\n"
+        "      condition: active\n",
         encoding="utf-8")
     code = main(["source", "coverage",
                  "--metadata", str(tmp_path / "meta.json"),
                  "--suites-root", str(tmp_path / "suites"),
-                 "--json", str(tmp_path / "cov.json")])
+                 "--json", str(tmp_path / "cov.json"),
+                 "--html", str(tmp_path / "cov.html")])
+    out = capsys.readouterr().out
+    data = json.loads((tmp_path / "cov.json").read_text())
     assert code == 0
-    assert json.loads((tmp_path / "cov.json").read_text())["coverage"] == 1.0
+    assert data["coverage"] == 1.0
+    assert data["screens_total"] == 1 and data["screens_resolved"] == 1
+    # gap→用例映射必须在 JSON 里（review P3-4：不能只有 HTML 有）
+    assert data["cases_by_ref"]["LoginView.username_field"] == ["a"]
+    assert "coverage: 100.0%" in out
+    assert (tmp_path / "cov.html").exists()
 
 
 def test_missing_metadata_fails_loud(tmp_path, capsys):

@@ -64,8 +64,9 @@ class CoverageReport:
     screens_resolved: int = 0
     screens_missing: tuple[str, ...] = ()
 
-    # 引用它的用例 id（仅 resolved/missing 桶有值，其余按需）—— 让人能直接
-    # 跳到「谁引用了它」
+    # 引用它的用例 id（**全桶填充**，不只 resolved/missing——HTML 的
+    # _bucket_rows 对每个桶都查「谁引用了它」，只填两桶会让 dynamic/
+    # ambiguous/missing 的用例列全空。review P3-4）
     cases_by_ref: dict = field(default_factory=dict)
 
     # --- 指标 ---
@@ -117,15 +118,18 @@ class CoverageReport:
             "screens_resolved": self.screens_resolved,
             "screen_coverage": self.screen_coverage,
             "screens_missing": list(self.screens_missing),
+            # gap→用例映射：JSON 消费方（CI triage / 脚本）据此知道该找谁，
+            # 不能只有 HTML 有（review P3-4）
+            "cases_by_ref": self.cases_by_ref,
         }
 
 
-def _index(metadata: dict) -> tuple[dict, list]:
-    """metadata → (已解析索引, 未解析元素列表)。
+def _index(metadata: dict) -> dict:
+    """metadata → 查表（by_pair / by_short / prefixes）。
 
-    已解析索引 key：限定引用 `(screen, id)`；短名引用查 `by_short`
-    （id → [(screen, id), ...]，多个即 ambiguous）。未解析元素按 screen 存
-    静态前缀（dynamic/unknown 的 `el.id`，12.2 只留前缀），供前缀匹配。
+    by_pair key = 限定引用 (screen, id)；by_short = id → [(screen, id), ...]
+    （多个即 ambiguous）；prefixes = (screen, 静态前缀, rt) 列表（12.2
+    dynamic/unknown 只留前缀）。
     """
     resolved: dict[tuple[str, str], str] = {}
     prefixes: list[tuple[str, str, str]] = []   # (screen, 静态前缀, rt)
@@ -141,8 +145,7 @@ def _index(metadata: dict) -> tuple[dict, list]:
     by_short: dict[str, list] = {}
     for (screen, a11y) in resolved:
         by_short.setdefault(a11y, []).append((screen, a11y))
-    return {"by_pair": resolved, "by_short": by_short,
-            "prefixes": prefixes}, list(by_short)
+    return {"by_pair": resolved, "by_short": by_short, "prefixes": prefixes}
 
 
 def collect_refs(cases: Iterable[Any]) -> list[tuple[str, str]]:
@@ -181,7 +184,7 @@ def compute_coverage(metadata: dict, cases: Iterable[Any]) -> CoverageReport:
     """12.7 主入口。纯函数：metadata（12.3）+ cases → CoverageReport。"""
     cases = list(cases)
     refs = collect_refs(cases)
-    idx, _ = _index(metadata)
+    idx = _index(metadata)
 
     resolved: dict = {}
     dynamic: dict = {}

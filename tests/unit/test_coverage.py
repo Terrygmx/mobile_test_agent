@@ -160,7 +160,7 @@ def test_screen_coverage_separate_metric():
     r = compute_coverage(_meta(), cases)
     assert (r.screens_total, r.screens_resolved) == (3, 2)
     assert r.screen_coverage == 2 / 3
-    assert ("GhostView",) or "GhostView" in r.screens_missing
+    assert "GhostView" in r.screens_missing
     assert r.total == 0                  # screen 引用不进 identifier 分母
 
 
