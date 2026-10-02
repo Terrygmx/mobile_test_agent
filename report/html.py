@@ -10,8 +10,10 @@ import html as _html
 from pathlib import Path
 
 from runner.result import RunResult
+from source.coverage import CoverageReport
 
-__all__ = ["render_run_report", "write_run_report"]
+__all__ = ["render_run_report", "write_run_report",
+           "render_source_coverage_report", "write_source_coverage_report"]
 
 
 def _fmt_duration(ms: int | None) -> str:
@@ -135,4 +137,114 @@ def write_run_report(run: RunResult, path: str | Path, **kw) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_run_report(run, **kw), encoding="utf-8")
+    return path
+
+
+# --- Source Coverage 报告页（12.7 / Task 3.2） ---------------------------
+
+_COV_STYLE = """
+body { font-family: -apple-system, "PingFang SC", sans-serif;
+       margin: 24px; color: #1a1a1a; }
+.cards { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
+.card { border: 1px solid #ddd; border-radius: 8px; padding: 10px 16px;
+        min-width: 96px; text-align: center; }
+.card .num { font-size: 22px; font-weight: 600; }
+.card .label { font-size: 12px; color: #666; margin-top: 2px; }
+.c-cov { border-color: #2b6cb0; background: #ebf4ff; }
+.c-gap { border-color: #e6a817; background: #fff8e6; }
+table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+th, td { border: 1px solid #ddd; padding: 5px 9px; text-align: left;
+         font-size: 13px; }
+th { background: #f6f6f6; }
+code { font-family: ui-monospace, Menlo, monospace; }
+.bucket { margin-top: 18px; }
+.bucket h2 { font-size: 15px; margin: 8px 0 4px; }
+.note { color: #666; font-size: 12px; }
+"""
+
+
+def _pct(x: float) -> str:
+    return f"{x * 100:.1f}%"
+
+
+def _bucket_rows(report: CoverageReport, refs) -> str:
+    """一个分桶的表格行：ref + 引用它的用例 id。"""
+    rows = []
+    for screen, ident in refs:
+        key = f"{screen}.{ident}"
+        cases = ", ".join(report.cases_by_ref.get(key, ())) or "—"
+        rows.append(f"<tr><td><code>{_esc(key)}</code></td>"
+                    f"<td>{_esc(cases)}</td></tr>")
+    return "".join(rows) or '<tr><td colspan="2">（空）</td></tr>'
+
+
+def render_source_coverage_report(report: CoverageReport) -> str:
+    """12.7 覆盖率报告页（14.5 报告体系的 Source Coverage 段）。
+
+    五个分桶全部渲染——dynamic/unknown/ambiguous 虽然**不算失败**，但从
+    报告里删掉就等于把「12.2 解析不出来」藏起来（consistency 的
+    prefix_matched 同款纪律：不失败 ≠ 不显示）。
+    """
+    buckets = (
+        ("resolved", report.resolved, report.resolved_refs,
+         report.coverage,
+         "被 metadata 解析（literal/constant）——运行时可定位"),
+        ("dynamic", report.dynamic, report.dynamic_refs,
+         report.dynamic_ratio,
+         "12.2 插值元素：扫描器只给静态前缀，不猜值（人工登记实例）"),
+        ("unknown", report.unknown, report.unknown_refs,
+         report.unknown_ratio, "12.2 无法唯一解析"),
+        ("ambiguous", report.ambiguous, report.ambiguous_refs,
+         report.ambiguous_ratio, "短名跨屏同名：用例需加 Screen. 限定"),
+        ("missing", report.missing, report.missing_refs,
+         report.missing_ratio, "metadata 无此 id（漂移或从未登记）"),
+    )
+    sections = "".join(
+        f'<div class="bucket"><h2>{name} = {count} （{_pct(ratio)}）</h2>'
+        f'<p class="note">{_esc(note)}</p>'
+        f'<table><thead><tr><th>identifier</th><th>引用用例</th></tr></thead>'
+        f'<tbody>{_bucket_rows(report, refs)}</tbody></table></div>'
+        for name, count, refs, ratio, note in buckets)
+
+    screen_block = ""
+    if report.screens_total:
+        missing = ", ".join(report.screens_missing) or "（无）"
+        screen_block = (
+            f'<div class="bucket"><h2>screen marker coverage = '
+            f'{_pct(report.screen_coverage)} '
+            f'（{report.screens_resolved}/{report.screens_total}）</h2>'
+            f'<p class="note">未被 metadata 顶层 screens 声明：</p>'
+            f'<table><thead><tr><th>screen</th><th>引用用例</th></tr></thead>'
+            f'<tbody><tr><td><code>{_esc(missing)}</code></td><td>—</td>'
+            f'</tr></tbody></table></div>')
+
+    return f"""<!doctype html>
+<html lang="zh"><head><meta charset="utf-8">
+<title>mta source coverage</title>
+<style>{_COV_STYLE}</style></head><body>
+<h1>Source Coverage 报告（12.7）</h1>
+<p class="note">Identifier Coverage = 用例引用的 identifier 中被 metadata 正确
+解析（literal+constant）的数量 / 用例引用的 identifier 总数。
+分母为去重后的 identifier 集合；共 {report.occurrences} 次引用。
+screen marker 走独立指标（不混进 identifier 分母）。</p>
+<div class="cards">
+<div class="card c-cov"><div class="num">{_pct(report.coverage)}</div>
+<div class="label">coverage ({report.resolved}/{report.total})</div></div>
+<div class="card"><div class="num">{_pct(report.dynamic_ratio)}</div>
+<div class="label">dynamic_ratio</div></div>
+<div class="card"><div class="num">{_pct(report.unknown_ratio)}</div>
+<div class="label">unknown_ratio</div></div>
+<div class="card"><div class="num">{_pct(report.screen_coverage)}</div>
+<div class="label">screen_coverage</div></div>
+</div>
+{sections}
+{screen_block}
+</body></html>"""
+
+
+def write_source_coverage_report(report: CoverageReport,
+                                path: str | Path) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_source_coverage_report(report), encoding="utf-8")
     return path

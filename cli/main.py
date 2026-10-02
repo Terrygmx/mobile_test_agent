@@ -92,6 +92,29 @@ def build_parser() -> argparse.ArgumentParser:
                        help="--check 比对的手写 overrides 根目录"
                             "（默认 repository/overrides）")
 
+    # --- mta source（M3 Source Intelligence：coverage 12.7 / diff 12.6）---
+    src_p = sub.add_parser(
+        "source", help="源码情报子命令（M3：coverage / diff）")
+    src_sub = src_p.add_subparsers(dest="source_command")
+    cov_p = src_sub.add_parser(
+        "coverage",
+        help="Source Coverage 报告（12.7）：用例引用的 identifier 有多少被 "
+             "metadata 解析（literal+constant）")
+    cov_p.add_argument("--metadata", metavar="PATH",
+                       help="source_metadata.json（12.3/12.4 产物）")
+    cov_p.add_argument("--suites-root", metavar="DIR",
+                       help="用例根目录（默认 ./suites）")
+    cov_p.add_argument("--json", metavar="PATH",
+                       help="指标 JSON 落盘（默认 out/source_coverage.json）")
+    cov_p.add_argument("--html", metavar="PATH",
+                       help="HTML 覆盖率报告（14.5 报告页的 coverage 段）")
+    cov_p.add_argument("--allow-partial", action="store_true",
+                       help="informational 模式：dynamic/unknown/missing "
+                            "非空也返回 0（默认按 Gate 语义 exit 3）")
+    src_sub.add_parser(
+        "diff", help="[未接线/Task 3.3 已有 build_identity 路径] "
+                     "Build-level source diff（12.6）")
+
     # --- 占位子命令（后续任务填充） ---
     for name, help_text in (
         ("review", "人工确认 RECOVERED（M2）"),
@@ -334,6 +357,74 @@ def cmd_repo(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_source(args: argparse.Namespace) -> int:
+    """`mta source coverage`（12.7）：用例 identifier 引用 vs metadata 解析率。
+
+    退出码：metadata/suites 读不到 → 3（前置配置错误，fail-loud——绝不能把
+    「没读到」显示成「覆盖率 0%」，那会把构建问题伪装成覆盖率问题，坑 10d
+    同款纪律）；指标有未覆盖项 → 3（Gate 语义，同 consistency check）；
+    `--allow-partial` 退化为 informational（0）。
+    """
+    if getattr(args, "source_command", None) != "coverage":
+        print("usage: mta source coverage --metadata PATH "
+              "[--suites-root DIR] [--json PATH] [--html PATH] "
+              "[--allow-partial]")
+        return 3
+
+    import json as _json
+
+    from source.coverage import compute_coverage, format_report
+
+    meta_path = Path(args.metadata or "repository/generated/local/"
+                                       "source_metadata.json")
+    suites_root = Path(args.suites_root or "suites")
+    if not meta_path.is_file():
+        print(f"PREFLIGHT ERROR: source metadata 不存在: {meta_path} "
+              f"(先跑 mta repo generate)")
+        print("source coverage: exit 3")
+        return 3
+    if not suites_root.is_dir():
+        print(f"PREFLIGHT ERROR: suites root 不存在: {suites_root}")
+        print("source coverage: exit 3")
+        return 3
+
+    meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+    # 复用 pipeline 的发现 + strict 解析（6.3）：坏 YAML / schema 不兼容在此
+    # 抛 PreflightError，不能让覆盖率命令自己写第二套 YAML 读取逻辑。
+    from cli.pipeline import SessionPipeline
+    try:
+        cases = SessionPipeline(suites_root=suites_root).discover()
+    except SessionPipeline.PreflightError as e:
+        print(f"PREFLIGHT ERROR: {e}")
+        print("source coverage: exit 3")
+        return 3
+
+    print(f"inputs: metadata={meta_path} suites_root={suites_root}")
+    report = compute_coverage(meta, cases)
+    print(format_report(report))
+
+    json_path = Path(args.json or "out/source_coverage.json")
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(
+        _json.dumps(report.to_dict(), indent=2, ensure_ascii=False),
+        encoding="utf-8")
+    print(f"json: {json_path}")
+    if args.html:
+        from report.html import write_source_coverage_report
+        write_source_coverage_report(report, args.html)
+        print(f"html: {args.html}")
+
+    uncovered = report.dynamic + report.unknown + report.ambiguous \
+        + report.missing
+    if uncovered and not args.allow_partial:
+        print(f"source coverage: {uncovered} 个 identifier 未被 metadata 解析"
+              f"（Gate 未达标；--allow-partial 仅作信息参考）")
+        print("source coverage: exit 3")
+        return 3
+    print("source coverage: exit 0")
+    return 0
+
+
 def cmd_placeholder(args: argparse.Namespace) -> int:
     print(f"mta {args.command}: not implemented yet (planned for a later task)")
     return 2
@@ -348,6 +439,8 @@ def main(argv: Sequence | None = None) -> int:
         return cmd_run(args)
     if args.command == "repo":
         return cmd_repo(args)
+    if args.command == "source":
+        return cmd_source(args)
     return cmd_placeholder(args)
 
 

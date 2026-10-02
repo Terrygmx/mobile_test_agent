@@ -13,7 +13,9 @@
       lint/execute 触碰的元素 resolve 全部命中（P1-08 的 20 用例是基线，
       M0-M2 已验证全绿；M3 只验证双源下**解析不回归**）；
   G4. 兼容性：只用 overrides 的既有行为不受影响（单源模式仍可用）；
-  G5. build 维度：12.4 generated/<build>/ 布局，resolve(build=...) 不炸。
+  G5. build 维度：12.4 generated/<build>/ 布局，resolve(build=...) 不炸；
+  G6. Source Coverage（12.7）：报告可产出、五桶加总 == 分母、unknown/missing
+      为空、dynamic 可见（12.2 预期形态，不判红）。
 
 产出：out/m3_gate/gate_summary.json；exit 0 = 全绿。
 """
@@ -145,6 +147,31 @@ def main() -> int:
     except Exception as e:
         build_ok, build_err = False, f"{type(e).__name__}: {e}"
     results["G5_build_dim"] = {"pass": build_ok, "detail": build_err}
+
+    # ---- G6: Source Coverage 报告（12.7；Gate M3 明文要求「Coverage 与
+    #      unknown/dynamic 占比有报告」）----
+    # 判据不是「覆盖率高」——P1 阶段 dynamic 是**预期形态**（12.2 插值不猜
+    # 值，人工登记实例），把 dynamic 判红会逼人去猜值，那是设计禁止的。真正
+    # 要卡的是：①报告能产出（纯函数不炸、CLI 路径通）；②分桶加总 == 分母
+    # （口径自洽，指标没漏桶）；③unknown/missing 为空（这两种是真缺口，
+    # dynamic 豁免但必须可见）。
+    from cli.pipeline import SessionPipeline
+    from source.coverage import compute_coverage
+    cov = compute_coverage(meta, SessionPipeline(suites_root=SUITES).discover())
+    bucket_sum = (cov.resolved + cov.dynamic + cov.unknown
+                  + cov.ambiguous + cov.missing)
+    cov_ok = (bucket_sum == cov.total and cov.total > 0
+              and not cov.unknown and not cov.missing
+              and cov.dynamic == len(cov.dynamic_refs) > 0)
+    results["G6_source_coverage"] = {
+        "pass": cov_ok,
+        "detail": f"coverage={cov.coverage:.3f} "
+                  f"({cov.resolved}/{cov.total}) "
+                  f"dynamic={cov.dynamic} unknown={cov.unknown} "
+                  f"ambiguous={cov.ambiguous} missing={cov.missing} "
+                  f"screen_coverage={cov.screen_coverage:.3f}",
+        "dynamic_refs": [f"{s}.{i}" for s, i in cov.dynamic_refs],
+    }
 
     # ---- 汇总 ----
     verdict = all(r["pass"] for r in results.values())
