@@ -250,11 +250,16 @@ class Lifecycle:
         return row_id
 
     def end_testcase(self, status: str, failure_type: str | None = None,
-                     cleanup_status: str | None = None) -> None:
-        """结束用例，写入终态 + non_idempotent_dispatched（7.5）。"""
+                     cleanup_status: str | None = None,
+                     detail: dict | None = None) -> None:
+        """结束用例，写入终态 + non_idempotent_dispatched（7.5）。
+
+        `detail`（可选）进 testcase_runs.detail_json——存储层先 redact。
+        M5 基线实锤：FAIL 时管线内存里有 error 文本但此处不接收，trace
+        的 detail_json 恒空，排障断流。"""
         if self.store is None or self.tc_run_id is None:
             return
         self.store.end_testcase(
             self.tc_run_id, status=status, failure_type=failure_type,
-            cleanup_status=cleanup_status,
+            cleanup_status=cleanup_status, detail=detail,
             non_idempotent_dispatched=self.non_idempotent_dispatched)

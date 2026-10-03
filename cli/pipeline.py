@@ -316,6 +316,17 @@ class SessionPipeline:
                                 e, "wait")
                             if rec is None or not rec.recovered \
                                     or rec.strategy is None:
+                                # M5 基线实锤（trace 完整性缺口）：失败的
+                                # aux 步骤此前不落 steps 行——trace「看起来
+                                # 跑到一半就没了」，error 文本无处可查。
+                                # 与动作步失败同纪律：失败步骤也落库。
+                                self._record_aux_step(
+                                    lifecycle, idx, "wait_for",
+                                    _target_label(step.wait_for.target),
+                                    latency_ms=int((time.time() - t1) * 1000),
+                                    ok=False,
+                                    failure_type=_map_exception(e)[1],
+                                    detail={"error": str(e)})
                                 raise
                             self._recovered_locators[
                                 self._ref_key(step.wait_for.target)] = \
@@ -348,6 +359,15 @@ class SessionPipeline:
                                 e, "assert")
                             if rec is None or not rec.recovered \
                                     or rec.strategy is None:
+                                # 与 wait 分支同缺口：失败断言步骤也要落
+                                # steps 行（M5 基线 trace 完整性实锤）
+                                self._record_aux_step(
+                                    lifecycle, idx, "assert",
+                                    _target_label(step.assertion.target),
+                                    latency_ms=int((time.time() - t1) * 1000),
+                                    ok=False,
+                                    failure_type=_map_exception(e)[1],
+                                    detail={"error": str(e)})
                                 raise
                             self._recovered_locators[
                                 self._ref_key(step.assertion.target)] = \
@@ -455,6 +475,9 @@ class SessionPipeline:
         if self.store is not None:
             lifecycle.end_testcase(
                 status, failure_type=failure_type,
+                # M5 基线实锤：detail（含 error 文本）此前不入 trace——
+                # FAIL 用例 detail_json 恒空，排障只能靠猜。存储层 redact。
+                detail=detail or None,
                 # manage_env=False（套件路径）时 cleanup 归 SuiteRunner，
                 # 这里写 PENDING——不是 OK（还没 cleanup 呢）也不是 None。
                 # 套件层成功回 OK / 失败由 R18-3 回写 ENVIRONMENT_FAILURE。

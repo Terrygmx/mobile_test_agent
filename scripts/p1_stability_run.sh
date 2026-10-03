@@ -83,7 +83,10 @@ if [ -f "$CSV" ]; then
   echo "resume: 已有 ${LAST} 轮记录，从第 ${START_ROUND} 轮继续"
 fi
 
-echo "round,suite,seq,start,end,exit_code,duration_s,running_left,untriaged_fails" >> "$CSV"
+# 表头只在文件新建时写一次（重复 append 会让 report 多读一行哑窗）
+if [ ! -s "$CSV" ]; then
+  echo "round,suite,seq,start,end,exit_code,duration_s,running_left,untriaged_fails" >> "$CSV"
+fi
 
 for ((r = START_ROUND; r <= ROUNDS; r++)); do
   echo "=== round ${r}/${ROUNDS} $(now_iso) ==="

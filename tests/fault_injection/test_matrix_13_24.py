@@ -82,6 +82,19 @@ def test_fi_13_wait_timeout_no_recovery(tmp_path):
     conn = sqlite3.connect(tmp_path / "trace.db")
     reviews = conn.execute("SELECT COUNT(*) FROM recovery_reviews").fetchone()
     assert reviews[0] == 0
+    # M5 基线 trace 完整性：失败的 aux 步骤必须落 steps 行（此前只记
+    # 成功步骤——trace「跑到一半就没了」），用例 detail_json 带证据
+    srow = conn.execute(
+        "SELECT s.status, s.failure_type FROM steps s"
+        " JOIN testcase_runs t ON s.testcase_run_id = t.id"
+        " WHERE t.run_id='run_matrix' AND t.testcase_id='fi_13'"
+        " AND s.step_type='wait_for'").fetchone()
+    assert srow is not None, "失败的 wait 步骤必须落 steps 表"
+    assert srow[0] == "FAILED" and srow[1] == "WAIT_TIMEOUT"
+    dj = conn.execute(
+        "SELECT detail_json FROM testcase_runs WHERE run_id='run_matrix'"
+        " AND testcase_id='fi_13'").fetchone()[0]
+    assert dj and "error" in dj, "用例 detail_json 必须携带 error 证据"
 
 
 # --- #14：断言期望值不符 → ASSERTION_VALUE_MISMATCH，无 Recovery / 1 ---
