@@ -362,6 +362,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     # 2. 组件装配（fake-driver：最小桩；真机：Appium 会话，Task 2.7 接线）
     from executor.guard import EnvKind, Guard
 
+    # review_p2_task11 P3-2：app_bundle_id 落 runs 行——Candidate 主键
+    # 第一段（app_id, screen_id, target_id），种子清单不能是 NULL。
+    if args.bundle_id:
+        bi_fields.setdefault("app_bundle_id", args.bundle_id)
     store.start_run(run_id, suite=args.suite, env_kind=env_kind.value,
                     **bi_fields)
     if args.fake_driver:

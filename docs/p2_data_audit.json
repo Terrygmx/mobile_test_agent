@@ -1,0 +1,37 @@
+{
+  "summary": {
+    "runs_total": 102,
+    "tc_runs_total": 90,
+    "steps_total": 249,
+    "steps_with_failure": 1,
+    "llm_enabled_null": 101,
+    "date_min": "2026-09-24",
+    "date_max": "2026-10-03"
+  },
+  "seedable_accepts": [
+    {
+      "seed_recovery_review_id": 1,
+      "seed_step_id": 246,
+      "seed_run_id": "run_e049fb5e",
+      "app_id": "com.phaset0.logindemo",
+      "screen": "LoginView",
+      "target_id": "username_field",
+      "candidate_target": "username_field_v2",
+      "candidate_type": "button",
+      "app_build": "local",
+      "kind": "LLM",
+      "reviewer": "terrygmx",
+      "reviewed_at": "2026-10-03T14:57:13Z",
+      "seed_ready": true
+    }
+  ],
+  "screen_target_pairs": [
+    {
+      "screen": "LoginView",
+      "expected_target": "username_field",
+      "candidate_target": "username_field_v2",
+      "n": 1,
+      "distinct_runs": 1
+    }
+  ]
+}

@@ -94,6 +94,25 @@ def recovery_provenance(conn: sqlite3.Connection) -> dict:
     return dict(row)
 
 
+# --- (screen, target) 去重对（review P3-1：Experience 主键
+# (app_id, screen_id, target_id) 的去重依据，M2 Store lookup 语义）---
+
+
+def screen_target_pairs(conn: sqlite3.Connection) -> list[dict]:
+    """ACCEPT 的恢复按 (screen, expected→candidate) 去重计数。"""
+    return _rows(
+        conn,
+        "SELECT rec.screen, rec.expected_target, rec.candidate_target,"
+        "       count(*) AS n, count(DISTINCT tc.run_id) AS distinct_runs"
+        " FROM recovery_reviews rr"
+        " JOIN recoveries rec ON rec.id = rr.recovery_id"
+        " LEFT JOIN steps s ON s.id = rec.step_id"
+        " LEFT JOIN testcase_runs tc ON tc.id = s.testcase_run_id"
+        " WHERE rr.review_status = 'ACCEPT'"
+        " GROUP BY rec.screen, rec.expected_target, rec.candidate_target"
+        " ORDER BY rec.screen, rec.expected_target")
+
+
 # --- E5 种子清单：ACCEPT + 三件套可追溯 ---
 
 
@@ -137,7 +156,9 @@ def seedable_accepts(conn: sqlite3.Connection) -> list[dict]:
 
 def render_markdown(summary: dict, failures: list[dict], recoveries: list[dict],
                     reviews: list[dict], provenance: dict,
-                    seeds: list[dict]) -> str:
+                    seeds: list[dict],
+                    pairs: list[dict] | None = None) -> str:
+    pairs = pairs or []
     lines = ["# P2 Trace 数据审计报告", ""]
     lines += ["## 汇总", "",
               f"- runs：{summary['runs_total']}"
@@ -159,7 +180,15 @@ def render_markdown(summary: dict, failures: list[dict], recoveries: list[dict],
 
     lines += ["", "## Review 分布", "",
               "| review_status | 条数 |", "|---|---|"]
-    lines += [f"| {r['review_status']} | {r['n']} |" for r in reviews]
+    lines += [f"| {r['review_status']} | {r['n']} |" for r in reviews] \
+        or ["|（无）| |"]
+
+    lines += ["", "## (screen, target) 去重对（Experience 主键维度）", "",
+              "| screen | expected | candidate | 条数 | 跨 run 数 |",
+              "|---|---|---|---|---|"]
+    lines += [f"| {p['screen']} | {p['expected_target']}"
+              f" | {p['candidate_target']} | {p['n']} | {p['distinct_runs']} |"
+              for p in pairs] or ["|（无）|||||"]
 
     lines += ["", "## 追溯链质量", "",
               f"- recoveries 总数：{provenance['recoveries_total']}",
@@ -168,12 +197,14 @@ def render_markdown(summary: dict, failures: list[dict], recoveries: list[dict],
               f"- 有 review 记录的 recovery：{provenance['with_review']}", ""]
 
     lines += ["## 可做 Experience 种子的 ACCEPT 清单（E5）", "",
-              "| review_id | seed_run_id | seed_step_id | screen | target_id"
-              " | candidate | seed_ready |", "|---|---|---|---|---|---|---|"]
-    lines += [f"| {s['seed_recovery_review_id']} | {s['seed_run_id']}"
-              f" | {s['seed_step_id']} | {s['screen']} | {s['target_id']}"
-              f" | {s['candidate_target']} | {s['seed_ready']} |"
-              for s in seeds] or ["|（无）|||||||"]
+              "| review_id | app_id | seed_run_id | seed_step_id | screen"
+              " | target_id | candidate | seed_ready |",
+              "|---|---|---|---|---|---|---|---|"]
+    lines += [f"| {s['seed_recovery_review_id']} | {s['app_id']} |"
+              f" {s['seed_run_id']} | {s['seed_step_id']} | {s['screen']}"
+              f" | {s['target_id']} | {s['candidate_target']}"
+              f" | {s['seed_ready']} |"
+              for s in seeds] or ["|（无）||||||||"]
     ready = sum(1 for s in seeds if s["seed_ready"])
     lines += ["", f"**seed_ready=True 的种子：{ready} 条**（成功标准要求"
               " 50+ 条真实 Recovery 事件基线）", ""]
@@ -204,14 +235,25 @@ def main(argv: list[str] | None = None) -> int:
     reviews = review_breakdown(conn)
     provenance = recovery_provenance(conn)
     seeds = seedable_accepts(conn)
+    pairs = screen_target_pairs(conn)
     conn.close()
 
     md = render_markdown(summary, failures, recoveries, reviews,
-                         provenance, seeds)
+                         provenance, seeds, pairs)
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.out).write_text(md, encoding="utf-8")
         print(f"P2 Trace 审计报告已写 {args.out}")
+        # P3-2：机器可读出力同盘——M2 Task 2.3 消费 CandidateSeed 用，
+        # markdown 只给人看。
+        import json
+        json_path = Path(args.out).with_suffix(".json")
+        json_path.write_text(json.dumps({
+            "summary": summary,
+            "seedable_accepts": seeds,
+            "screen_target_pairs": pairs,
+        }, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"机器可读指标已写 {json_path}")
 
     ready = sum(1 for s in seeds if s["seed_ready"])
     print(f"P2 Trace 审计：runs={summary['runs_total']} "

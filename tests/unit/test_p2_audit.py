@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import pytest
 
+from pathlib import Path
+
 from scripts.p2_audit_recoveries import (
     audit_summary,
     locator_failure_top,
@@ -28,6 +30,7 @@ from scripts.p2_audit_recoveries import (
     recovery_provenance,
     render_markdown,
     review_breakdown,
+    screen_target_pairs,
     seedable_accepts,
 )
 from tracer.storage import TraceStore
@@ -189,3 +192,60 @@ def test_cli_main_writes_report(audit_db, tmp_path, capsys):
     assert out.exists()
     assert "login_button" in out.read_text(encoding="utf-8")
     assert "P2 Trace" in capsys.readouterr().out
+
+
+# --- 6. review_m5 → p2 review P3-1/P3-2：(screen,target) 维度 + app_id ---
+
+
+def test_screen_target_pairs_dedupe(audit_db):
+    """ACCEPT 恢复按 (screen, expected, candidate) 去重计数——Experience
+    主键 (app_id, screen_id, target_id) 的去重依据。"""
+    from scripts.p2_audit_recoveries import screen_target_pairs
+
+    conn = audit_db.conn
+    conn.row_factory = None  # _rows 自己会设
+    pairs = screen_target_pairs(conn)
+    # rec1（挂 s1）与 rec2（悬空）都是 ACCEPT 且同为
+    # (LoginView, login_button→signin_button)——同 pair 计 2；
+    # rec3 是 REJECT/PENDING，不进对。
+    by_key = {(p["screen"], p["expected_target"],
+               p["candidate_target"]): p for p in pairs}
+    assert ("LoginView", "login_button", "signin_button") in by_key
+    assert by_key[("LoginView", "login_button",
+                   "signin_button")]["n"] == 2
+    # 跨 run 去重：rec2 悬空挂不到 run → 只有 r1 一个 run
+    assert by_key[("LoginView", "login_button",
+                   "signin_button")]["distinct_runs"] == 1
+
+
+def test_render_markdown_app_id_and_pairs(audit_db):
+    """P3-2：种子清单输出 app_id 列（Candidate 主键第一段）；
+    P3-1：pairs 段渲染。"""
+    conn = audit_db.conn
+    seeds = seedable_accepts(conn)
+    md = render_markdown(
+        audit_summary(conn), [], recovery_breakdown(conn),
+        review_breakdown(conn), recovery_provenance(conn), seeds,
+        screen_target_pairs(conn))
+    assert "app_id" in md and "com.demo.app" in md
+    assert "(screen, target) 去重对" in md
+
+
+def test_main_json_export(audit_db, tmp_path, capsys):
+    """P3-2：--out 同时落机器可读 JSON（M2 Task 2.3 消费）。"""
+    import json
+
+    db = tmp_path / "audit.db"
+    audit_db.conn.commit()
+    # 原库在 tmp_path 下的另一路径——直接对同一文件再开一个连接读即可
+    src = audit_db.conn.execute(
+        "PRAGMA database_list").fetchall()[0][2]
+    db.write_bytes(Path(src).read_bytes())
+    out = tmp_path / "report.md"
+    code = main(["--db", str(db), "--out", str(out)])
+    assert code == 0
+    jpath = out.with_suffix(".json")
+    assert jpath.exists(), "JSON 必须与 markdown 同盘"
+    data = json.loads(jpath.read_text())
+    assert "seedable_accepts" in data and "screen_target_pairs" in data
+    assert data["seedable_accepts"][0]["app_id"] == "com.demo.app"
