@@ -94,6 +94,7 @@ for ((r = START_ROUND; r <= ROUNDS; r++)); do
     start=$(now_iso)
     "$PY" -m cli.main run --suite "$suite" --no-llm \
       --db "$DB" \
+      --udid "${MTA_SIM_UDID:-}" --bundle-id "${MTA_BUNDLE_ID:-com.phaset0.logindemo}" \
       --junit "out/stability/junit_r${r}_${suite}.xml" \
       > "out/stability/r${r}_${suite}.log" 2>&1
     code=$?

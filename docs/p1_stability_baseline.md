@@ -49,7 +49,25 @@ ROUNDS=50 scripts/p1_stability_run.sh         # 正式 50 轮（可中断续跑�
   FAIL×UNTRIAGED 计数；WDA 泄漏检查尽力而为（simctl listapps）。
 - 报告卫生判据：`running_left == 0` 且 `llm_calls == 0`，违规 exit 2。
 
+## 环境（2026-10-03 起跑记录）
+
+- 模拟器 iPhone 14 `AEBDAE77-7C5B-468B-A5A7-01D41EDAAD9E`（iOS 18.5）；
+  Appium 3.7.0（127.0.0.1:4723，DEVELOPER_DIR=/Applications/Xcode.app）。
+- 同 build：commit `e2f0f3f`（make p1-build 注入 MTA_GIT_COMMIT +
+  p1-install + repo-generate 一致性 PASS）。跑前预检曾实锤 runner 缺
+  `--bundle-id`（连续 exit 3 自动终止按设计生效）——已补 `--udid`/
+  `--bundle-id` 两个真机路径旗标。
+
+## 冒烟结果（3 轮，2026-10-03 01:44-01:52 UTC）
+
+- 12/12 次调用 exit 0；**60/60 用例 PASS**（20 用例/轮 × 3 轮）；
+  RECOVERED 0；flaky 无；WDA 重启 0；llm_calls 0；UNTRIAGED FAIL 0；
+  RUNNING 残留 0。单套件 34-45s，单轮 ≈ 2.6 min。
+- 冒烟期顺带修复报告归因 bug：相邻调用共享边界秒时用例行被按时间窗
+  双计（实测 105 行 vs 实际 60）——改为按本窗**新归因 run_id** 取
+  用例/infra 行；7 个聚合单测同步回归。
+
 ## 基线结论
 
-（待 50 轮跑完后回填：比例、flaky 清单、WDA 重启、平均耗时、卫生判据、
+（正式 50 轮跑完后回填：比例、flaky 清单、WDA 重启、平均耗时、卫生判据、
 异常轮分析。）

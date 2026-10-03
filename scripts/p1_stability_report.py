@@ -63,17 +63,21 @@ def aggregate(db_path: Path, invocations: list[dict]) -> dict:
         matched = [dict(r) for r in rows
                    if r["run_id"] not in seen_run_ids]
         matched_windows += 1 if matched else 0
+        # 相邻调用共享边界秒时同 run 可能落两窗——按 run_id 去重，归属
+        # 首个命中窗（调用顺序即 CSV 行序）；用例/infra 也按**新归因的
+        # run_id** 取，不再按时间窗（否则边界 run 的用例行被双计——
+        # 冒烟实测 105 行 vs 实际 60）。
+        new_ids = [r["run_id"] for r in matched]
+        seen_run_ids.update(new_ids)
         for r in matched:
-            # 相邻调用共享边界秒时同 run 可能落两窗——按 run_id 去重，
-            # 归属首个命中窗（调用顺序即 CSV 行序）
-            seen_run_ids.add(r["run_id"])
             runs.append(r)
             llm_calls += r["llm_calls"] or 0
+        if not new_ids:
+            continue
+        ph = ",".join("?" * len(new_ids))
         tc = conn.execute(
-            "SELECT t.* FROM testcase_runs t JOIN runs r"
-            " ON t.run_id = r.run_id"
-            " WHERE r.start_time >= ? AND r.start_time <= ?",
-            (inv_start, inv_end)).fetchall()
+            f"SELECT * FROM testcase_runs WHERE run_id IN ({ph})",
+            new_ids).fetchall()
         for row in tc:
             d = dict(row)
             d["_suite"] = inv.get("suite", "")
@@ -82,11 +86,9 @@ def aggregate(db_path: Path, invocations: list[dict]) -> dict:
                     (d["failure_attribution"] or "UNTRIAGED") == "UNTRIAGED":
                 untriaged_fails += 1
         wda = conn.execute(
-            "SELECT COUNT(*) FROM infra_events i JOIN runs r"
-            " ON i.run_id = r.run_id"
-            " WHERE r.start_time >= ? AND r.start_time <= ?"
-            " AND i.action_taken = 'RESTART_WDA'",
-            (inv_start, inv_end)).fetchone()[0]
+            f"SELECT COUNT(*) FROM infra_events WHERE run_id IN ({ph})"
+            " AND action_taken = 'RESTART_WDA'",
+            new_ids).fetchone()[0]
         wda_restarts += wda
 
     running_left = conn.execute(
