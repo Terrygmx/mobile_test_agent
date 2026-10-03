@@ -664,3 +664,24 @@ def test_store_opens_existing_db_without_losing_data(tmp_path):
     s2 = TraceStore(p)
     assert s2.conn.execute(
         "SELECT COUNT(*) FROM runs WHERE run_id='run_keep'").fetchone()[0] == 1
+
+def test_store_open_sweeps_stale_running_runs(tmp_path):
+    """review_m4_task43 P3-4：打开库即清理 RUNNING 残留（Recorder R2-6
+    同款纪律）——管线 bug 级异常穿透 run_all 时 runs 行不留无终态。"""
+    from tracer.storage import TraceStore
+    p = tmp_path / "t.db"
+    s1 = TraceStore(p)
+    s1.start_run("run_stale")
+    # 模拟进程崩溃：没有 end_run，直接重新打开
+    s2 = TraceStore(p)
+    row = s2.conn.execute(
+        "SELECT status, end_time FROM runs WHERE run_id='run_stale'"
+    ).fetchone()
+    assert row["status"] == "FAIL"
+    assert row["end_time"] is not None
+    # 新 run 不受影响
+    s2.start_run("run_fresh")
+    s2.end_run("run_fresh", status="PASS", exit_code=0)
+    assert s2.conn.execute(
+        "SELECT status FROM runs WHERE run_id='run_fresh'").fetchone()[0] \
+        == "PASS"

@@ -15,7 +15,6 @@ import yaml
 
 from cli.pipeline import PipelineDeps, SessionPipeline
 from executor.guard import EnvKind, Guard
-from llm.budget import LLMBudget
 from repository.resolver import Repository
 from runner.lifecycle import Lifecycle
 from runner.runner import StepRunner

@@ -6,8 +6,6 @@ phase0/verify_p1_m4.py。
 """
 from __future__ import annotations
 
-import pytest
-
 from executor.executor import ElementNotFound
 from llm.budget import BudgetConfig, LLMBudget
 from tests.fault_injection.fi_support import (
@@ -223,10 +221,10 @@ def test_fi_09_llm_invalid_json(tmp_path):
 def test_fi_10_budget_exhausted_no_new_api_call(tmp_path):
     from agent.recovery import RecoveryEngine
 
-    case_b = _case("10b", 10, DRIFT_TAP).replace("fi_10b", "fi_10b")
+    # review_m4_task43 P3-2：原两段 no-op .replace() 已删——_case 直接
+    # 产出不同 id（fi_10a/fi_10b），无需「看起来在做事」的字符串操作。
     cases = [load_case(_case("10a", 10, DRIFT_TAP)),
-             load_case(case_b.replace("fi_{case_id}".format(case_id="10b"),
-                                      "fi_10b"))]
+             load_case(_case("10b", 10, DRIFT_TAP))]
     ex = FakeExecutor(find_script=[ElementNotFound("d")])
     llm = FakeLLM([llm_json()])
     recovery = RecoveryEngine(

@@ -15,6 +15,7 @@ R16 修复后职责：
 """
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -36,6 +37,9 @@ __all__ = ["SessionPipeline", "PipelineDeps", "make_postcondition_checker"]
 # swipe 归 Executor——旧 runner（testcase_runner._do_*）同款分流。
 _APP_LEVEL_ACTIONS = frozenset(
     {"launch_app", "terminate_app", "back", "swipe"})
+
+# 14.4：`${VAR}` 占位符（与 testcase.lint.SECRET_REF 同形态——两处不得分叉）
+_SECRET_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 class _NoopApp:
@@ -97,15 +101,25 @@ class SessionPipeline:
     class PreflightError(Exception):
         """前置配置错误（8.4 exit 3）。"""
 
+    class SecretResolutionError(Exception):
+        """`${VAR}` 运行时解析失败（8.2 SECRET_NOT_FOUND）。
+
+        lint 是前置门（unknown_secret/malformed → exit 3）；跑到这里才失败
+        = 分派间隙 env 漂移。fail-loud 不把 `${VAR}` 字面量当值发。"""
+
     def __init__(self, suites_root: Path | str | None, *,
                  store=None, deps: PipelineDeps | None = None,
-                 recovery=None):
+                 recovery=None, secrets=None):
         self.suites_root = Path(suites_root) if suites_root else None
         self.store = store
         self.deps = deps
         # Task 4.1：RecoveryEngine（确定性半边）。None = 不恢复（旧行为，
         # P0 链路不受影响）——接线由 cmd_run 按组件装配注入。
         self.recovery = recovery
+        # review_m4_task43 P2-1：`${VAR}` 分派前经 SecretProvider 解析
+        # （14.4「变量解析在 Runner 层完成」的落点拍板 = 管线 ctx 装配处，
+        # StepRunner 保持纯值执行）。None = 不解析（直接构造的测试不受影响）。
+        self.secrets = secrets
         # 4.2：恢复后的定位覆盖（aux 步骤重跑用）——LLM 候选策略按目标 ref
         # 记住，locate() 优先消费。run 级生命周期（与 RUN_MEMO 同语义：
         # 同 run 同 build 内复用，pipeline 实例即 run 作用域）。
@@ -582,6 +596,28 @@ class SessionPipeline:
             return _NoopDeviceSession()
         return ds
 
+    def _resolve_secret_refs(self, value: object, idx: int):
+        """14.4：`${VAR}` 在分派前经 SecretProvider 解析（review_m4_task43
+        P2-1：此前无人实现——`${{…}}` 这类字面量会被原样敲进 App）。
+
+        未注入 secrets / 值无占位符 → 原样返回。解析失败（env 漂移）→
+        SecretResolutionError → FAIL(SECRET_NOT_FOUND)（8.2 既有枚举），
+        绝不把占位符字面量当值发。
+        """
+        if self.secrets is None or not isinstance(value, str) \
+                or "${" not in value:
+            return value
+
+        def _sub(m: re.Match) -> str:
+            try:
+                return self.secrets.get(m.group(1))
+            except Exception as e:
+                raise self.SecretResolutionError(
+                    f"step {idx}: secret ${{{m.group(1)}}} not resolvable "
+                    f"at dispatch ({type(e).__name__})") from e
+
+        return _SECRET_REF.sub(_sub, value)
+
     def _run_action_step(self, runner: StepRunner, step: ActionStep,
                          idx: int) -> StepOutcome:
         # R16-1：7.4「取更严格」只能由 policy 纯函数裁决——step 声明与
@@ -626,7 +662,8 @@ class SessionPipeline:
                                      element_id=element_id)
         ctx = RunStepContext(
             element_id=element_id, screen_id=screen_id,
-            strategies=strategies, action=step.action, value=step.value,
+            strategies=strategies, action=step.action,
+            value=self._resolve_secret_refs(step.value, idx),
             risk=risk, idempotency=idem,
             has_postcondition=step.postcondition is not None,
             # H7 闭环：spec 也传下去（不只布尔）——执行端见
@@ -734,7 +771,12 @@ class SessionPipeline:
         from agent.context import RecoveryContext
         from executor.policy import FailurePhase, Idempotency
 
-        failure_type, _ = _map_exception(exc)
+        # review_m4_task43 P3-1 探针实锤：此处曾把 _map_exception 的
+        # **status**（'FAIL'）当 failure_type 传给引擎——决策表拿到 'FAIL'
+        # 一律放行：on_wait_timeout=false 旋钮在 aux 路径失效、H6（断言值
+        # 失败不恢复）被绕过、wait 超时空烧 LLM 预算。矩阵 #13 此前靠
+        # find 恒失败的 fixture 侥幸全绿。取元组第二位（failure_type）。
+        failure_type = _map_exception(exc)[1]
         phase = FailurePhase.PRE_DISPATCH
         ref_id = getattr(target_ref, "id", "") or ""
         eff_screen, eff_type = "", None
@@ -908,9 +950,14 @@ class SessionPipeline:
 def _run_status(run: RunResult) -> str:
     if run.passed:
         return "PASS"
-    if any(r.status in ("INFRA_FAILURE", "ENVIRONMENT_FAILURE")
-           for r in run.results):
+    # review_m4_task43 P3-3 拍板：run 级 status 保留 8.1 的两类粒度——
+    # M5 的 50 轮报表按 runs.status 出比例，INFRA 与 ENV 合并会把
+    # 「设备/会话问题」和「环境管理问题」搅成同一桶（exit 2 语义不变）。
+    # 两者并存时 INFRA 先报（WDA 死亡通常才是 cleanup 失败的根因）。
+    if any(r.status == "INFRA_FAILURE" for r in run.results):
         return "INFRA_FAILURE"
+    if any(r.status == "ENVIRONMENT_FAILURE" for r in run.results):
+        return "ENVIRONMENT_FAILURE"
     if all(r.status in ("PASS", "RECOVERED") for r in run.results):
         # 8.1：RECOVERED 是独立终态——exit 5 的 run 不能落 FAIL
         # （M4 Gate 真机实锤：漂移 run exit_code=5 而 runs.status=FAIL）
@@ -929,6 +976,10 @@ def _map_exception(e: Exception) -> tuple[str, str]:
         return "INFRA_FAILURE", "WDA_FAILURE"
     if isinstance(e, WaitTimeout):
         return "FAIL", "WAIT_TIMEOUT"
+    if isinstance(e, SessionPipeline.SecretResolutionError):
+        # review_m4_task43 P2-1：运行时解析失败 → 8.2 既有枚举
+        # SECRET_NOT_FOUND（H9：占位符字面量绝不入 App）
+        return "FAIL", "SECRET_NOT_FOUND"
     if isinstance(e, AssertionValueMismatch):
         return "FAIL", "ASSERTION_VALUE_MISMATCH"
     if isinstance(e, AssertionTargetDrift):

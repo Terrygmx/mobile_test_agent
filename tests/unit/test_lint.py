@@ -303,3 +303,30 @@ def test_parse_then_lint_on_pydantic_objects():
     """lint 接受 dict（loader 前置校验用）与 Pydantic TestCase（CLI 常态）两种输入。"""
     parsed = [parse_testcase_dict(_tc())]
     assert lint(parsed, _repo(), DictSecrets()) == []
+
+
+# --- review_m4_task43 P2-1：坏占位符（legal 形态之外的 `${`）→ ERROR ---
+
+def test_malformed_double_brace_placeholder_reports_error():
+    """`${{VAR}}`（f-string 转义事故形态）此前对 SECRET_REF 不匹配 →
+    带病用例绕过可解析性检查进 run，运行时把字面量敲进 App。"""
+    tc = _tc(steps=[{"action": "input", "target": "login_button",
+                     "value": "${{TEST_PASSWORD}}"}])
+    issues = lint([tc], _repo(), DictSecrets(known={"TEST_PASSWORD"}))
+    assert any(i.code == "malformed_secret_ref"
+               and i.severity is Severity.ERROR for i in issues)
+
+
+def test_malformed_unclosed_placeholder_reports_error():
+    tc = _tc(steps=[{"action": "input", "target": "login_button",
+                     "value": "${TEST_PASSWORD"}])
+    assert any(i.code == "malformed_secret_ref" for i in lint(
+        [tc], _repo(), DictSecrets(known={"TEST_PASSWORD"})))
+
+
+def test_dollar_without_brace_is_not_malformed():
+    """字面量 `$`（如价格 "$5.00"）不带 `{` → 不是占位符，不误报。"""
+    tc = _tc(steps=[{"action": "input", "target": "login_button",
+                     "value": "$5.00"}])
+    assert not any(i.code == "malformed_secret_ref" for i in lint(
+        [tc], _repo(), DictSecrets()))

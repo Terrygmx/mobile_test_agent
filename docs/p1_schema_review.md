@@ -598,3 +598,36 @@ plan Task 4.2 全部交付 + 4.1 顺延清单 8 项全核销：
   路径——替身方法面要与生产契约对齐（_RealContractEx 同步更新）。
   ③网关类外部依赖会漂移（模型 404/间歇 5xx）——验证脚本对
   PROVIDER_ERROR 整 run 重试一次，校验链拒绝（确定性语义）不重试。
+
+### Task 4.3 评审修订（review_m4_task43 收口，2026-10-03）
+
+- **P2-1 变量解析链三件套**：①verify_p1_m4 漂移用例 `${{TEST_USERNAME}}`
+  双括号（f-string 转义事故）改 `${TEST_USERNAME}`；②lint 新增
+  `malformed_secret_ref`（合法形态之外的 `${` 一律 ERROR——此前
+  SECRET_REF 不匹配坏占位符，带病用例绕过可解析性检查进 run）；
+  ③14.4「变量解析在 Runner 层」落地 `SessionPipeline._resolve_secret_refs`
+  （落点拍板 = 管线 ctx 装配处，StepRunner 保持纯值执行；lint 与运行时
+  共用同一 EnvSecretProvider 实例）。运行时解析失败 → 8.2 既有枚举
+  `SECRET_NOT_FOUND`（不造新值）。补「解析后的值不落 trace」端到端断言。
+- **P2-2 production 旗标接线**：`--env-kind {sandbox,staging,production}`
+  （默认 sandbox = 历史行为）+ `--allow-production` 总闸（production 缺
+  flag → 最前置 exit 3）；两处 Guard(EnvKind.SANDBOX) 硬编码退役；
+  env_kind 落 runs 审计列（含 ABORTED 前置行）。
+- **P3-1 探针挖出真 bug（本轮最大收获）**：`_aux_recover` 解包顺序反了——
+  `failure_type, _ = _map_exception(exc)` 把 **status（'FAIL'）**当
+  failure_type 传引擎。后果：决策表拿 'FAIL' 一律放行 → ①
+  on_wait_timeout=false 旋钮在 aux 路径失效（wait 超时空烧 LLM 预算）；
+  ②**H6（断言值失败不恢复）在 aux 路径被绕过**——值不匹配会被「恢复」
+  掩盖；③矩阵 #13 此前靠 find 恒失败的 fixture 侥幸全绿（评审点名的
+  「间接证据」弱点实为真缺陷症状）。修复：取元组第二位；#13 断言强化为
+  `llm.calls == []`（直接计数）。
+- **P3-2**：test_matrix_01_12/13_24 死 `import pytest`、fi_support 死
+  `LLMBudget`、#10 两段 no-op `.replace()` 清理。
+- **P3-3 拍板**：run 级 status 保留 8.1 两类粒度（INFRA_FAILURE 与
+  ENVIRONMENT_FAILURE 不合并；并存时 INFRA 先报——WDA 死亡通常是
+  cleanup 失败根因）。M5 报表按 runs.status 出比例不再搅桶。
+- **P3-4**：TraceStore 打开即清理 RUNNING 残留 → FAIL（Recorder R2-6
+  同款纪律；单写者假设注明）。「不留无终态」与「不写假终态」对齐。
+- 实测：pytest 769 passed（+10：lint 3 / cli_run 6 / trace_schema 1）；
+  verify_stage8 本轮未跑通（Appium 未启动，环境依赖；本轮改动不触及其
+  代码路径——P0 recover/budget/recorder 均未动），下次模拟器环境补跑。

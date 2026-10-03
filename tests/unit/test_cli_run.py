@@ -829,3 +829,131 @@ def test_run_generated_flag_consumes_dual_source(tmp_path):
                  "--db", str(tmp_path / "trace.db"), "--fake-driver",
                  "--generated", str(gen)])
     assert code == 0, "generated-only 元素必须经 --generated 可解析"
+
+
+# --- review_m4_task43 P2-1：${VAR} 运行时解析（14.4 Runner 层落点） ---------
+
+SECRET_TC = """\
+schema_version: "0.2"
+id: secret_001
+name: 占位符解析
+suite: smoke
+tags: [smoke]
+steps:
+  - action: launch_app
+  - action: input
+    target: LoginView.username_field
+    value: ${TEST_USERNAME}
+  - action: input
+    target: LoginView.password_field
+    value: ${TEST_PASSWORD}
+    sensitive: true
+"""
+
+
+def _write_secret_case(tmp_path):
+    sdir = tmp_path / "suites"
+    sdir.mkdir()
+    (sdir / "secret_001.yaml").write_text(SECRET_TC, encoding="utf-8")
+    return sdir
+
+
+def test_run_resolves_secret_placeholders_at_dispatch(
+        tmp_path, monkeypatch, capsys):
+    """分派前经 SecretProvider 解析（P2-1③）：env 齐全 → lint 过、run 绿。"""
+    monkeypatch.setenv("TEST_USERNAME", "qa_user")
+    monkeypatch.setenv("TEST_PASSWORD", "qa_pass")
+    sdir = _write_secret_case(tmp_path)
+    code = main(["run", "--case", "secret_001",
+                 "--suites-root", str(sdir),
+                 "--db", str(tmp_path / "trace.db"), "--fake-driver",
+                 "--no-llm"])
+    assert code == 0, capsys.readouterr().out
+
+
+def test_run_lint_blocks_unresolvable_placeholder(tmp_path, monkeypatch,
+                                                  capsys):
+    """env 缺失 → lint unknown_secret ERROR → exit 3（前置门语义不变）。"""
+    monkeypatch.delenv("TEST_USERNAME", raising=False)
+    monkeypatch.delenv("TEST_PASSWORD", raising=False)
+    sdir = _write_secret_case(tmp_path)
+    code = main(["run", "--case", "secret_001",
+                 "--suites-root", str(sdir),
+                 "--db", str(tmp_path / "trace.db"), "--fake-driver",
+                 "--no-llm"])
+    out = capsys.readouterr().out
+    assert code == 3
+    assert "unknown_secret" in out
+
+
+def test_run_malformed_placeholder_blocked_by_lint(tmp_path, monkeypatch,
+                                                   capsys):
+    """`${{VAR}}`（f-string 转义事故形态）→ malformed_secret_ref ERROR。
+    此前 SECRET_REF 不匹配它，带病用例照常进 run（P2-1 实锤路径）。"""
+    monkeypatch.setenv("TEST_USERNAME", "qa_user")
+    monkeypatch.setenv("TEST_PASSWORD", "qa_pass")
+    sdir = _write_secret_case(tmp_path)
+    yaml_body = SECRET_TC.replace("${TEST_USERNAME}", "${{TEST_USERNAME}}")
+    (sdir / "secret_001.yaml").write_text(yaml_body, encoding="utf-8")
+    code = main(["run", "--case", "secret_001",
+                 "--suites-root", str(sdir),
+                 "--db", str(tmp_path / "trace.db"), "--fake-driver",
+                 "--no-llm"])
+    out = capsys.readouterr().out
+    assert code == 3
+    assert "malformed_secret_ref" in out
+
+
+def test_run_resolved_secret_not_in_trace(tmp_path, monkeypatch):
+    """解析后的密钥值绝不落 trace（H9/H8 端到端断言，review 建议补的
+    那条「解析后的值不落 trace」）。"""
+    import sqlite3
+
+    monkeypatch.setenv("TEST_USERNAME", "qa_user")
+    monkeypatch.setenv("TEST_PASSWORD", "S3cret-pass-42")
+    sdir = _write_secret_case(tmp_path)
+    db = tmp_path / "trace.db"
+    code = main(["run", "--case", "secret_001",
+                 "--suites-root", str(sdir),
+                 "--db", str(db), "--fake-driver", "--no-llm"])
+    assert code == 0
+    dump = "\n".join(
+        " ".join(str(c) for c in row)
+        for table in ("runs", "testcase_runs", "steps")
+        for row in sqlite3.connect(db).execute(f"SELECT * FROM {table}"))
+    assert "S3cret-pass-42" not in dump
+    assert "${TEST_PASSWORD}" not in dump, "占位符字面量也不该出现（已解析）"
+
+
+# --- review_m4_task43 P2-2：--env-kind / --allow-production 接线 ------------
+
+def test_production_requires_allow_production_flag(tmp_path, capsys):
+    """10.1：production 启动必须显式 --allow-production（缺 → exit 3）。"""
+    sdir = tmp_path / "suites"
+    sdir.mkdir()
+    code = main(["run", "--case", "no_such",
+                 "--suites-root", str(sdir),
+                 "--db", str(tmp_path / "trace.db"), "--fake-driver",
+                 "--env-kind", "production"])
+    out = capsys.readouterr().out
+    assert code == 3
+    assert "--allow-production" in out
+
+
+def test_env_kind_recorded_in_runs(tmp_path, monkeypatch):
+    """env_kind 落 runs 审计列（此前恒 NULL——P2-2 第三实锤）。"""
+    import sqlite3
+
+    monkeypatch.delenv("TEST_USERNAME", raising=False)
+    sdir = tmp_path / "suites"
+    sdir.mkdir()
+    (sdir / "plain_001.yaml").write_text(VALID_TC, encoding="utf-8")
+    db = tmp_path / "trace.db"
+    code = main(["run", "--case", "login_001",
+                 "--suites-root", str(sdir),
+                 "--db", str(db), "--fake-driver", "--no-llm",
+                 "--env-kind", "production", "--allow-production"])
+    assert code == 0
+    row = sqlite3.connect(db).execute(
+        "SELECT env_kind FROM runs ORDER BY rowid DESC LIMIT 1").fetchone()
+    assert row[0] == "production"

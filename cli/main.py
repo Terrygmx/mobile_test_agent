@@ -73,8 +73,17 @@ def build_parser() -> argparse.ArgumentParser:
                        help="generated 根目录（5.3 双源合并：overrides > "
                             "generated；同时作为 build identity 的 metadata"
                             " 默认来源）")
+    # P2-2（review_m4_task43）：env kind 真实来源 + Guard 接线。P1 无
+    # 配置文件解析，用旗标显式给（默认 sandbox = 历史行为不变）。
+    run_p.add_argument("--env-kind", choices=["sandbox", "staging",
+                                              "production"],
+                       default="sandbox",
+                       help="环境种类（10.1；落 runs.env_kind 审计列；"
+                            "production 拒 HIGH/CRITICAL，需 --allow-production）")
     run_p.add_argument("--allow-production", action="store_true",
-                       help="允许 production 环境（10.1 总闸；HIGH/CRITICAL 仍拦）")
+                       help="允许 --env-kind production 启动（10.1 总闸；"
+                            "不给则 production 连 LOW 都不跑；"
+                            "HIGH/CRITICAL 仍被 Guard 拦）")
     run_p.add_argument("--config", metavar="PATH", default="mta.yaml",
                        help="mta.yaml 配置（15 节）")
     run_p.add_argument("--suites-root", metavar="DIR", default="suites",
@@ -235,15 +244,29 @@ def cmd_run(args: argparse.Namespace) -> int:
     import uuid
 
     from cli.pipeline import PipelineDeps, SessionPipeline
+    from executor.guard import EnvKind
     from runner.lifecycle import Lifecycle
     from runner.runner import StepRunner
     from tracer.storage import TraceStore
+
+    # P2-2（review_m4_task43）：--env-kind 真实接线（10.1）。production
+    # 启动必须显式 --allow-production——最前置 fail-loud，不带病建 run 行。
+    env_kind = EnvKind(getattr(args, "env_kind", None) or "sandbox")
+    if env_kind is EnvKind.PRODUCTION and not args.allow_production:
+        print("PREFLIGHT ERROR: --env-kind production 需要显式 "
+              "--allow-production（10.1 总闸；production 下 HIGH/CRITICAL "
+              "仍被 Guard 拦）")
+        print("run: exit 3")
+        return 3
+    # review_m4_task43 P2-1：lint 与运行时解析共用一个 Provider 实例——
+    # ${VAR} 分派前经它解析（14.4 Runner 层落点=管线 ctx 装配处）。
+    secrets = EnvSecretProvider()
 
     # 0. lint 前置（P3-7：8.4 exit 3 语义包含 lint ERROR——带病用例不进 run）
     from repository.resolver import Severity
     from testcase.lint import lint as lint_cases, max_severity
 
-    pipeline = SessionPipeline(suites_root=args.suites_root)
+    pipeline = SessionPipeline(suites_root=args.suites_root, secrets=secrets)
     try:
         cases = pipeline.discover(suite=args.suite, tag=args.tag,
                                   case=args.case)
@@ -263,7 +286,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         llm = LLMProvider()
         budget = LLMBudget()
     pipeline.recovery = RecoveryEngine(repo=repo, llm=llm, budget=budget)
-    issues = lint_cases(cases, repo, EnvSecretProvider())
+    issues = lint_cases(cases, repo, secrets)
     for i in issues:
         prefix = "ERROR" if i.severity is Severity.ERROR else "WARN "
         print(f"{prefix} {i.code}: {i.message}")
@@ -296,7 +319,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                 bundle_id=args.bundle_id,
                 allow=args.allow_metadata_mismatch, env=os.environ)
         except bi.BuildIdentityError as e:
-            store.start_run(run_id, suite=args.suite)
+            store.start_run(run_id, suite=args.suite,
+                            env_kind=env_kind.value)
             store.end_run(run_id, status="ABORTED", exit_code=3)
             print(f"PREFLIGHT ERROR: build identity 读取失败：{e}")
             print("run: exit 3")
@@ -309,7 +333,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             "metadata_mismatch_override": int(gr.override),
         }
         if gr.blocked:
-            store.start_run(run_id, suite=args.suite, **bi_fields)
+            store.start_run(run_id, suite=args.suite, env_kind=env_kind.value,
+                            **bi_fields)
             store.end_run(run_id, status="ABORTED", exit_code=3)
             print(f"BUILD_METADATA_MISMATCH: {', '.join(gr.mismatches)}")
             print(f"  app={gr.app.git_commit}/{gr.app.build}  "
@@ -326,7 +351,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     # 2. 组件装配（fake-driver：最小桩；真机：Appium 会话，Task 2.7 接线）
     from executor.guard import EnvKind, Guard
 
-    store.start_run(run_id, suite=args.suite, **bi_fields)
+    store.start_run(run_id, suite=args.suite, env_kind=env_kind.value,
+                    **bi_fields)
     if args.fake_driver:
         class _StubEx:
             def find(self, strategies):
@@ -360,15 +386,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                 pass
 
         ex = _StubEx()
-        runner = StepRunner(ex, _StubDS(),
-                            Guard(EnvKind.SANDBOX), run_id=run_id)
+        runner = StepRunner(ex, _StubDS(), Guard(env_kind), run_id=run_id)
     else:
         # Task 2.7 接线（M4 Gate 前置）：真机 Appium 会话组件装配。
-        # caps 由 simctl 解析（M2/F5 时代是脚本内硬编码）；Guard 恒
-        # SANDBOX（本地模拟器环境，生产拦截语义见矩阵 #22 与
-        # --allow-production）；DeviceSession 不挂 TraceStore 做 recorder
-        # （record_infra 契约不匹配——infra 落库由 pipeline 负责，JSONL
-        # 留作 debug 副本）。装配失败 = 前置配置错误 → exit 3（fail-loud）。
+        # caps 由 simctl 解析（M2/F5 时代是脚本内硬编码）；Guard 用
+        # --env-kind（P2-2 接线，默认 sandbox——production 拦截语义
+        # 见矩阵 #22 与 --allow-production）；DeviceSession 不挂
+        # TraceStore 做 recorder（record_infra 契约不匹配——infra 落库
+        # 由 pipeline 负责，JSONL 留作 debug 副本）。装配失败 = 前置配置
+        # 错误 → exit 3（fail-loud）。
         from environment.manager import EnvironmentManager
         from executor.executor import Executor
         from session.app_session import AppSession
@@ -395,7 +421,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         app = AppSession(ds, bundle_id)
         env = EnvironmentManager(app)
         ex = Executor(ds)
-        runner = StepRunner(ex, ds, Guard(EnvKind.SANDBOX), run_id=run_id)
+        runner = StepRunner(ex, ds, Guard(env_kind), run_id=run_id)
 
     pipeline.store = store
     if args.fake_driver:

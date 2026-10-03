@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import sqlite3
 
-import pytest
-
 from executor.executor import ElementNotFound
 from executor.guard import EnvKind, Guard
 from llm.budget import LLMBudget
@@ -68,8 +66,9 @@ def test_fi_13_wait_timeout_no_recovery(tmp_path):
 """
     # 页面只有 HomeView marker（目标屏没来）→ 分类为 FOUND(别的屏) → #13
     ex = FakeExecutor(find_script=[ElementNotFound("not yet")])
+    llm = FakeLLM([llm_json()])
     recovery = RecoveryEngine(repo=drift_repo(tmp_path),
-                              llm=FakeLLM([llm_json()]),
+                              llm=llm,
                               budget=LLMBudget(), sleep=lambda s: None)
     run, store, _, _ = run_matrix(
         tmp_path, _case("13", 13, step), ex=ex,
@@ -77,7 +76,9 @@ def test_fi_13_wait_timeout_no_recovery(tmp_path):
     r = run.results[0]
     assert r.status == "FAIL" and r.failure_type == "WAIT_TIMEOUT"
     assert run.exit_code == 1
-    # 未触发 LLM：llm.calls 只在恢复时才有——wait 未进恢复管线
+    # 未触发 LLM（review_m4_task43 P3-1：直接断言调用计数——
+    # recovery_reviews==0 是间接证据，LLM 返回垃圾无候选时同样成立）
+    assert llm.calls == [], "矩阵 #13：wait 超时不得触发 LLM"
     conn = sqlite3.connect(tmp_path / "trace.db")
     reviews = conn.execute("SELECT COUNT(*) FROM recovery_reviews").fetchone()
     assert reviews[0] == 0

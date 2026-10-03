@@ -361,13 +361,20 @@ def migrate(conn) -> str:
 
 
 class TraceStore:
-    """schema 0.1 的写入接口。打开即迁移（旧库自动升级，数据保留）。"""
+    """schema 0.1 的写入接口。打开即迁移（旧库自动升级，数据保留），
+    并清理历史异常中断留下的 RUNNING 残留（Recorder R2-6 同款纪律：
+    「不写假终态」的另一面是「不留无终态」——进程重启后不可能仍在跑）。
+    单写者假设（P1 的 mta run 是顺序 CLI，无并发 run）。"""
 
     def __init__(self, db_path: str | Path):
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         migrate(self.conn)
+        self.conn.execute(
+            "UPDATE runs SET status='FAIL', end_time=? WHERE status='RUNNING'",
+            (_now(),))
+        self.conn.commit()
 
     # -- runs --
 

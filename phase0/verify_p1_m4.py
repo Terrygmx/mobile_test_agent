@@ -202,10 +202,10 @@ steps:
       timeout: 10
   - action: input
     target: LoginView.username_field
-    value: ${{TEST_USERNAME}}
+    value: ${TEST_USERNAME}
   - action: input
     target: LoginView.password_field
-    value: ${{TEST_PASSWORD}}
+    value: ${TEST_PASSWORD}
     sensitive: true
   - action: tap
     target: LoginView.login_button

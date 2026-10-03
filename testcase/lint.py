@@ -26,6 +26,10 @@ from repository.resolver import LintIssue, Repository, Severity
 from testcase.schema import TestCase, parse_testcase_dict
 
 SECRET_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# review_m4_task43 P2-1：合法形态之外的 `${` 一律坏占位符——`${{VAR}}`
+# （f-string 转义事故形态）/`${UNCLOSED` 对 SECRET_REF 不匹配，会绕过
+# 可解析性检查带病进 run，运行时把字面量敲进 App。
+MALFORMED_SECRET_REF = re.compile(r"\$\{(?![A-Za-z_][A-Za-z0-9_]*\})")
 # 7.4 非幂等关键词启发式（作用于 element id / label / accessibility_id）
 NON_IDEMPOTENT_KEYWORDS = (
     "submit", "pay", "payment", "order", "checkout", "purchase",
@@ -78,11 +82,19 @@ def _check_secrets(
     steps: list[dict], tc_id: str, secrets: SecretProviderProtocol,
     issues: list[LintIssue],
 ) -> None:
-    """H9/6.4：`${VAR}` 必须可由 SecretProvider 解析。"""
+    """H9/6.4：`${VAR}` 必须可由 SecretProvider 解析；坏占位符直接 ERROR。"""
     for idx, step in enumerate(steps):
         value = step.get("value") if isinstance(step, dict) else None
         if not isinstance(value, str):
             continue
+        if MALFORMED_SECRET_REF.search(value):
+            issues.append(LintIssue(
+                "malformed_secret_ref",
+                f"testcase {tc_id!r} step {idx}: malformed placeholder "
+                f"{value!r} — legal form is ${{NAME}} (H9; passing lint here "
+                f"means the literal gets typed into the App at runtime)",
+                tc_id, idx,
+            ))
         for key in SECRET_REF.findall(value):
             try:
                 secrets.get(key)
