@@ -416,6 +416,38 @@ class TraceStore:
 
     # -- testcase_runs --
 
+    def triage_testcase(self, tc_run_id: int, attribution: str,
+                        note: str) -> None:
+        """人工归因通道（R14-4 消费入口 / review_m5_task51 P3-4）。
+
+        工具化的 triage UPDATE：在 detail_json 里留**结构化审计记录**
+        （tool/ts/note，再归因嵌套 previous）——与直接 SQL 补写区分，
+        「trace 是原始记录」的可信度靠机制不靠纪律。note 经 redact。
+        """
+        if attribution not in ATTRIBUTIONS:
+            raise ValueError(
+                f"invalid failure_attribution: {attribution!r} "
+                f"(allowed: {sorted(ATTRIBUTIONS)})")
+        if not (note or "").strip():
+            raise ValueError("triage 需要 note（归由理由必须留痕）")
+        row = self.conn.execute(
+            "SELECT detail_json FROM testcase_runs WHERE id=?",
+            (tc_run_id,)).fetchone()
+        if row is None:
+            raise LookupError(f"testcase_run {tc_run_id} 不存在")
+        d = json.loads(row["detail_json"] or "{}")
+        record: dict = {"attribution": attribution, "note": note.strip(),
+                        "tool": "mta report triage", "ts": _now()}
+        if "triage" in d:
+            record["previous"] = d["triage"]      # 再归因不覆盖旧判定
+        d["triage"] = record
+        self.conn.execute(
+            "UPDATE testcase_runs SET failure_attribution=?, detail_json=?"
+            " WHERE id=?",
+            (attribution, json.dumps(redact(d), ensure_ascii=False),
+             tc_run_id))
+        self.conn.commit()
+
     def start_testcase(self, run_id: str, testcase_id: str,
                        attempt: int = 1) -> int:
         cur = self.conn.execute(

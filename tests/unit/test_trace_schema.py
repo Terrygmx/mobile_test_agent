@@ -685,3 +685,81 @@ def test_store_open_sweeps_stale_running_runs(tmp_path):
     assert s2.conn.execute(
         "SELECT status FROM runs WHERE run_id='run_fresh'").fetchone()[0] \
         == "PASS"
+
+
+# --- review_m5_task51 P3-4：triage 工具通道（人工归因的审计化） ---
+
+def test_triage_testcase_sets_attribution_and_audit_record(tmp_path):
+    from tracer.storage import TraceStore
+    import json as _json
+    store = TraceStore(tmp_path / "t.db")
+    store.start_run("run_t")
+    sid = store.start_testcase("run_t", "tc_1")
+    store.end_testcase(sid, status="FAIL", failure_type="WAIT_TIMEOUT")
+    store.triage_testcase(sid, "ENVIRONMENT_DEFECT", "模拟器转场抖动")
+    row = store.conn.execute(
+        "SELECT failure_attribution, detail_json FROM testcase_runs"
+        " WHERE id=?", (sid,)).fetchone()
+    assert row["failure_attribution"] == "ENVIRONMENT_DEFECT"
+    d = _json.loads(row["detail_json"])
+    assert d["triage"]["attribution"] == "ENVIRONMENT_DEFECT"
+    assert d["triage"]["tool"] == "mta report triage"
+    assert d["triage"]["note"] == "模拟器转场抖动"
+    assert d["triage"]["ts"]
+
+
+def test_triage_testcase_re_triage_keeps_previous(tmp_path):
+    from tracer.storage import TraceStore
+    import json as _json
+    store = TraceStore(tmp_path / "t.db")
+    store.start_run("run_t")
+    sid = store.start_testcase("run_t", "tc_1")
+    store.end_testcase(sid, status="FAIL", failure_type="WAIT_TIMEOUT")
+    store.triage_testcase(sid, "ENVIRONMENT_DEFECT", "初判")
+    store.triage_testcase(sid, "APP_DEFECT", "复核后改判")
+    d = _json.loads(store.conn.execute(
+        "SELECT detail_json FROM testcase_runs WHERE id=?",
+        (sid,)).fetchone()["detail_json"])
+    assert d["triage"]["attribution"] == "APP_DEFECT"
+    assert d["triage"]["previous"]["attribution"] == "ENVIRONMENT_DEFECT"
+    assert d["triage"]["previous"]["note"] == "初判"
+
+
+def test_triage_testcase_rejects_bad_input(tmp_path):
+    from tracer.storage import TraceStore
+    import pytest
+    store = TraceStore(tmp_path / "t.db")
+    store.start_run("run_t")
+    sid = store.start_testcase("run_t", "tc_1")
+    store.end_testcase(sid, status="FAIL")
+    with pytest.raises(ValueError):
+        store.triage_testcase(sid, "NOT_AN_ATTRIBUTION", "n")
+    with pytest.raises(ValueError):
+        store.triage_testcase(sid, "APP_DEFECT", "   ")
+    with pytest.raises(LookupError):
+        store.triage_testcase(99999, "APP_DEFECT", "n")
+
+
+def test_cli_report_triage(tmp_path, capsys):
+    from cli.main import main
+    from tracer.storage import TraceStore
+    db = tmp_path / "t.db"
+    store = TraceStore(db)
+    store.start_run("run_t")
+    sid = store.start_testcase("run_t", "tc_1")
+    store.end_testcase(sid, status="FAIL")
+    code = main(["report", "triage", str(sid), "--attribution",
+                 "ENVIRONMENT_DEFECT", "--note", "单发抖动",
+                 "--db", str(db)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "ENVIRONMENT_DEFECT" in out
+    # 坏归因 → argparse choices 层 exit 2（与 review CLI 分层先例一致；
+    # agent/storage 层 ValueError 守卫供直调方）；不存在 id → exit 3
+    with pytest.raises(SystemExit) as ei:
+        main(["report", "triage", str(sid), "--attribution", "BOGUS",
+              "--note", "x", "--db", str(db)])
+    assert ei.value.code == 2
+    code = main(["report", "triage", "424242", "--attribution",
+                 "APP_DEFECT", "--note", "x", "--db", str(db)])
+    assert code == 3

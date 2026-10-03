@@ -6,6 +6,9 @@
 4. infra_events.jsonl 应有 WDA_DEAD + WDA_RESTARTED 各一条
 """
 
+import subprocess
+import os
+import time
 import sys
 import tempfile
 from pathlib import Path
@@ -64,7 +67,13 @@ def main() -> int:
     assert "WDA_DEAD" in sql_types and "WDA_RESTARTED" in sql_types, sql_types
     print(f"    sqlite infra_events={sql_types}")
 
-    # 恢复后真实操作可用（WDA 真的活着，不是假恢复）
+    # 恢复后真实操作可用（WDA 真的活着，不是假恢复）。
+    # 2026-10-03 P0 回归实锤：Appium 3.x 会话重建后 App 不保证前台
+    #（no_reset 下被破坏的会话可能让 App 退后台）——find 前显式拉起。
+    subprocess.run(["xcrun", "simctl", "launch", CAPS["udid"], CAPS["bundle_id"]],
+                   check=False, capture_output=True,
+                   env={**os.environ, "DEVELOPER_DIR": "/Applications/Xcode.app"})
+    time.sleep(2)
     ds.ensure_alive().find_element("accessibility id", "login_button")
     print("\n✅ Stage 2 PASS — WDA health check + 自愈 + infra 事件全部通过")
     return 0

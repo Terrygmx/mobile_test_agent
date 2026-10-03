@@ -135,18 +135,58 @@ def test_aggregate_avg_durations(tmp_path):
                                          + 100 + 200 + 300 + 400) / 8
 
 
-def test_aggregate_dedup_boundary_second(tmp_path):
-    """相邻调用共享边界秒：同 run 落两窗只归因首个（run_id 去重）。"""
+def test_aggregate_boundary_second_attribution(tmp_path):
+    """review_m5_task51 P3-2：run 起始恰在边界秒 → 归属**自己的调用窗**
+    （半开区间 [start, end)），不是前一窗。run_id 去重只是兜底。
+    stab_r2 start=_iso(60) == 窗1 end == 窗2 start：归属窗2（search）。"""
     db = tmp_path / "t.db"
     _build_db(db)
     invs = [{"round": "1", "suite": "smoke", "seq": "1",
              "start": _iso(-1), "end": _iso(60), "exit_code": "1",
              "duration_s": "5"},
-            {"round": "2", "suite": "smoke", "seq": "1",
+            {"round": "2", "suite": "search", "seq": "1",
              "start": _iso(60), "end": _iso(90), "exit_code": "0",
              "duration_s": "4"}]
     r = aggregate(db, invs)
-    assert r["runs"] == 2, "stab_r1 的 start 恰在两窗边界，不得重复计数"
+    assert r["runs"] == 2, "不得重复计数"
+    assert r["suite_counts"] == {"smoke": 4, "search": 4}, (
+        "stab_r2 的用例必须归属它自己的调用窗（search），不是前窗")
+
+
+def test_aggregate_wda_procs_gate(tmp_path):
+    """P3-3：WDA runner 进程峰值 >2 = 累积泄漏 → 卫生违规；
+    未采样（旧格式 CSV 无列）→ 不参与判据。"""
+    db = tmp_path / "t.db"
+    _build_db(db)
+    base = [{"round": "1", "suite": "smoke", "seq": "1",
+             "start": _iso(-1), "end": _iso(30), "exit_code": "0",
+             "duration_s": "5"}]
+    assert aggregate(db, base)["hygiene_ok"] is True, "未采样不判"
+
+    leaky = [dict(base[0], wda_procs="5")]
+    assert aggregate(db, leaky)["hygiene_ok"] is False, "峰值 5 > 2 = 泄漏"
+
+    normal = [dict(base[0], wda_procs="1")]
+    assert aggregate(db, normal)["hygiene_ok"] is True
+
+
+def test_render_snapshot_fields():
+    """P3-5：render() 字段名快照——渲染层拼错字段至少要被看见。"""
+    from scripts.p1_stability_report import render
+    r = {"invocations": 2, "invocations_with_runs": 2, "rounds": [1, 2],
+         "runs": 2, "run_status_counts": {"PASS": 2},
+         "testcase_runs": 8, "tc_status_counts": {"PASS": 8},
+         "tc_pass_rate": 1.0, "tc_recovered": 0, "flaky_cases": [],
+         "suite_counts": {"smoke": 8}, "wda_restarts": 0,
+         "avg_run_duration_ms": 100.0, "avg_case_duration_ms": 10.0,
+         "llm_calls": 0, "untriaged_fails": 0, "running_left": 0,
+         "wda_procs_max": 1, "hygiene_ok": True}
+    text = render(r)
+    for needle in ("invocations: 2", "PASS Rate (8.3 口径): 100.0%",
+                   "flaky cases: （无）", "WDA restarts: 0",
+                   "llm_calls: 0", "hygiene: OK",
+                   "WDA runner 进程峰值: 1"):
+        assert needle in text, f"渲染缺字段: {needle}"
 
 
 def test_cli_preflight_missing_csv(tmp_path, capsys):

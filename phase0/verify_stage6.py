@@ -29,10 +29,15 @@ def main() -> int:
     )
 
     out = Path("out/source_metadata.json")
-    meta = build_metadata(str(SWIFT_SRC), out)
+    # P1-09 起 build_metadata 的 files 是**列表**——传裸字符串会被
+    # scan_files 按字符迭代（首个字符 '/' 被当路径，ScanError 哑败）
+    meta = build_metadata([SWIFT_SRC], out)
     print(f"[1] metadata.json 生成: {out}, commit={meta['git_commit']}")
 
-    ids = {e["id"]: e for e in meta["elements"]}
+    # P1（12.3 两键形态，review_m5_task51 时代适配）：元素在
+    # screen_elements[].elements 下，accessibility 字段是 accessibility_id
+    ids = {e["id"]: e
+           for scr in meta["screen_elements"] for e in scr["elements"]}
     for expected in ["login_button", "username_field", "password_field", "home_page"]:
         assert expected in ids, f"缺 {expected}: {list(ids)}"
         assert ids[expected]["resolution_type"] == "literal"
@@ -44,10 +49,11 @@ def main() -> int:
         f.write('import SwiftUI\nstruct T: View {\nlet dynId = "x"\nvar body: some View {\n'
                 'Text("hi").accessibilityIdentifier(dynId)\n}\n}\n')
         dyn_path = f.name
-    dyn_meta = build_metadata(dyn_path, Path(tempfile.mktemp()))
-    unknown = [e for e in dyn_meta["elements"] if e["resolution_type"] == "unknown"]
+    dyn_meta = build_metadata([dyn_path], Path(tempfile.mktemp()))
+    unknown = [e for scr in dyn_meta["screen_elements"]
+               for e in scr["elements"] if e["resolution_type"] == "unknown"]
     assert unknown, f"应识别出 unknown 元素: {dyn_meta}"
-    assert unknown[0]["accessibilityId"] is None
+    assert unknown[0].get("accessibility_id") is None
     print(f"    unknown 元素 line={unknown[0]['source']['line']}, 不硬猜值 ✓")
 
     print("\n✅ Stage 6 PASS — SwiftSyntax Source Intelligence 链路通过")

@@ -19,6 +19,7 @@ import yaml
 from environment.secrets import EnvSecretProvider
 from repository.resolver import Repository, Severity
 from testcase.lint import lint, max_severity
+from tracer.storage import ATTRIBUTIONS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -183,11 +184,21 @@ def build_parser() -> argparse.ArgumentParser:
     rev_rej.add_argument("--note", metavar="TEXT", required=True,
                          help="拒绝理由必填（triage 数据）")
 
-    # --- 占位子命令（后续任务填充） ---
-    for name, help_text in (
-        ("report", "生成 HTML/JUnit 报告（M2）"),
-    ):
-        sub.add_parser(name, help=help_text)
+    # --- report（14.6；P3-4 triage 工具通道先行，报告页后续任务） ---
+    rep_p = sub.add_parser("report", help="报告与 triage（14.6）")
+    rep_sub = rep_p.add_subparsers(dest="report_cmd")
+    rep_tri = rep_sub.add_parser(
+        "triage", help="人工归因 FAIL 用例（R14-4 消费入口；结构化审计"
+                       "记录落 detail_json.triage）")
+    rep_tri.add_argument("tc_run_id", type=int,
+                         help="testcase_runs.id（mta report list 待补，"
+                              "现阶段从 trace.db 查）")
+    rep_tri.add_argument("--attribution", required=True,
+                         choices=sorted(ATTRIBUTIONS),
+                         help="归因（8.2 枚举）")
+    rep_tri.add_argument("--note", required=True,
+                         help="归由理由必填（审计数据）")
+    rep_tri.add_argument("--db", metavar="PATH", default="out/trace.db")
 
     return parser
 
@@ -697,9 +708,28 @@ def cmd_source_diff(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_placeholder(args: argparse.Namespace) -> int:
-    print(f"mta {args.command}: not implemented yet (planned for a later task)")
-    return 2
+def cmd_report(args: argparse.Namespace) -> int:
+    """14.6 report 组。triage（P3-4）：FAIL 用例人工归因的工具入口——
+    走 TraceStore.triage_testcase（结构化审计记录落 detail_json.triage），
+    不再裸 SQL 补写 trace。"""
+    from tracer.storage import TraceStore
+
+    if getattr(args, "report_cmd", None) != "triage":
+        print("usage: mta report triage <tc_run_id> --attribution X "
+              "--note \"...\" [--db PATH]")
+        return 2
+    store = TraceStore(args.db)
+    try:
+        store.triage_testcase(args.tc_run_id, args.attribution, args.note)
+    except ValueError as e:
+        print(f"TRIAGE ERROR: {e}")
+        return 3
+    except LookupError as e:
+        print(f"TRIAGE ERROR: {e}")
+        return 3
+    print(f"triage: testcase_run {args.tc_run_id} → {args.attribution}"
+          f"（审计记录已落 detail_json.triage）")
+    return 0
 
 
 def cmd_review(args: argparse.Namespace) -> int:
@@ -766,7 +796,10 @@ def main(argv: Sequence | None = None) -> int:
         return cmd_source(args)
     if args.command == "review":
         return cmd_review(args)
-    return cmd_placeholder(args)
+    if args.command == "report":
+        return cmd_report(args)
+    # 全部子命令已实现——占位分发随 review_m5_task51 P3-4 退役
+    raise AssertionError(f"unhandled command: {args.command}")
 
 
 if __name__ == "__main__":

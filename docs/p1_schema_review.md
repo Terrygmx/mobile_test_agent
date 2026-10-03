@@ -631,3 +631,34 @@ plan Task 4.2 全部交付 + 4.1 顺延清单 8 项全核销：
 - 实测：pytest 769 passed（+10：lint 3 / cli_run 6 / trace_schema 1）；
   verify_stage8 本轮未跑通（Appium 未启动，环境依赖；本轮改动不触及其
   代码路径——P0 recover/budget/recorder 均未动），下次模拟器环境补跑。
+
+### Task 5.1 评审修订（review_m5_task51 收口，2026-10-03）
+
+- **P3-1**：baseline doc 组成口径修正——50 轮 = 冒烟 3 + 正式 47（断点续跑
+  并入），「01:54-03:54 窗口 = 200 run/1000 用例」的错误叙述已改。
+- **P3-2**：stability 报告时间窗改半开区间 [start, end)（闭区间 + 边界秒
+  共享曾使 ~22% 的 run 错挂前一窗，总数靠 run_id 去重兜底）；删
+  `_in_window` 死代码；新增 suite_counts 输出让归属可断言；补「边界秒
+  归属自己窗」单测。
+- **P3-3**：runner 每次调用后采 WDA runner 进程数落 CSV 新列
+  wda_procs；report 输出 wda_procs_max 并入卫生判据（>2 = 累积泄漏；
+  旧格式 CSV 未采样不判）。
+- **P3-4**：triage 工具通道落地——`mta report triage <tc_run_id>
+  --attribution X --note ...` → TraceStore.triage_testcase（结构化审计
+  记录 detail_json.triage{tool,ts,note}，再归因嵌套 previous，note 经
+  redact）；存量 2 行已迁入工具通道；report 占位符随之退役
+  （cmd_placeholder 死代码清除）。
+- **P3-5**：stability 脚本显式 export DEVELOPER_DIR（simctl 静默失败
+  老坑）；render() 快照断言。
+- **P0 verify_stage 全量回归（建议动作 3，环境在线执行）**：8 脚本中
+  7 绿。修复 3 个 P0 脚本与现状脱节的预存 bug：stage6（metadata 两键
+  形态 + build_metadata 裸字符串参数按字符迭代 + unknown 元素键缺失
+  三处）、stage9_f5（metadata 形态 + reconcile_local 扁平适配——与
+  4.2 引擎侧 _source_subset 同款）、stage2（Appium 3.x 会话重建后 App
+  不保证前台，find 前显式拉起）。**stage9_f5 仍阻断**：其 [2] 场景期望
+  input(username_field) 走 RECOVERED，隐含 F5 多字段改名前置状态，仓库
+  内无从重建（out/source_metadata.json 为 P0 遗留产物）——非代码回归，
+  建议后续要么补齐 F5 状态构建脚本、要么以 verify_p1_m4 漂移流程
+  （可复现、沙盒化）替代后退役。
+- 实测：pytest 782 passed（+6：report triage 4 / 边界归属 1 /
+  render 快照 1）。

@@ -50,7 +50,10 @@ GATEWAY = {"base_url": os.environ.get("LLM_BASE_URL", "http://127.0.0.1:15721/v1
 def main() -> int:
     # 旧产物 metadata（改名前扫描结果），绝不重扫
     meta = json.loads((ROOT / "out/source_metadata.json").read_text())
-    assert any(e["id"] == "login_button" for e in meta["elements"]), \
+    # P1 两键形态（12.3）：元素在 screen_elements[].elements 下
+    old_ids = [e["id"] for scr in meta["screen_elements"]
+               for e in scr["elements"]]
+    assert "login_button" in old_ids, \
         "out/source_metadata.json 必须是改名前产物（含 login_button）"
 
     ds = DeviceSession("http://127.0.0.1:4723", CAPS)
@@ -117,7 +120,18 @@ def main() -> int:
     app.reset_state("RELAUNCH")
     time.sleep(2)
     page = ex.page_source()
-    recon = reconcile_local("login_button", "LoginView", meta, page)
+    # P1 两键 metadata → reconcile_local 扁平子集适配（与 4.2 引擎侧
+    # _source_subset 同款；P0 脚本自己带一份——引擎适配不覆盖 P0 路径）
+    flat_meta = {
+        "elements": [
+            {"accessibilityId": e.get("accessibility_id"),
+             "resolution_type": e["resolution_type"],
+             "screen": scr["name"]}
+            for scr in meta["screen_elements"] for e in scr["elements"]
+        ],
+        "screens": meta["screens"],
+    }
+    recon = reconcile_local("login_button", "LoginView", flat_meta, page)
     print(f"    reconciliation: {recon['status']}, candidates={recon['candidates_in_runtime']}")
     assert recon["status"] == "DRIFT", recon
 

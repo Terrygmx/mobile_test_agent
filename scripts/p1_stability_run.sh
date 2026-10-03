@@ -24,6 +24,9 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# M1 老坑：xcrun 依赖 DEVELOPER_DIR，环境不齐时 simctl 静默失败 →
+# preflight 误报「无 booted 模拟器」。显式兜底（review_m5_task51 P3-5）。
+export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 cd "$ROOT"
 
 ROUNDS="${ROUNDS:-50}"
@@ -85,7 +88,7 @@ fi
 
 # 表头只在文件新建时写一次（重复 append 会让 report 多读一行哑窗）
 if [ ! -s "$CSV" ]; then
-  echo "round,suite,seq,start,end,exit_code,duration_s,running_left,untriaged_fails" >> "$CSV"
+  echo "round,suite,seq,start,end,exit_code,duration_s,running_left,untriaged_fails,wda_procs" >> "$CSV"
 fi
 
 for ((r = START_ROUND; r <= ROUNDS; r++)); do
@@ -104,8 +107,9 @@ for ((r = START_ROUND; r <= ROUNDS; r++)); do
     end=$(now_iso)
     dur=$(( $(date +%s) - t0 ))
     read -r run_left untriaged < <(hygiene "$DB" "$start" "$end" | tr ',' ' ')
-    echo "${r},${suite},${seq},${start},${end},${code},${dur},${run_left},${untriaged}" >> "$CSV"
-    echo "  ${suite}: exit=${code} dur=${dur}s running_left=${run_left} untriaged_fails=${untriaged}"
+    wda_procs=$(pgrep -f WebDriverAgentRunner-Runner 2>/dev/null | wc -l | tr -d ' ')
+    echo "${r},${suite},${seq},${start},${end},${code},${dur},${run_left},${untriaged},${wda_procs}" >> "$CSV"
+    echo "  ${suite}: exit=${code} dur=${dur}s running_left=${run_left} untriaged_fails=${untriaged} wda_procs=${wda_procs}"
 
     if [ "$code" -eq 3 ]; then
       CONSEC_PREFLIGHT_FAILS=$((CONSEC_PREFLIGHT_FAILS + 1))

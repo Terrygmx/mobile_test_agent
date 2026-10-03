@@ -33,15 +33,6 @@ def load_invocations(csv_path: Path) -> list[dict]:
         return [dict(r) for r in csv.DictReader(f)]
 
 
-def _in_window(start_iso: str | None, inv_start: str, inv_end: str) -> bool:
-    """runs.start_time（'YYYY-MM-DDTHH:MM:SS.ffffff+00:00' 形态）是否落在
-    调用时间窗内。字符串比较对同格式 ISO 串即字典序比较，够用且无时区
-    解析依赖；start_time 为空（异常行）不归因。"""
-    if not start_iso:
-        return False
-    return inv_start <= start_iso <= inv_end
-
-
 def aggregate(db_path: Path, invocations: list[dict]) -> dict:
     """聚合核心。纯函数：db 行 + 调用窗 → 指标 dict。"""
     conn = sqlite3.connect(db_path)
@@ -57,8 +48,12 @@ def aggregate(db_path: Path, invocations: list[dict]) -> dict:
 
     for inv in invocations:
         inv_start, inv_end = inv["start"], inv["end"]
+        # 半开区间 [start, end)：相邻调用共享边界秒（前一窗 end == 后一窗
+        # start），闭区间会让边界 run 落两窗、first-window-wins 把它错挂
+        # 前一窗（review_m5_task51 P3-2：155/200 归因移位的机制）。半开后
+        # run 恒归自己的调用窗；run_id 去重保留为兜底。
         rows = conn.execute(
-            "SELECT * FROM runs WHERE start_time >= ? AND start_time <= ?",
+            "SELECT * FROM runs WHERE start_time >= ? AND start_time < ?",
             (inv_start, inv_end)).fetchall()
         matched = [dict(r) for r in rows
                    if r["run_id"] not in seen_run_ids]
@@ -94,6 +89,12 @@ def aggregate(db_path: Path, invocations: list[dict]) -> dict:
     running_left = conn.execute(
         "SELECT COUNT(*) FROM runs WHERE status='RUNNING'").fetchone()[0]
 
+    # WDA runner 进程计数（review_m5_task51 P3-3：泄漏检查从「口头有界」
+    # 变成逐轮数据。旧格式 CSV 无此列 → None，不参与卫生判据）。
+    wda_samples = [int(inv["wda_procs"]) for inv in invocations
+                   if str(inv.get("wda_procs") or "").strip().isdigit()]
+    wda_procs_max = max(wda_samples) if wda_samples else None
+
     # --- run 级比例 ---
     run_status_counts: dict[str, int] = {}
     for r in runs:
@@ -110,8 +111,10 @@ def aggregate(db_path: Path, invocations: list[dict]) -> dict:
 
     # --- flaky：同一 testcase 跨轮出现 ≥2 种终态 ---
     by_case: dict[str, set] = {}
+    suite_counts: dict[str, int] = {}
     for t in tc_rows:
         by_case.setdefault(t["testcase_id"], set()).add(t["status"])
+        suite_counts[t["_suite"]] = suite_counts.get(t["_suite"], 0) + 1
     flaky = sorted(cid for cid, states in by_case.items() if len(states) > 1)
 
     # --- 耗时（runs 表无 duration_ms 列，14.2：从 start/end 时间戳算；
@@ -140,6 +143,7 @@ def aggregate(db_path: Path, invocations: list[dict]) -> dict:
                          if tc_total else 0.0),
         "tc_recovered": tc_status_counts.get("RECOVERED", 0),
         "flaky_cases": flaky,
+        "suite_counts": suite_counts,
         "wda_restarts": wda_restarts,
         "avg_run_duration_ms": (sum(durations) / len(durations)
                                 if durations else 0),
@@ -148,8 +152,12 @@ def aggregate(db_path: Path, invocations: list[dict]) -> dict:
         "llm_calls": llm_calls,
         "untriaged_fails": untriaged_fails,
         "running_left": running_left,
-        # Gate M5 卫生判据（17 M5：不预设通过率 SLA，只查卫生）
-        "hygiene_ok": (running_left == 0 and llm_calls == 0),
+        "wda_procs_max": wda_procs_max,
+        # Gate M5 卫生判据（17 M5：不预设通过率 SLA，只查卫生）。wda
+        # 采样存在时：顺序会话下 runner 进程数应有界（override 重叠瞬时
+        # 可到 2），>2 即累积泄漏。
+        "hygiene_ok": (running_left == 0 and llm_calls == 0
+                       and (wda_procs_max is None or wda_procs_max <= 2)),
     }
 
 
@@ -176,6 +184,8 @@ def render(report: dict) -> str:
         f"llm_calls: {report['llm_calls']}（稳定 build 必须 0）  "
         f"untriaged FAILs: {report['untriaged_fails']}  "
         f"RUNNING 残留: {report['running_left']}",
+        f"WDA runner 进程峰值: {report['wda_procs_max'] if report['wda_procs_max'] is not None else '（未采样）'}"
+        f"（>2 = 累积泄漏）",
         f"hygiene: {'OK' if report['hygiene_ok'] else 'VIOLATION'}",
     ]
     return "\n".join(lines)

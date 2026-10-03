@@ -87,10 +87,10 @@ def test_cli_lint_invalid_yaml_exit_3(repo_env, capsys):
     assert "invalid YAML" in capsys.readouterr().out
 
 
-def test_cli_placeholder_exit_2(capsys):
-    # Task 2.6 后 run 已实现；占位只余 review/report/repo
+def test_cli_report_without_subcommand_shows_usage(capsys):
+    # review_m5_task51 P3-4 后 report 已实现（triage）——占位符时代终结
     assert main(["report"]) == 2
-    assert "not implemented" in capsys.readouterr().out
+    assert "usage: mta report triage" in capsys.readouterr().out
 
 
 def test_cli_run_requires_target_selector():
