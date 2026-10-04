@@ -518,14 +518,18 @@ class RecoveryEngine:
                 risk=eff.risk, screen_id=eff.screen,
                 element_id=eff.id, action=parsed.action or "tap"))
 
+        # review P3-4：AND-OR 惯用法换显式条件——将来 _policy_check 若改成
+        # 可能假值的形态，静默变 None 会跳过 10.1 Guard。
+        policy_check = (_policy_check
+                        if (self.guard is not None and eff is not None)
+                        else None)
         result = guard_candidate(
             current_screen=current_screen_id or None,
             candidate_screen=candidate_screen,
             find=_find,
             expected_type=ctx.expected_type,
             effective_risk=risk,
-            policy_check=(self.guard is not None and eff is not None
-                          and _policy_check or None),
+            policy_check=policy_check,
             confidence=conf,
             min_confidence=min_conf)
         validate_entry = {"stage": "validate", "outcome": result.outcome,

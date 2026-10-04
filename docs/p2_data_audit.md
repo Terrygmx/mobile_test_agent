@@ -198,3 +198,24 @@ runs=102 / recoveries=50 / reviews=1 / seed_ready=1（原 0）。
 - **接线**：agent/recovery.py import 直连 experience.runtime_guard；
   agent/context.py 的 re-export 维持（Task 2.1 已做）。
 - 实测：pytest 863 passed（+21：runtime_guard 17 + 红线 7 − 删除 3）。
+
+---
+
+## Task 2.2 评审修订记录（review_p2_task22 收口，2026-10-04）
+
+评审结论「通过（可收口 Task 2.2）」，5×P3 全部顺手清掉：
+
+- **P3-1**：guard_candidate 入口显式断言 effective_risk 必须是 Risk 枚举
+  （字符串 "LOW" 曾被 `is not Risk.LOW` 静默拦成 RISK_BLOCKED——不炸、
+  不报错、只掉成功率；现在接线错误当场 TypeError 显形）+ 正向用例测试；
+  Task 2.4 接线前置已记入 plan（含「真实 Risk 枚举流经全链 → EXECUTE」
+  正向用例要求）。
+- **P3-2**：P1 设计 9.3 修订记录回填——「链序以 P2 设计 5 节共享实现为
+  准（Task 2.2 起）」，两份设计文档不再各说一个链序。
+- **P3-3**：plan Task 2.4 接线前置补 Executor.find_all 缺口（生产 find
+  异常语义 vs find_all 列表语义不同构——加方法或适配器二选一）。
+- **P3-4**：`policy_check=(A and B and C or None)` 惯用法改显式条件
+  （将来 _policy_check 变假值形态会静默跳过 10.1 Guard）。
+- **P3-5**：phase0/verify_p1_m4.py 注释指向更新（candidate_risk_allowed
+  → runtime_guard 共享链）。
+- 实测：pytest 864 collected、全量绿。

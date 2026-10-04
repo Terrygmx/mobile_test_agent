@@ -560,6 +560,15 @@ _llm_stage`（FakeLLM 全覆盖单测）。P1 定档：
 - **aux 步骤（wait/assert）**：校验链相同，但 ctx.redispatch=None——
   引擎只验证不执行，候选策略交管线做定位覆盖后重验一次（矩阵 #15）。
 
+**修订记录（P2 Task 2.2 实现后回填，2026-10-04）**：校验链收口到
+`experience/runtime_guard.py` 的共享实现 `guard_candidate`（P2 设计 5 节
+E1——LLM 候选校验与 Experience 运行时 Guard 唯一规则体），**链序以 P2
+设计 5 节共享实现为准（Task 2.2 起）**：confidence → Screen（纯
+Repository 比对 + 未登记 fail-closed，不再消耗一次 find）→ 数量 → 类型
+→ risk → 10.1 Guard。上表旧序（数量/类型在 Screen 前）由共享实现取代；
+单故障注入下两者不可区分（矩阵 24/24 全绿佐证），多故障时 failure_type
+以共享实现为准。
+
 ### 9.4 作用域内复用（非学习）
 
 同一次 run 内，`(screen, target_id, app_build)` 的已校验恢复结果可保存在**内存**里，供后续同 run 的用例直接复用，避免同一漂移重复调 LLM：

@@ -138,6 +138,14 @@ M1 审计/Schema(1.5d) ─► M2 Store/Guard(4d) ─► M3 验证/降级(3d) ─
 > 调用形态是 P1 旧签名（build ≠ bundle，键语义不同），接真 Store 必须
 > **连调用点带键来源**一起改（`RecoveryContext` 现无 app_id/screen 的
 > 可靠来源，需补字段）；②`EmptyExperienceStore` 与旧签名随之退役。
+>
+> **⚠️ 接线前置（Task 2.2 评审 P3-1/P3-3 显性化，2026-10-04）**：两处
+> ②③——③生产 `Executor` **没有 `find_all`**（find 语义：0 抛
+> ElementNotFound、≥2 抛 AmbiguousElement；`experience_runtime_guard`
+> 走 `find_all` 返回列表）——Task 2.4 二选一：给 Executor 加 `find_all`
+> 或提供异常语义→计数的适配器；④`RuntimeContext.effective_risk` 必须
+> 携带 **Risk 枚举**（字符串 "LOW" 会被 runtime_guard 入口 TypeError
+> 拦下，接线测试需含一条「真实 Risk 枚举流经全链 → EXECUTE」正向用例）。
 
 **Objective:** `try_experiences` 主循环落地 + `detail.kind` 细分。此任务是 Gate M2 的集成载体。
 

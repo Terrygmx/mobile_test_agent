@@ -168,6 +168,13 @@ def test_effective_risk_is_p1_max_rule():
     assert (r.outcome, r.reason) == ("BLOCK", "RISK_BLOCKED")
 
 
+def test_effective_risk_string_rejected_loudly():
+    """review_p2_task22 P3-1 类型地雷：字符串 "LOW" 曾静默拦成
+    RISK_BLOCKED（不炸、不报错、只掉成功率）——入口断言使其当场显形。"""
+    with pytest.raises(TypeError, match="must be Risk"):
+        _guard(effective_risk="LOW")
+
+
 # --- 3. 10.1 Guard 复检 ----------------------------------------------------------
 
 

@@ -111,6 +111,8 @@ def guard_candidate(
                        异常 = 0 匹配）；
       expected_type    期望元素类型（None/空 = 跳过类型校验）；
       effective_risk   E2 计算后的门控风险（None 按最高处理）；
+                       必须是 Risk 枚举——字符串 "LOW" 会被 fail-closed
+                       拦成 RISK_BLOCKED（review P3-1 类型地雷，入口断言）；
       policy_check     10.1 Guard 复检 callable（GuardViolation → 拦；
                        None = 跳过——执行路径 dispatch 处自会再过 Guard）；
       confidence/min_confidence  LLM 专属（Experience 路径不传）。
@@ -156,7 +158,14 @@ def guard_candidate(
                                record_as_sample=True)
 
     # 6. 风险：effective_risk == LOW 才放行（None 按最高处理，fail-closed；
-    #    4.7：风险拦截不是样本——「不被允许使用」≠「用了但错了」）
+    #    4.7：风险拦截不是样本——「不被允许使用」≠「用了但错了」）。
+    #    review P3-1 类型地雷：字符串 "LOW" 会静默拦成 RISK_BLOCKED（不炸、
+    #    不报错、只掉成功率）——入口显式断言 Risk 枚举，接线错误当场显形。
+    if effective_risk is not None and not isinstance(effective_risk, Risk):
+        raise TypeError(
+            f"effective_risk must be Risk | None, got "
+            f"{type(effective_risk).__name__}:{effective_risk!r} "
+            f"(string risk 会被静默 fail-closed——用 E2 的 compute_effective_risk)")
     if effective_risk is not Risk.LOW:
         return GuardResult(outcome="BLOCK", reason="RISK_BLOCKED",
                            record_as_sample=False)

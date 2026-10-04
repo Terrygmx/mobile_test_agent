@@ -254,7 +254,7 @@ DRIFT_ALIAS_DOC = """
 # M4 Gate：模拟 9.5 review-accept 产物——LLM 候选 user_field 经人工确认后
 # 落 overrides（含风险声明）。rename 漂移的恢复闭环 = 人的确认（risk 声明）
 # + LLM 桥接运行时命名；无此声明则源扫描元素 risk=None → LLM_RISK_BLOCKED
-# （candidate_risk_allowed 的 fail-closed 纪律，设计 9.3 第 4 行）。
+# （experience.runtime_guard 共享链的 fail-closed 纪律，设计 9.3 第 4 行）。
 schema_version: "1.0"
 kind: element
 id: user_field
