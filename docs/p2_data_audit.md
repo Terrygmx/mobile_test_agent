@@ -703,3 +703,109 @@ Task 2.4 评审修订记录里写过「生产 `cli/main.py` 装配 `RecoveryEngi
   G1 `18 passed`。
   （中间一次因网关连续 3 次 `LLM_PROVIDER_ERROR` + 后续 `wait ProfileView`
   超时而红，复跑即绿——环境抖动，非回归。）
+
+---
+
+## Task 3.1 完成记录（P2-06 ExperienceVerifier 纯函数状态机，2026-10-04）
+
+**Objective**：设计 4.3–4.6 / 8.2——全部决策纯函数（E13），不依赖设备。
+
+### 交付
+
+- `experience/verifier.py`（新）：`evaluate`（4.3 状态机）+ 纯谓词
+  `distinct_run_count` / `success_rate_of` / `sliding_window_degrade`（4.6）/
+  `eligible_for_auto_verification`（4.4）/ `needs_revalidation`（E8）+
+  应用区 `apply_outcome` / `revalidate` / `mark_revalidation_required`。
+- `experience/sweeper.py`（新）：`StalenessPolicy` / `is_stale`（纯）/
+  `sweep_stale_candidates`（8.2 的 90 天清理）。
+- `experience/store.py`：新增三个能力——`record_screen_fingerprint`（E8 的观测
+  更新）、`record_state_event`（**非跳变**时间线标记）、
+  `has_state_event_since_transition`（标记幂等查询）；Protocol 同步。
+- 测试：`tests/unit/test_verifier.py`（31 项）、`tests/unit/test_sweeper.py`
+  （17 项）。
+
+### 决策表（落地形态）
+
+| 当前状态 | 条件 | 决策 | reason |
+|---|---|---|---|
+| REJECTED | —（终态） | `NO_CHANGE` | `TERMINAL` |
+| CANDIDATE | 不满足 E4 资格 | `KEEP_CANDIDATE` | `NOT_ELIGIBLE` |
+| CANDIDATE | 满足 4.5 门槛 | `PROMOTE_TO_VERIFIED` | `THRESHOLD_MET` |
+| CANDIDATE | 其他 | `KEEP_CANDIDATE` | `THRESHOLD_NOT_MET` |
+| VERIFIED | 滑动窗口触发 | `DEGRADE` | `SLIDING_WINDOW` |
+| VERIFIED | 其他 | `NO_CHANGE` | `HEALTHY` |
+| DEGRADED | —（只能显式 `revalidate`） | `NO_CHANGE` | `AWAITING_REVALIDATION` |
+
+**DEGRADED 没有自动出口**：4.3 只允许「显式 revalidate 成功」→ VERIFIED。
+不做「窗口恢复就自动转回」——那会让降级变成抖动（E6 的滑动窗口是安全阀，
+不是健康探针）。
+
+### 与设计伪代码的三处有意偏离（都写进了模块 docstring）
+
+1. **`evaluate` 多一个必填关键字 `auto_verify_eligible`**。E4 的资格是**目标
+   元素**的属性（idempotency / risk），而 `(exp, runs, policy)` 三者里都没有：
+   `ExperienceRun.effective_risk` 恒为 LOW——4.7 表第 4 行规定「风险未过的
+   尝试**不写样本**」，拿它判 E4 必然恒真（假绿）。故资格由调用方经
+   `eligible_for_auto_verification(element)` 算好传入；**必填无默认值**：
+   忘了传是 TypeError（fail-loud），不是「默默不升级」。做成默认 False 会让
+   「忘了传」与「确实不合格」不可区分。
+2. **`evaluate` 返回 `VerificationOutcome`（决策 + reason + 判据明细）**而不是
+   裸 `VerificationDecision`：状态事件要写 reason、报告要展示判据，在调用方
+   再推一遍等于把同一套规则实现两次。
+3. **`success_rate` / `distinct_runs` 一律从传入的 runs 现算**，不读
+   `Experience` 上的冗余列——冗余列是给查询用的，判定必须以历史为唯一依据
+   （E11：判定只吃「实际被尝试」的样本，而 `experience_runs` 按 4.7 表只装
+   被尝试的那些，从 runs 现算即等价）。**附带守卫**：`len(runs) !=
+   exp.sample_count` 即 `ValueError`——传了截断的列表会把「10 个样本」算成
+   「5 个」，门槛静默失真且报告上看不出原因。
+
+### E8 的标记怎么落（一处需要说明的取舍）
+
+E8 要求 fingerprint 变化时「标记 `REVALIDATION_REQUIRED`，**不**清空或拒绝」。
+但 `experience_state_events.to_status` 是 **NOT NULL**（P2-02 定档：「跳变必须
+有终态」），而这类标记本身没有终态。三个选项里选了最保守的：
+
+- ✗ 放宽 schema（要迁移，plan Task 3.1 没这个预算，且会破坏「跳变必有终态」
+  这个既有不变量）；
+- ✗ 借用 §11.1 的 `experience_revalidated` 事件名（语义反了：那是「已验证过」，
+  这是「需要再验证」）；
+- ✓ **写 `experience_state_events` 且 from == to**：同值表达「此刻仍是这个
+  状态，只是被标记了」，`to_status` NOT NULL 自然满足，不动 schema。
+
+幂等按「**最近一次跳变之后**是否已有该 reason」判定（
+`has_state_event_since_transition`）——不是「历史上有没有过」：状态变化后旧标记
+作废，DEGRADED→VERIFIED 之后又变了指纹必须能重新标记。
+
+### 矩阵对应
+
+| 行 | 覆盖 |
+|---|---|
+| #5 | 总体 97%（≥ 门槛 0.95）但最近 5 次里 3 次失败 → `DEGRADE`，**窗口优先于总体率** |
+| #8 | 非幂等 10/10 → `KEEP_CANDIDATE(NOT_ELIGIBLE)` |
+| #9 | 风险 MEDIUM 100% → `KEEP_CANDIDATE(NOT_ELIGIBLE)` |
+| #11 | 90 天无新样本 → `REJECTED(STALE)`，runs 不删除 |
+| #7 | fingerprint 变化 → `REVALIDATION_REQUIRED` 标记（from==to），状态不变、证据不删；`revalidate` 通过后更新 fingerprint 观测 |
+
+> 设计 #5 的原文数字「100 次 98 成功、最近 5 次 3 失败」自相矛盾（3 次失败
+> 意味着总体最多 97%）。测试用**自洽的 97%**（仍 ≥ 门槛 0.95），所以「窗口
+> 优先于总体成功率」是真的被考到了：只看总体它会一直 VERIFIED。
+
+### 边界取值（有意）
+
+- 门槛一律**闭区间**（`≥`）：恰好 10 样本 / 恰好 0.95 / 恰好 3 个 run → 升级。
+  写成 `>` 会让刚好达标的经验永远卡在 CANDIDATE，且报告上看不出原因。
+- STALE 是**严格大于** `max_idle_days`：恰好 90 天不清（配置值的字面语义是
+  「超过这个天数」）。
+- 零样本的 Candidate 按**创建时刻**算闲置——它正是 8.2 要清的「僵尸」；因为
+  「没有 last run」就豁免会让建出来没人碰过的候选永远留在库里。
+- 只清 CANDIDATE：VERIFIED / DEGRADED 有各自的失效路径，「很久没用到」不等于
+  「没用」（低频但有效的经验会被闲置清理误杀）。
+
+### 接线位置（本任务只交模块）
+
+`apply_outcome` 是「决策 → 落库」的接缝。**运行流程里谁调用它**由 Task 3.4
+（`mta experience verify` / `revalidate` / `sweep`）落地——plan 的 Task 3.1
+Files 清单只含 verifier/sweeper，不在 `agent/recovery.py` 或 `cli/pipeline.py`
+里改接线。
+
+- 实测：pytest **997 passed**（+48：test_verifier 31 + test_sweeper 17）。

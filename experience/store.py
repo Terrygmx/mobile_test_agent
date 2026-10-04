@@ -67,6 +67,17 @@ class ExperienceStore(Protocol):
 
     def record_success_build(self, experience_id: str, app_build: str) -> None: ...
 
+    def record_screen_fingerprint(self, experience_id: str,
+                                  fingerprint: str) -> None: ...
+
+    def record_state_event(self, experience_id: str, reason: str, *,
+                           run_id: str | None = None,
+                           app_build: str | None = None,
+                           operator: str = "system") -> None: ...
+
+    def has_state_event_since_transition(self, experience_id: str,
+                                         reason: str) -> bool: ...
+
     def get_runs(self, experience_id: str,
                  limit: int | None = None) -> list[ExperienceRun]: ...
 
@@ -347,6 +358,74 @@ class SQLiteExperienceStore:
                     " updated_at=? WHERE experience_id=?",
                     (json.dumps(builds), _now(), experience_id))
             # 集合语义：已存在 → 事务内无写操作，commit 空事务即可
+
+    def record_screen_fingerprint(self, experience_id: str,
+                                  fingerprint: str) -> None:
+        """E8：更新 fingerprint **观测记录**（重验证通过后调用）。
+
+        只改观测列，不动 `status`、不动 runs——E8 明文「不清空或拒绝该
+        Experience」。指纹是**观测**不是判据：判据（`needs_revalidation`）
+        每次由当前观测与它现比，所以这里没有「过期」概念。
+        """
+        with self._write_tx() as conn:
+            row = conn.execute(
+                "SELECT experience_id FROM experiences WHERE experience_id=?",
+                (experience_id,)).fetchone()
+            if row is None:
+                raise LookupError(f"experience {experience_id!r} 不存在")
+            conn.execute(
+                "UPDATE experiences SET last_screen_fingerprint=?,"
+                " updated_at=? WHERE experience_id=?",
+                (fingerprint, _now(), experience_id))
+
+    def record_state_event(self, experience_id: str, reason: str, *,
+                           run_id: str | None = None,
+                           app_build: str | None = None,
+                           operator: str = "system") -> None:
+        """**非跳变**的时间线标记（E8 的 `REVALIDATION_REQUIRED`）。
+
+        为什么 from_status == to_status：schema 的 `to_status` 是 NOT NULL
+        （「跳变必须有终态」），而这类标记本身没有终态——同值表达「此刻仍是
+        这个状态，只是被标记了」，比放宽 NOT NULL 更保守（不改 schema 就
+        不破坏既有的「跳变必有终态」不变量）。
+        """
+        with self._write_tx() as conn:
+            row = conn.execute(
+                "SELECT status FROM experiences WHERE experience_id=?",
+                (experience_id,)).fetchone()
+            if row is None:
+                raise LookupError(f"experience {experience_id!r} 不存在")
+            status = row["status"]
+            conn.execute(
+                "INSERT INTO experience_state_events (experience_id,"
+                " from_status, to_status, reason, run_id, app_build,"
+                " operator, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (experience_id, status, status, reason, run_id, app_build,
+                 operator, _now()))
+
+    def has_state_event_since_transition(self, experience_id: str,
+                                         reason: str) -> bool:
+        """**最近一次跳变之后**是否已有该 reason 的事件（标记幂等用）。
+
+        「跳变」= `from_status IS NULL OR from_status != to_status`（首条事件
+        from 为 NULL）。以最近一次跳变为界，而不是「历史上有没有过」：状态
+        变化之后旧标记就作废了——例如 DEGRADED→VERIFIED 之后又变了指纹，
+        必须能重新标记。
+        """
+        conn = self._connect()
+        try:
+            last_transition = conn.execute(
+                "SELECT MAX(id) FROM experience_state_events"
+                " WHERE experience_id=? AND (from_status IS NULL"
+                " OR from_status != to_status)",
+                (experience_id,)).fetchone()[0] or 0
+            found = conn.execute(
+                "SELECT 1 FROM experience_state_events WHERE experience_id=?"
+                " AND id > ? AND reason=? LIMIT 1",
+                (experience_id, last_transition, reason)).fetchone()
+            return found is not None
+        finally:
+            conn.close()
 
     def update_status(self, experience_id: str,
                       new_status: ExperienceStatus, reason: str,

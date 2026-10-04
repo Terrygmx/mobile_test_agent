@@ -28,6 +28,25 @@ from experience.store import (
     SQLiteExperienceStore,
     record_sample_runs,
 )
+from experience.sweeper import (
+    STALE_REASON,
+    StalenessPolicy,
+    is_stale,
+    sweep_stale_candidates,
+)
+from experience.verifier import (
+    REVALIDATION_REQUIRED,
+    VerificationOutcome,
+    apply_outcome,
+    distinct_run_count,
+    eligible_for_auto_verification,
+    evaluate,
+    mark_revalidation_required,
+    needs_revalidation,
+    revalidate,
+    sliding_window_degrade,
+    success_rate_of,
+)
 
 # review_p2_task12 P3-5：默认库路径**单点定义**——Task 2.2 的 --exp-db
 # 装配直接 import，两处字面量必漂移。
@@ -38,4 +57,10 @@ __all__ = [
     "StateEvent", "VerificationPolicy", "VerificationDecision",
     "migrate", "current_version", "DEFAULT_EXPERIENCE_DB",
     "ExperienceStore", "SQLiteExperienceStore", "record_sample_runs",
+    # Task 3.1：状态机（纯函数）+ 过期清理
+    "VerificationOutcome", "evaluate", "apply_outcome", "revalidate",
+    "mark_revalidation_required", "eligible_for_auto_verification",
+    "sliding_window_degrade", "needs_revalidation", "distinct_run_count",
+    "success_rate_of", "REVALIDATION_REQUIRED",
+    "StalenessPolicy", "is_stale", "sweep_stale_candidates", "STALE_REASON",
 ]
