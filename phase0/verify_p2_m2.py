@@ -41,6 +41,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -137,13 +138,24 @@ def _swift_macro_probe() -> tuple[bool, str]:
 def _llm_latency_probe(timeout: float = 25.0) -> tuple[bool, str]:
     """真实 completion 的延迟探活（**不是** `/models` 的 200）。
 
-    `/models` 秒回 200 只说明网关在，不代表 completion 能在 budget 的 20s
-    超时内返回——网关后面挂的是**推理模型**（输出先走 `reasoning_content`，
-    长推理链），实测撞过「探活四项全绿、G2 连续两次
-    `LLMError: LLM_PROVIDER_ERROR: timed out`」的假绿。这里真发一次最小
-    completion 并计时，把「环境能不能在预算内回话」变成可判读的信号。
+    `/models` 秒回 200 只说明网关在，不代表 completion 能在 budget 的超时内
+    返回——网关后面挂的是**推理模型**（输出先走 `reasoning_content`，长推理
+    链），实测撞过「探活四项全绿、G2 连续两次
+    `LLMError: LLM_PROVIDER_ERROR: timed out`」的假绿。
+
+    ⚠️ **这是下界，不是保证**（review_p2_task24_final P3-6）：探活用
+    `max_tokens=8` 的最小 prompt，而 G2 跑的是完整恢复 prompt（几千 token
+    的 UI 树）——探活绿仍可能 G2 红。G2 侧靠 provider 级重试兜。
+
+    阈值取自 `BudgetConfig.timeout_seconds`（**单一真值源**：budget 默认值一
+    变，这里跟着变，不会悄悄漂）。HTTP 4xx（模型名不存在等）与超时**分开
+    报**：前者是「环境未配」，后者是「环境太慢」，排障含义不同。
     """
-    body = json.dumps({"model": _env().get("LLM_MODEL", "glm-5-3-flash"),
+    from llm.budget import BudgetConfig
+
+    budget_timeout = float(BudgetConfig().timeout_seconds)
+    model = _env().get("LLM_MODEL", "glm-5-3-flash")
+    body = json.dumps({"model": model,
                        "messages": [{"role": "user", "content": "OK"}],
                        "max_tokens": 8}).encode("utf-8")
     req = urllib.request.Request(
@@ -155,12 +167,16 @@ def _llm_latency_probe(timeout: float = 25.0) -> tuple[bool, str]:
     try:
         with opener.open(req, timeout=timeout) as resp:
             resp.read()
-    except Exception as e:  # noqa: BLE001 — 超时/拒连都如实报
+    except urllib.error.HTTPError as e:  # 4xx/5xx：模型名/凭据等配置问题
+        return False, (f"HTTP {e.code}（model={model!r} 不可用或凭据有误）"
+                       f"（{time.monotonic() - t0:.1f}s）")
+    except Exception as e:  # noqa: BLE001 — 超时/拒连
         return False, (f"{type(e).__name__}: {e}"
                        f"（{time.monotonic() - t0:.1f}s）")
     took = time.monotonic() - t0
-    # budget 的 timeout_seconds 默认 20：探活超过它就意味着 G2 会超时
-    return took < 20.0, f"completion {took:.1f}s（budget timeout=20s）"
+    return took < budget_timeout, (
+        f"completion {took:.1f}s < budget timeout {budget_timeout:.0f}s"
+        f"（最小 prompt 的下界，非 G2 完整 prompt 的保证）")
 
 
 def preflight() -> bool:

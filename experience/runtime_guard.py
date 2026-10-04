@@ -115,7 +115,13 @@ def guard_candidate(
                        必须是 Risk 枚举——字符串 "LOW" 会被 fail-closed
                        拦成 RISK_BLOCKED（review P3-1 类型地雷，入口断言）；
       policy_check     10.1 Guard 复检 callable（GuardViolation → 拦；
-                       None = 跳过——执行路径 dispatch 处自会再过 Guard）；
+                       None = 跳过）。⚠️ **不要以为执行路径会兜**：
+                       `StepRunner.run_step` 的 `guard.check` 只对**原步骤的
+                       原元素**跑一次，恢复重发走的 `_dispatch_action` /
+                       `dispatch` 里**没有任何 Guard**（Task 2.4 评审 P3-1
+                       实锤）。两条路径（LLM / Experience）的调用方各自
+                       构造并传入——同一候选不因来路不同而结论不同（E1）。
+                       未登记（解析不到 risk/screen/id）时传 None；
       confidence/min_confidence  LLM 专属（Experience 路径不传）。
     """
     # 1. 当前屏未知 → MISS（4.7：Experience 此刻不适用，不计样本）

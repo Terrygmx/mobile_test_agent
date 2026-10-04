@@ -782,7 +782,22 @@ class SessionPipeline:
     def _write_recovery_row(self, step_row_id: int | None, target_id: str,
                             rec, context: str | None = None) -> None:
         """recoveries 行（kind=机制枚举）+ LLM 恢复建 PENDING review
-        （9.2 末步 / 9.5 流程入口）。动作步与 aux 步共用。"""
+        （9.2 末步 / 9.5 流程入口）。动作步与 aux 步共用。
+
+        **只记「成功的恢复动作」**（review_p2_task24_final P3-4 显性化）：
+        `result="RECOVERED"` / `accepted=True` 是写死的，本函数只在恢复成功
+        的路径被调用，**失败的尝试不进 recoveries 表**。理由：
+        - `recoveries` 的语义是「恢复动作记录 + 9.5 review 的种子来源」
+          （`create_review` 从这里取 rec_id），而 E5 规定**失败尝试不产种子**
+          ——记进来只会让 review 队列多出永远不该 ACCEPT 的行；
+        - 失败尝试的痕迹已经在别处：`experience_runs`（4.7 样本，含
+          guard_reason）+ `steps`（步骤终态与 `recovery` 段）。
+
+        所以「recoveries 里没有失败行」是**有意**，不是缺口。若将来确实要
+        审计「尝试过但失败」的分布，正确做法是给本函数加 `result` 参数
+        （`recoveries.result` 列存在），而不是在这里硬编码撒谎——但那是
+        独立的数据口径变更，需先定档。
+        """
         if self.store is None or not step_row_id:
             return
         kind_map = {"settle_retry": "SETTLE_RETRY", "postcondition":
@@ -834,13 +849,25 @@ class SessionPipeline:
         步骤行也要落：此前这条路径直接把异常抛给外层，steps 表**一行都没有**
         ——trace 上「这一步没跑过」，排障无从下手（与 M5 基线实锤的 aux
         失败不落库同一个缺口，只是入口更靠后）。
+
+        detail 里带 `recovery` 段（与成功路径 `_record_aux_recovered` 同形，
+        review_p2_task24_final P3-3）：只写 `{"error": ...}` 的话，trace 上
+        看得出「失败了」「有一条 FAILURE 样本」，却看不出**试过哪条经验、
+        候选值是什么、Guard 判了什么**——正是这次修订想消掉的那类盲区。
+
+        **不盖 `recovered_kind`**：本步骤终态是 FAILED，而 §10 的分类标签
+        语义是「被哪条机制救回」——盖在失败步骤上会污染报告的恢复分类口径。
+        机制名（`recovery_kind`）是事实（引擎确实试了 Experience），照记。
         """
         resolve_deferred_sample(rec, succeeded=False,
                                 failure_reason="AUX_RERUN_FAILED")
         row = self._record_aux_step(
             lifecycle, idx, step_type, target_id, latency_ms=latency_ms,
             ok=False, failure_type=_map_exception(exc)[1],
-            detail={"error": str(exc)})
+            detail={"error": str(exc),
+                    "recovery_kind": rec.kind,
+                    "recovery_context": "aux_rerun_failed",
+                    "recovery": rec.detail})
         self._write_experience_runs(row, rec)
 
     def _write_experience_runs(self, step_row_id: int | None, rec) -> None:

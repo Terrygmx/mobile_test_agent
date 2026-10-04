@@ -395,9 +395,22 @@ def record_sample_runs(store: ExperienceStore, samples: list[dict], *,
 
     `result == "SUCCESS"` 时同时 `record_success_build`（设计 4.7 末行 /
     E7：validated_builds 只由成功样本追加）。
+
+    **待定样本必须先回填**（review_p2_task24_final P3-2）：aux 命中的样本由
+    引擎产出时 `result=None`（执行结果引擎侧不可观测），要等调用方观测后经
+    `agent.recovery.resolve_deferred_sample` 回填。漏了这一步会一路带到
+    `ExperienceRun` 的 `Literal["SUCCESS","FAILURE"]` 校验才炸，报错指向
+    「result 类型不对」——**看不出是「忘了回填」**。这里前置指名报错，把
+    「契约违反」与「数据脏」分开。
     """
     for s in samples:
         exp_id = s["experience_id"]
+        if s.get("result") is None:
+            raise ValueError(
+                f"deferred sample 未回填（experience_id={exp_id!r}）——"
+                "aux 命中的待定样本（result=None / pending_observation）"
+                "必须先经 agent.recovery.resolve_deferred_sample 回填"
+                "观测结果再落库（review_p2_task24_final P3-2）")
         store.record_run(exp_id, ExperienceRun(
             experience_id=exp_id,
             run_id=s["run_id"],

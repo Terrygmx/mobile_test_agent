@@ -453,9 +453,27 @@ def test_p2_15_aux_rerun_failure_records_failure_sample(tmp_path):
     r = run.results[0]
     assert r.status == "FAIL" and r.failure_type == "ASSERTION_VALUE_MISMATCH"
     steps = trace.conn.execute(
-        "SELECT id, step_type, status FROM steps ORDER BY id").fetchall()
+        "SELECT id, step_type, status, detail_json FROM steps ORDER BY id"
+    ).fetchall()
     assert [s["step_type"] for s in steps] == ["launch_app", "assert"]
     assert steps[-1]["status"] != "RECOVERED", "重跑没过就不是恢复"
+    # P3-3：失败路径也要带 `recovery` 段（与成功路径同形）——只写 error 的话
+    # trace 上看不出「试过哪条经验、候选值是什么、Guard 判了什么」。
+    import json as _json
+    detail = _json.loads(steps[-1]["detail_json"])
+    assert detail["recovery_kind"] == "experience"
+    assert detail["recovery_context"] == "aux_rerun_failed"
+    assert any(s["stage"] == "experience_candidate"
+               for s in detail["recovery"]["stages"]), \
+        "失败路径的 stages 必须能看到候选判定过程"
+    # 但不盖 §10 的分类标签：本步终态是 FAILED，不是「被谁救回」
+    assert "recovered_kind" not in detail, \
+        "recovered_kind 的语义是「被哪条机制救回」——失败步骤上会污染恢复分类"
+    # P3-4（有意口径，钉住）：失败尝试**不进 recoveries 表**
+    # （recoveries = 恢复动作记录 + review 种子来源，E5：失败尝试不产种子；
+    #   失败痕迹在 experience_runs + steps.detail）
+    assert trace.conn.execute(
+        "SELECT COUNT(*) FROM recoveries").fetchone()[0] == 0
     [run_row] = _exp_runs(tmp_path, exp.experience_id)
     assert (run_row["result"], run_row["guard_reason"]) == (
         "FAILURE", "AUX_RERUN_FAILED")

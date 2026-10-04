@@ -611,6 +611,30 @@ def test_record_sample_runs_persists_and_appends_validated_build(store):
         "E7：只有成功样本追加 validated_builds"
 
 
+def test_unfilled_deferred_sample_fails_loud_at_store_boundary(store):
+    """待定样本漏回填 → 落库点**指名报错**，不是 pydantic 类型错。
+
+    aux 命中的样本产出时 `result=None`，必须由调用方经
+    `resolve_deferred_sample` 回填观测结果。漏了这一步原实现会一路带到
+    `ExperienceRun` 的 `Literal` 校验才炸，报错只说「result 不是
+    SUCCESS/FAILURE」——看不出是「忘了回填」（review_p2_task24_final P3-2）。
+    """
+    exp = _seed(store)
+    ctx, _ = _ctx(action=None, redispatch=None, find_all=lambda loc: [El()])
+    r = _engine(store).recover(ctx)
+    [pending] = r.detail["experience_runs"]
+    assert pending["result"] is None, "前提：aux 产出的是待定样本"
+
+    with pytest.raises(ValueError, match="deferred sample 未回填"):
+        record_sample_runs(store, [pending], step_id=1)
+    assert store.get_runs(exp.experience_id) == [], "报错后不留半行"
+
+    # 回填后同一条 payload 正常落库
+    resolve_deferred_sample(r, succeeded=True)
+    assert record_sample_runs(store, [pending], step_id=1) == 1
+    assert store.get_runs(exp.experience_id)[0].result == "SUCCESS"
+
+
 def test_engine_sample_payload_round_trips_through_store(store):
     """端到端形状检查：引擎产出的 payload 能原样被 record_sample_runs 消费。
 

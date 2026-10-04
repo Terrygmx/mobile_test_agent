@@ -535,3 +535,86 @@ E7/E3/主键语义/结果语义/`no_store` vs `miss`/P1 回归/无库污染均�
 全 PASS、elapsed 54.1s、G1 `13 passed`。全量 pytest **925 passed**
 （919 + 6：`resolve_deferred_sample` 3 项 + 10.1 复检 1 项 + 屏识别回落钉子
 1 项 + aux 重跑失败落库 1 项）。
+
+---
+
+## Task 2.4 终审修订记录（review_p2_task24_final 收口，2026-10-04）
+
+终审（`review/review_p2_task24_final_2026-10-04.md`）结论：**通过（可收口
+Task 2.4 / M2）**，前置评审的 2×P2 + 6×P3 处置全部核销，遗留 0×P1/P2 + 6×P3。
+按终审「建议动作（优先级序）」逐条处置：
+
+### 1. 随手修（终审 P3-3 / P3-5）
+
+- **P3-3 aux 重跑失败的 steps.detail 丢了 `recovery` 段**（成功路径有）：
+  只写 `{"error": ...}` 时，trace 上看得出「这一步失败」+「有一条 FAILURE
+  样本」，却看不出**试过哪条经验、候选值是什么、Guard 判了什么**——正是本次
+  修订想消掉的那类盲区。修法：`_aux_rerun_failed` 把 `recovery_kind` /
+  `recovery_context="aux_rerun_failed"` / `recovery`（含完整 stages）并进
+  step detail。
+  **不盖 `recovered_kind`**：该标签的语义是「被哪条机制救回」，而本步终态是
+  FAILED——盖上去会污染报告的恢复分类口径。机制名（`recovery_kind`）是事实
+  （引擎确实试了 Experience），照记。
+- **P3-5 共享 `guard_candidate` 的 docstring 仍留着被证伪的那句话**：前置评审
+  P3-1 要消灭的「执行路径 dispatch 处自会再过 Guard」在三处表述里只剩这一处
+  （`inspect.getdoc` 取证）。已改成「⚠️ 不要以为执行路径会兜：
+  `StepRunner.run_step` 的 `guard.check` 只对**原步骤的原元素**跑一次，恢复
+  重发走的 `_dispatch_action` / `dispatch` 里没有任何 Guard」——三处表述一致。
+
+### 2. 立项时一并处理（终审 P3-1 / P3-2）
+
+- **P3-2 待定样本契约无防护 → 现在已加**：`experience.store.record_sample_runs`
+  加前置检查，`result is None` 时**指名报错**
+  （「deferred sample 未回填——先调 `agent.recovery.resolve_deferred_sample`」）。
+  原实现漏回填会一路带到 `ExperienceRun` 的 `Literal["SUCCESS","FAILURE"]`
+  校验才炸，报错指向「result 类型不对」，**看不出是「忘了回填」**。新增测试
+  `test_unfilled_deferred_sample_fails_loud_at_store_boundary` 钉住
+  「报错 + 不留半行 + 回填后正常落库」。
+- **P3-1 10.1 复检的「终态 failure_type」不对称 → 本次不改（按终审建议）**：
+  Experience 路径被 10.1 拦后对外 `failure_type` 仍是原症状
+  （`ELEMENT_NOT_FOUND`），LLM 路径同候选给 `SECURITY_BLOCKED`
+  （经 `GUARD_REASON_TO_LLM_FAILURE`）——映射表只有 LLM 侧一个消费点。
+  触发条件有限（需「无 LLM 回落」才显形：`--no-llm` / 无 llm / 预算耗尽 /
+  熔断），且**当前生产没把 guard 接进引擎 → 现在不可达**。
+  **不修的理由（采纳终审）**：改它动的是 P1 的 `miss` 语义 →
+  与「把 guard 接进引擎」同批处理（那时才显形），本次不越界。
+
+### 3. 常量单点（终审 P3-6）
+
+- **探活阈值与规模两处硬编码**：`_llm_latency_probe` 的判据阈值改为引用
+  `llm.budget.BudgetConfig().timeout_seconds`（**单一真值源**，budget 默认值
+  一变这里跟着变，不再悄悄漂）；docstring 与 detail 文本都写明
+  **「这是最小 prompt 的下界，不是 G2 完整 prompt 的保证」**——探活用
+  `max_tokens=8`，而 G2 跑的是几千 token 的 UI 树恢复 prompt，探活天然乐观
+  （G2 侧靠 provider 级重试兜）。
+- 顺带把 **HTTP 4xx 与超时分开报**（终审 §4 存疑项 2）：`HTTPError` →
+  「HTTP 4xx（model 不可用或凭据有误）」= 环境未配；其余异常 → 超时/拒连
+  = 环境太慢。两者对排障的含义不同，混成一个「探活失败」会误导。
+
+### 4. 有意口径显性化（终审 P3-4）
+
+- **`recoveries` 表表达不了「失败的经验尝试」**：`_write_recovery_row` 写死
+  `result="RECOVERED"` / `accepted=True`，只有成功路径调用它。
+  已在 docstring **明写这是有意**：`recoveries` 的语义是「恢复动作记录 +
+  9.5 review 的种子来源」（`create_review` 从这里取 rec_id），而 E5 规定
+  **失败尝试不产种子**——记进来只会让 review 队列多出永远不该 ACCEPT 的行；
+  失败尝试的痕迹已在 `experience_runs`（4.7 样本 + guard_reason）与 `steps`
+  （终态 + `recovery` 段）。若将来要审计「尝试过但失败」的分布，正确做法是
+  给该函数加 `result` 参数（列存在），而不是硬编码撒谎——但那是独立的数据
+  口径变更，需先定档。矩阵测试加断言钉住（失败路径 `recoveries` 0 行）。
+
+### 5. 里程碑与 M3 起步前置
+
+- M2 收口：tag `checkpoint-p2-m2`。终审建议「M3 起步前先清 plan 里的延后项
+  清单」，三条已被显性记录且各有钉子测试，**别让它们随任务滚动**：
+  1. `SCREEN_UNKNOWN` 收紧（与「P1 行为保留」的边界）；
+  2. `validated_builds` 贯通真实 build id（现恒为 `["local"]`）；
+  3. `EXPERIENCE_EVENT_TYPES` 全接（§11.1 的 12 事件现只接 1 个）；
+  4. 另加终审 P3-1：10.1 拦后终态 `failure_type` 的对称化（与「把 guard 接
+     进引擎」同批）。
+
+### 复跑证据
+
+- 全量 pytest **926 passed**（925 + 1：`unfilled_deferred_sample` 那条）。
+- Gate M2 真机复跑全绿：`verdict=PASS`、`device_half=PASS`、12 项判据全 PASS、
+  elapsed 54.0s、G1 `13 passed`；新探活 detail 已带下界说明。
