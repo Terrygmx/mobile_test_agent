@@ -83,3 +83,24 @@
 （RECOVERED）→ PENDING review #1 → accept → **seed_ready=True**
 （app_id/screen/target 三段齐全，screen_target_pairs 首条）。审计：
 runs=102 / recoveries=50 / reviews=1 / seed_ready=1（原 0）。
+
+---
+
+## Task 1.2 完成记录（P2-02 Experience 模型 + 库迁移，2026-10-03）
+
+- **交付**：experience/models.py（Experience/ExperienceStatus/CandidateSeed/
+  ExperienceRun/StateEvent/VerificationPolicy/VerificationDecision，
+  strategy 复用 repository.loader.LocatorStrategy——单一真值源）+
+  experience/migrations/002_experience_schema.sql（experiences/
+  experience_runs/experience_state_events/promotion_proposals 四表 +
+  idx_experiences_lookup 索引）+ experience/schema_migrations.py（泛化
+  迁移执行器：目录 + 版本链，graph 侧 M5 零改动复用）。
+- **关键决策落实**：库文件独立（默认 out/experience.db，trace 流水库 vs
+  experience 可变状态库，E9 单写者按库划分）；graph 三表不进本链（M5
+  落地、schema 归 graph/migrations 自己的版本链）。
+- **模型侧闸门**：CandidateSeed 缺 seed 三件套任一 → ValidationError
+  （E5；42 条悬空 P0 数据建不出来）；seed_step_id<=0 拒绝（P0 写 0 的
+  教训）；validated_builds 重复拒绝（E7 集合语义）；promoted=True 必须
+  带 promoted_commit 且与 status 无联动（9.4 两条时间线）；CHECK 约束
+  DB 层兜底（status 四值/origin 单值/result 两值）。
+- 实测：pytest 822 passed（+26：models 19 + schema 7）。
