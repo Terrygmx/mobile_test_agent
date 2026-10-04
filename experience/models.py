@@ -102,6 +102,14 @@ class Experience(_Strict):
             raise ValueError(
                 f"sample_count ({self.sample_count}) != success"
                 f" ({self.success_count}) + failure ({self.failure_count})")
+        # review_p2_task12 P3-1：旁路构造的 success_rate 会被 Store 的
+        # model_dump 原样落库，与计数列矛盾——构造期就锁死一致性。
+        expected_rate = (self.success_count / self.sample_count
+                         if self.sample_count else 0.0)
+        if abs(self.success_rate - expected_rate) > 1e-9:
+            raise ValueError(
+                f"success_rate ({self.success_rate}) inconsistent with"
+                f" counts ({self.success_count}/{self.sample_count})")
         if self.promoted and not self.promoted_commit:
             # 9.4/9.5：Promotion 必须带 git sha（9.4 节「记录 promoted_commit」）
             raise ValueError("promoted=True requires promoted_commit")
@@ -160,6 +168,13 @@ class CandidateSeed(_Strict):
             # P0 遗留写入 step_id=0 的教训（审计 dangling=42 的直接成因）
             raise ValueError(
                 f"seed_step_id must be a real steps.id, got {self.seed_step_id}")
+        # review_p2_task12 P3-2：review_id 与 seed_recovery_review_id 语义
+        # 恒同指（冗余是为 Store 关联方便）——不一致即构造错误，M4 冗余
+        # 列「对不上」的坑在模型层堵死。
+        if self.review_id != self.seed_recovery_review_id:
+            raise ValueError(
+                f"review_id ({self.review_id}) !="
+                f" seed_recovery_review_id ({self.seed_recovery_review_id})")
         return self
 
 

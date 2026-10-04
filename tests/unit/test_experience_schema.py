@@ -64,10 +64,11 @@ def test_migrate_records_version_chain(conn):
     rows = [r[0] for r in conn.execute(
         "SELECT version FROM schema_migrations ORDER BY rowid")]
     # 版本链记**脚本名**（幂等判定的基准是「哪个脚本跑过」）；
-    # current_version 返回链尾。
+    # current_version 返回链尾。汇总常量从链尾**派生**（P3-3：加
+    # 003_*.sql 忘 bump 常量也不会撒谎）。
     assert rows == ["002_experience_schema"]
     assert current_version(conn) == "002_experience_schema"
-    assert EXPERIENCE_SCHEMA_VERSION == "p2-002"  # 汇总版本串仍在
+    assert EXPERIENCE_SCHEMA_VERSION == "002_experience_schema"
 
 
 def test_current_version_empty_db(conn):
@@ -103,6 +104,17 @@ def test_graph_tables_not_in_this_chain(conn):
     tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert not (GRAPH_TABLES & tables)
+
+
+def test_garbage_version_row_fails_loud(conn):
+    """P3-5：schema_migrations 里手工插的垃圾行 → 幂等判定静默失真，
+    必须 fail-loud 而不是跳过。"""
+    migrate(conn)
+    conn.execute("INSERT INTO schema_migrations (version, applied_at)"
+                 " VALUES ('garbage-no-seq', '2026-10-04T00:00:00Z')")
+    conn.commit()
+    with pytest.raises(RuntimeError, match="无法解析的版本行"):
+        migrate(conn)
 
 
 def test_older_build_opening_newer_db_fails_loud(tmp_path):

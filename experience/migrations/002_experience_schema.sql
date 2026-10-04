@@ -5,12 +5,18 @@
 -- （E9）最清晰。graph 三表（screen_nodes/screen_transitions/graph_diffs）
 -- 拆到 M5 落地、进 graph/migrations 自己的版本链（plan 关键决策第 2 条）。
 --
--- 与设计 11 节 SQL 的差异（有意为之，实施定档）：
---   * experiences.strategy_json 存 LocatorStrategy 单对象 JSON（4.2 的
---     strategy 是单条策略不是列表——Candidate 种子来自一次恢复的一条候选）；
---   * experience_runs.screen_fingerprint（设计 screen_fingerprint 同名）；
---   * experience_runs 增加 result CHECK 约束（只有 SUCCESS/FAILURE 两值，
---     4.7 表口径由写入侧执行，DB 层兜底）。
+-- 与设计 11 节 SQL 的差异清单（有意为之，实施定档；review_p2_task12
+-- P3-4：差异要么列全，其余即「与设计一致」）：
+--   1. experiences.strategy_json 存 LocatorStrategy 单对象 JSON（4.2 的
+--      strategy 是单条策略不是列表——Candidate 种子来自一次恢复的一条候选）；
+--   2. CHECK 加固（设计 SQL 无）：experiences.origin 单值、experiences.status
+--      四值、experiences.seed_step_id > 0（P0 写 0 的教训落 DB 层）、
+--      experiences.promoted ∈ {0,1}、experience_runs.result ∈ {SUCCESS,
+--      FAILURE}（4.7 表口径由写入侧执行，DB 层兜底）、
+--      promotion_proposals.status 三值 + DEFAULT 'PENDING'；
+--   3. experience_state_events.to_status NOT NULL 化（跳变必须有终态）；
+--   4. experience_runs.screen_fingerprint 与设计同名同型（无差异，列此处
+--      以免误读为遗漏）。
 
 CREATE TABLE IF NOT EXISTS experiences (
     experience_id TEXT PRIMARY KEY,

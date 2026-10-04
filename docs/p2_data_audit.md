@@ -104,3 +104,22 @@ runs=102 / recoveries=50 / reviews=1 / seed_ready=1（原 0）。
   带 promoted_commit 且与 status 无联动（9.4 两条时间线）；CHECK 约束
   DB 层兜底（status 四值/origin 单值/result 两值）。
 - 实测：pytest 822 passed（+26：models 19 + schema 7）。
+
+---
+
+## Task 1.2 评审修订记录（review_p2_task12 收口，2026-10-04）
+
+评审结论「通过（可收口 Task 1.2 / M1，tag 有效）」，5×P3 全部顺手清掉：
+
+- **P3-1**：success_rate 构造期一致性校验（旁路 0.9 曾可建出并被 Store
+  原样落库——与计数列矛盾；现在构造期 + record_sample 重算两处锁死）。
+- **P3-2**：CandidateSeed.review_id ↔ seed_recovery_review_id 交叉校验
+  （冗余字段恒同指，M4 冗余列「对不上」的坑在模型层堵死）。
+- **P3-3**：EXPERIENCE_SCHEMA_VERSION 从链尾脚本名**派生**（加 003_*.sql
+  忘 bump 常量也不会让 migrate() 返回值撒谎）；垃圾版本行 fail-loud
+  （_applied_seq 此前静默跳过）。
+- **P3-4**：002 SQL 与设计 11 节的差异清单补全（CHECK 加固四处 + DEFAULT
+  + to_status NOT NULL + 「同名项」声明）。
+- **P3-5**：DEFAULT_EXPERIENCE_DB 单点常量（experience/__init__ 导出，
+  Task 2.2 的 --exp-db 装配直接 import，杜绝两处字面量漂移）。
+- 实测：pytest 826 passed（+4）。

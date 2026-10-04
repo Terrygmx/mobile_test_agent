@@ -36,7 +36,7 @@ def _strategy(**kw) -> LocatorStrategy:
 
 def _seed(**kw) -> CandidateSeed:
     d = dict(
-        review_id=1, recovery_id=1,
+        review_id=7, recovery_id=1,
         seed_run_id="run_a", seed_step_id=12, seed_recovery_review_id=7,
         app_id="com.phaset0.logindemo", screen_id="LoginView",
         target_id="username_field", strategy=_strategy(),
@@ -78,6 +78,26 @@ def test_seed_zero_step_id_rejected():
     """P0 遗留写 step_id=0 的教训（dangling=42 的直接成因）——模型层拒绝。"""
     with pytest.raises(ValidationError, match="seed_step_id"):
         _seed(seed_step_id=0)
+
+
+def test_seed_review_id_mismatch_rejected():
+    """P3-2：review_id 与 seed_recovery_review_id 恒同指——不一致即构造
+    错误（M4 冗余列「对不上」的坑在模型层堵死）。"""
+    with pytest.raises(ValidationError, match="review_id"):
+        _seed(review_id=99)   # fixture 默认 seed_recovery_review_id=7
+
+
+def test_experience_success_rate_bypass_rejected():
+    """P3-1：旁路构造的 success_rate 会被 Store 落库，与计数矛盾——
+    构造期锁死一致性。"""
+    with pytest.raises(ValidationError, match="success_rate"):
+        _exp(success_rate=0.9)   # 全零计数下 rate 必为 0.0
+
+
+def test_experience_success_rate_consistent_ok():
+    e = _exp(sample_count=4, success_count=3, failure_count=1,
+             success_rate=0.75)
+    assert e.success_rate == 0.75
 
 
 def test_seed_extra_field_rejected():

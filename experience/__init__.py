@@ -11,6 +11,8 @@
   - `promoted` 与 `status` 是独立字段（9.4 两条时间线）——promotion 不随
     DEGRADED 自动撤销，撤销是人工 git revert，不是状态机行为。
 """
+from pathlib import Path
+
 from experience.models import (
     CandidateSeed,
     Experience,
@@ -22,8 +24,12 @@ from experience.models import (
 )
 from experience.schema_migrations import migrate, current_version
 
+# review_p2_task12 P3-5：默认库路径**单点定义**——Task 2.2 的 --exp-db
+# 装配直接 import，两处字面量必漂移。
+DEFAULT_EXPERIENCE_DB = Path("out/experience.db")
+
 __all__ = [
     "Experience", "ExperienceStatus", "CandidateSeed", "ExperienceRun",
     "StateEvent", "VerificationPolicy", "VerificationDecision",
-    "migrate", "current_version",
+    "migrate", "current_version", "DEFAULT_EXPERIENCE_DB",
 ]

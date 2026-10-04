@@ -17,14 +17,13 @@ import time
 from importlib import resources
 from pathlib import Path
 
-__all__ = ["migrate", "current_version", "EXPERIENCE_SCHEMA_VERSION"]
-
-EXPERIENCE_SCHEMA_VERSION = "p2-002"
-
 # 迁移脚本目录（打包内相对本模块；脚本名 <version>_<name>.sql 排序即应用序）
 _MIGRATIONS_PKG = "experience.migrations"
 
 _VERSION_RE = re.compile(r"^(\d+)_")
+
+
+__all__ = ["migrate", "current_version", "EXPERIENCE_SCHEMA_VERSION"]
 
 
 def _now() -> str:
@@ -45,6 +44,16 @@ def _available_migrations() -> list[tuple[int, str]]:
         seq = int(_VERSION_RE.match(name).group(1))
         out.append((seq, name))
     return sorted(out)
+def _latest_known_version() -> str:
+    """汇总版本串 = 最新已知脚本的**脚本名**（review_p2_task12 P3-3：
+    从链尾派生，加 003_*.sql 忘改常量也不会让 migrate() 返回值撒谎）。"""
+    known = _available_migrations()
+    if not known:
+        raise RuntimeError("no migration scripts found")
+    return known[-1][1].removesuffix(".sql")
+
+
+EXPERIENCE_SCHEMA_VERSION = _latest_known_version()
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -73,8 +82,11 @@ def _applied_seq(conn: sqlite3.Connection) -> set[int]:
     out = set()
     for (v,) in rows:
         m = _VERSION_RE.match(v)
-        if m:
-            out.add(int(m.group(1)))
+        if not m:
+            # fail-loud：手工插的垃圾行会让幂等判定静默失真——直接拒绝
+            raise RuntimeError(
+                f"schema_migrations 有无法解析的版本行: {v!r}")
+        out.add(int(m.group(1)))
     return out
 
 
