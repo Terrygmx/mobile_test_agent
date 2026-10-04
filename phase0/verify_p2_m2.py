@@ -134,6 +134,35 @@ def _swift_macro_probe() -> tuple[bool, str]:
     return False, f"{kind}：{blob.strip().splitlines()[-1][:200]}"
 
 
+def _llm_latency_probe(timeout: float = 25.0) -> tuple[bool, str]:
+    """真实 completion 的延迟探活（**不是** `/models` 的 200）。
+
+    `/models` 秒回 200 只说明网关在，不代表 completion 能在 budget 的 20s
+    超时内返回——网关后面挂的是**推理模型**（输出先走 `reasoning_content`，
+    长推理链），实测撞过「探活四项全绿、G2 连续两次
+    `LLMError: LLM_PROVIDER_ERROR: timed out`」的假绿。这里真发一次最小
+    completion 并计时，把「环境能不能在预算内回话」变成可判读的信号。
+    """
+    body = json.dumps({"model": _env().get("LLM_MODEL", "glm-5-3-flash"),
+                       "messages": [{"role": "user", "content": "OK"}],
+                       "max_tokens": 8}).encode("utf-8")
+    req = urllib.request.Request(
+        _env()["LLM_BASE_URL"].rstrip("/") + "/chat/completions", data=body,
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {_env().get('LLM_API_KEY', '')}"})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    t0 = time.monotonic()
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            resp.read()
+    except Exception as e:  # noqa: BLE001 — 超时/拒连都如实报
+        return False, (f"{type(e).__name__}: {e}"
+                       f"（{time.monotonic() - t0:.1f}s）")
+    took = time.monotonic() - t0
+    # budget 的 timeout_seconds 默认 20：探活超过它就意味着 G2 会超时
+    return took < 20.0, f"completion {took:.1f}s（budget timeout=20s）"
+
+
 def preflight() -> bool:
     ok = True
     r = sh("xcrun", "simctl", "list", "devices", "booted")
@@ -145,6 +174,7 @@ def preflight() -> bool:
     base = _env()["LLM_BASE_URL"].rstrip("/")
     ok &= check("PF_llm_gateway", _probe(f"{base}/models", 5),
                 f"LLM_BASE_URL={_env()['LLM_BASE_URL']}")
+    ok &= check("PF_llm_completion_latency", *_llm_latency_probe())
     macro_ok, macro_detail = _swift_macro_probe()
     ok &= check("PF_swift_macro_toolchain", macro_ok, macro_detail)
     return ok
@@ -434,7 +464,10 @@ def g2_first_run(tmp: Path, suites: Path, gen_root: Path, overrides: Path,
     db.unlink(missing_ok=True)
     f: dict = {}
     r = None
-    for attempt in range(1, 3):
+    # 4 次：网关后面是推理模型，单次 completion 偶发越过 budget 的 20s
+    # （LLM_PROVIDER_ERROR: timed out）。只对 provider 级错误重试——校验链
+    # 拒绝是确定性语义，重试只会掩盖真问题。
+    for attempt in range(1, 5):
         r = mta_run(db, suites, gen_root, overrides, exp_db)
         print(f"  G2 attempt {attempt} stdout tail:",
               (r.stdout.strip().splitlines() or ["<empty>"])[-3:])

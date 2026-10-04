@@ -197,10 +197,21 @@ def experience_locator(exp: "Experience") -> list[dict]:
 
 
 def experience_runtime_guard(exp: "Experience", ctx: RuntimeContext,
-                             executor) -> GuardResult:
+                             executor,
+                             policy_check: Callable[[], None] | None = None
+                             ) -> GuardResult:
     """设计 5 节入口：Experience 的运行时守卫（Task 2.4 的
-    try_experiences 逐候选消费本函数）。policy_check 不在此传——EXECUTE
-    后的动作执行走正常 dispatch，其处自会过 10.1 Guard（单点裁决）。
+    try_experiences 逐候选消费本函数）。
+
+    `policy_check`（10.1 Guard 复检）由调用方在**候选策略解析到登记元素**
+    后传入，与 LLM 路径同一形态（`agent/recovery._llm_stage` 的
+    `_policy_check`）。**不要以为执行端会兜**：`StepRunner.run_step` 的
+    `guard.check` 只对**原步骤的原元素**跑一次，恢复重发走的
+    `_dispatch_action` / `dispatch` 里没有任何 Guard（Task 2.4 评审 P3-1
+    实锤）。所以不传 = `blocked_targets` 命中的候选可以经 Experience 路径
+    执行、而同样的候选经 LLM 路径会被拦——同一候选因来路不同而结论不同。
+    候选解析不到登记元素时传 None（与 LLM 路径同款 fail-open：10.1 的三条
+    规则都依赖登记的 risk/screen/id，无登记就无从判定）。
 
     `executor` 只需提供 `find_all(Locator) -> list`（数量观测端；生产
     `Executor.find_all` / 引擎的 ctx 注入适配器都满足该形态）。
@@ -211,6 +222,7 @@ def experience_runtime_guard(exp: "Experience", ctx: RuntimeContext,
         find=lambda: executor.find_all(experience_locator(exp)),
         expected_type=ctx.expected_type,
         effective_risk=ctx.effective_risk,
+        policy_check=policy_check,
     )
 
 

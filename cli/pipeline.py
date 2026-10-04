@@ -23,11 +23,12 @@ from pathlib import Path
 
 import yaml
 
+from agent.recovery import resolve_deferred_sample
 from runner.lifecycle import Lifecycle
 from runner.result import RunResult, TestcaseResult, recovered_kind
-from source.screen import current_screen
 from runner.runner import RunStepContext, StepOutcome, StepRunner
 from session.device_session import InfraError
+from source.screen import current_screen
 from testcase.schema import ActionStep, AssertionStep, TestCase, WaitSpec, WaitStep
 
 __all__ = ["SessionPipeline", "PipelineDeps", "make_postcondition_checker"]
@@ -357,7 +358,15 @@ class SessionPipeline:
                             self._recovered_locators[
                                 self._ref_key(step.wait_for.target)] = \
                                 [dict(rec.strategy)]
-                            wait_engine.wait_for(step.wait_for)
+                            try:
+                                wait_engine.wait_for(step.wait_for)
+                            except Exception as e2:  # noqa: BLE001
+                                self._aux_rerun_failed(
+                                    lifecycle, idx, "wait_for",
+                                    _target_label(step.wait_for.target), e2,
+                                    rec, int((time.time() - t1) * 1000))
+                                raise
+                            resolve_deferred_sample(rec, succeeded=True)
                             recovered_labels.append(self._record_aux_recovered(
                                 lifecycle, idx, "wait_for",
                                 _target_label(step.wait_for.target),
@@ -400,9 +409,23 @@ class SessionPipeline:
                             self._recovered_locators[
                                 self._ref_key(step.assertion.target)] = \
                                 [dict(rec.strategy)]
-                            result = assertion_engine.check(step.assertion)
+                            try:
+                                result = assertion_engine.check(step.assertion)
+                            except Exception as e2:  # noqa: BLE001
+                                self._aux_rerun_failed(
+                                    lifecycle, idx, "assert",
+                                    _target_label(step.assertion.target), e2,
+                                    rec, int((time.time() - t1) * 1000))
+                                raise
                             if not result.passed:
-                                raise  # 覆盖重验仍不过 → 原异常语义 FAIL
+                                # 覆盖重验仍不过 → 原异常语义 FAIL（保留既有
+                                # 防御分支；`check` 实际以异常表达不过）
+                                self._aux_rerun_failed(
+                                    lifecycle, idx, "assert",
+                                    _target_label(step.assertion.target), e,
+                                    rec, int((time.time() - t1) * 1000))
+                                raise
+                            resolve_deferred_sample(rec, succeeded=True)
                             recovered_labels.append(self._record_aux_recovered(
                                 lifecycle, idx, "assert",
                                 _target_label(step.assertion.target),
@@ -796,6 +819,29 @@ class SessionPipeline:
         self._write_recovery_row(step_row_id, target_id, rec, context)
         self._write_experience_runs(step_row_id, rec)
         return label
+
+    def _aux_rerun_failed(self, lifecycle, idx: int, step_type: str,
+                          target_id: str, exc, rec,
+                          latency_ms: int) -> None:
+        """aux 覆盖定位后**重跑仍失败**：回填 4.7 失败样本 + 落步骤行。
+
+        为什么单列一个方法：重跑是**调用方**做的事，所以「候选到底成没成」
+        只有调用方知道。引擎产出待定样本（`result=None`），这里把观测到的
+        失败回填成 FAILURE 再落库——不写这一步，aux 命中就永远只记成功、
+        不记失败，失败率被系统性低估（4.7 的单点纪律见
+        `agent.recovery.resolve_deferred_sample`）。
+
+        步骤行也要落：此前这条路径直接把异常抛给外层，steps 表**一行都没有**
+        ——trace 上「这一步没跑过」，排障无从下手（与 M5 基线实锤的 aux
+        失败不落库同一个缺口，只是入口更靠后）。
+        """
+        resolve_deferred_sample(rec, succeeded=False,
+                                failure_reason="AUX_RERUN_FAILED")
+        row = self._record_aux_step(
+            lifecycle, idx, step_type, target_id, latency_ms=latency_ms,
+            ok=False, failure_type=_map_exception(exc)[1],
+            detail={"error": str(exc)})
+        self._write_experience_runs(row, rec)
 
     def _write_experience_runs(self, step_row_id: int | None, rec) -> None:
         """4.7 样本落库（设计 5.1 的 record_run_if_needed / record_execution_result）。

@@ -427,18 +427,18 @@ Gate M2 的集成载体——P1 的 `EmptyExperienceStore` 占位到此退役，
 
 ### Gate M2 真机验证（`phase0/verify_p2_m2.py`，2026-10-04 实跑全绿）
 
-产物：`out/p2_m2_gate/summary.json`（verdict=PASS，device_half=PASS，
-elapsed 71.6s）。**判据逐条可机械复核**（R13-3 的教训：只留文字、无产物
-= 事后无法复核）：
+产物：`out/p2_m2_gate/summary.json`（verdict=PASS，device_half=PASS）。
+判据逐条可机械复核（R13-3 的教训：只留文字、无产物 = 事后无法复核）。
+下表数值为**收口后最终一次**实跑（elapsed 54.1s，G1 13 passed）：
 
 | 项 | 判据 | 实测 |
 |---|---|---|
-| PF ×4 | 模拟器 booted / Appium 200 / LLM 网关 200 / SwiftUI 宏工具链可用 | 全 PASS |
-| G1 | P2 矩阵 pytest 全绿 | `12 passed` |
+| PF ×5 | 模拟器 booted / Appium 200 / LLM 网关 200 / **LLM completion 延迟** / SwiftUI 宏工具链可用 | 全 PASS（completion 1.2s < budget timeout 20s） |
+| G1 | P2 矩阵 pytest 全绿 | `13 passed` |
 | G0 | 基线重扫描 + 真实改名重编译安装 + 重扫描登记新 id | PASS |
-| G2 | 第一次 run：`RECOVERED_LLM` / exit 5 / recoveries kind=LLM / PENDING review | `run_44ca6e6a`，review #1 |
-| G3 | 人工 ACCEPT → Candidate（E5 种子） | `exp_c74593a6c746` CANDIDATE `(com.phaset0.logindemo, LoginView, username_field)` strategy=`user_field` |
-| G4 | 第二次 run：`RECOVERED_EXPERIENCE` / exit 5 / **LLM calls = 0** | `run_d624560b`，`llm_calls=0`，LLM 行 0 条 |
+| G2 | 第一次 run：`RECOVERED_LLM` / exit 5 / recoveries kind=LLM / PENDING review | `run_bd49c9fb`…（首跑样本 `run_44ca6e6a`，review #1） |
+| G3 | 人工 ACCEPT → Candidate（E5 种子） | `exp_ba4305c523f6` CANDIDATE `(com.phaset0.logindemo, LoginView, username_field)` strategy=`user_field` |
+| G4 | 第二次 run：`RECOVERED_EXPERIENCE` / exit 5 / **LLM calls = 0** | `run_31c07156`，`llm_calls=0`，LLM 行 0 条 |
 | G5 | 4.7 记账：experience_runs 1 行 SUCCESS / step_id=真 steps.id / validated_builds | `step_id=3`（= 该 run 的 RECOVERED 步 id）、`run_id` 与 runs 一致、`sample_count=success_count=1`、`validated_builds=['local']` |
 | G6 | 空库 + `--no-llm` 同场景仍 FAIL / exit 1（P1 行为保留） | exit 1，`llm_calls=0`，stages 见 `miss` + `llm: disabled` |
 
@@ -460,5 +460,78 @@ elapsed 71.6s）。**判据逐条可机械复核**（R13-3 的教训：只留文
 - `--basetemp` 必须指到工作区内（受限环境拦系统临时目录写入 → 200+ 个
   `PermissionError: EEXIST` 假失败）。
 
-- 实测：pytest **919 passed**（+36：`test_recovery_experience.py` 24 项 +
-  `test_p2_matrix_m2.py` 12 项）。
+- 实测：pytest **919 collected**（+38，父提交 `48a1a11` 为 **881**）：
+  `test_recovery_experience.py` 24 项 + `test_p2_matrix_m2.py` 12 项 +
+  `test_recovery_policy.py` 2 项。**订正**：本记录初稿写「+36 / 父 883」，
+  经 `git worktree` 独立计数为 +38 / 父 881（Task 2.4 评审 P3-6）。
+
+---
+
+## Task 2.4 评审修订记录（review_p2_task24 收口，2026-10-04）
+
+两段独立 review（spec 合规 → 代码质量，探针实测）结论：**有条件通过**——
+主循环顺序、E1 共享 Guard、E11 失败样本落库（含作者自述修复的两处真 bug）、
+E7/E3/主键语义/结果语义/`no_store` vs `miss`/P1 回归/无库污染均经独立复现
+成立；遗留 2×P2 + 6×P3。完整报告：`review/review_p2_task24_2026-10-04.md`。
+
+### 已修（收口提交）
+
+- **P2-1 aux 命中永不落样本**（最实质的一条，直接削弱 P2 的「知识积累」
+  目标）：aux（wait/assert）的执行结果引擎侧不可观测，但**调用方能观测**
+  ——它在覆盖定位后重跑了一次断言/等待。原实现标 `not_dispatched` 后干脆
+  不写样本，后果是**只经 aux 命中的 Candidate `sample_count` 恒为 0**，永远
+  到不了 4.5 的 `min_samples`、永不能 VERIFIED，报告里还会读成「这条经验
+  从未被使用」。修法：引擎产出 `result=None` + `pending_observation` 的
+  **待定**样本，由调用方观测后经 `agent.recovery.resolve_deferred_sample()`
+  回填——**翻译留在引擎模块（4.7 单点），调用方只说「成没成」**；重跑失败
+  回填 FAILURE（`guard_reason=AUX_RERUN_FAILED`）并补落 steps 行（此前这条
+  路径连 steps 行都没有，trace 上「这一步没跑过」）。
+- **P3-1 10.1 复检的不对称**：`experience_runtime_guard` 原注释谎称
+  「EXECUTE 后走正常 dispatch、其处自会过 10.1 Guard」——实测
+  `StepRunner._dispatch_action` **不含任何 `guard.check`**，那个兜底不存在。
+  已改正注释，并让 Experience 路径经 `RecoveryEngine._policy_check_for()`
+  传入 `policy_check`（候选解析到登记元素后用**登记的** risk/screen/id 过
+  Guard），与 LLM 路径同源。**更深一层**：生产 `cli/main.py` 装配
+  `RecoveryEngine` 时**没传 `guard`**，所以两条路径的 `policy_check` 在生产
+  中一直是 `None`、10.1 复检**从未生效**（LLM 路径自 P1 起即如此）——把
+  guard 接进引擎会新拦下 CRITICAL / blocked_targets 候选、改变 P1 的 LLM
+  路径行为，与「P1 行为保留」冲突，故列入延后项；本次先把形态铺好。
+- **P3-2 误导性注释**：`--exp-db` 惰性构造那段原写「`mta run --no-llm` 之类
+  不碰经验」，但 Experience 命中本来就不需要 LLM——`--no-llm` 恰恰会查经验
+  库（G6 实测 stages 含 `miss`）。注释已按实际语义重写。
+- **P3-3 静默丢样本**：`_queue_sample` 因缺 `run_id` 直接 `return`，无痕迹。
+  已补 stage `{"stage": "experience_sample", "outcome": "no_run_id"}`。
+- **P3-6 计数不准**：更正为 919（+38，父 881）。
+- **Gate 脚本健壮性**（复跑时暴露）：新增 `PF_llm_completion_latency` 前置项
+  ——`/models` 秒回 200 **不代表** completion 能在 budget 的 20s 超时内返回
+  （网关后面挂的是推理模型，输出先走 `reasoning_content`）。实测撞过
+  「四项探活全绿、G2 连续两次 `LLM_PROVIDER_ERROR: timed out`」的假绿；
+  G2 的 provider 级重试由 2 次提到 4 次（仍只重试 provider 错误，校验链
+  拒绝是确定性语义，重试只会掩盖真问题）。
+
+### 显性延后（本次不修，需单独立项）
+
+- **P2-2 `SCREEN_UNKNOWN` 在引擎层不可达**：`_current_screen_id` 在屏识别
+  失败时回落 `ctx.screen_id`，于是 §5 的 `SCREEN_UNKNOWN → MISS` 分支对该
+  路径是死代码；异常页面若恰好存在同名唯一元素，会在**未确认屏**的情况下
+  执行 Experience。**不修的理由**：该回落继承自 P1，且两条路径共用本函数，
+  收紧会**同时改变 P1 的 LLM 路径行为**——与 plan 的「P1 行为保留」硬约束
+  直接冲突。本次已补 `test_screen_recognition_failure_falls_back_to_
+  registered_screen` **钉住现状**：谁改这条口径，测试先红，逼他先处理那条
+  约束。
+- **P3-4 `validated_builds` 被硬编码 `"local"` 稀释**：`cli/pipeline.py` 两处
+  `app_build="local"`（继承 P1）。E7 的 `validated_builds` 本应是「哪些真实
+  build 验证过」的集合，恒为 `["local"]` 时集合语义退化、跨 build 有效性
+  判断失去意义。本提交未引入，但正是它让 E7 首次真正生效 → 需把真实
+  build id 贯通 `RecoveryContext.app_build`，单独立项。
+- **P3-5 `EXPERIENCE_EVENT_TYPES` 半接**：§11.1 的 12 事件只接了
+  `candidate_created`；recovery 期的 `experience_lookup/hit/miss/guard_block/
+  execution` 无写入点。**有意不接**（半接的埋点比不接更坏），已挂
+  plan Task 4.1。
+
+### 复跑证据
+
+修订后重跑 Gate M2 真机全绿：`verdict=PASS`、`device_half=PASS`、12 项判据
+全 PASS、elapsed 54.1s、G1 `13 passed`。全量 pytest **925 passed**
+（919 + 6：`resolve_deferred_sample` 3 项 + 10.1 复检 1 项 + 屏识别回落钉子
+1 项 + aux 重跑失败落库 1 项）。

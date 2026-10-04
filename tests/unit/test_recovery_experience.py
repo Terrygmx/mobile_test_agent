@@ -9,8 +9,10 @@
    **不写**——「此刻不适用/不被允许」不是「用了但错了」。
 3. **多候选回落**（设计 5.1）：BLOCK 或执行失败 → 换下一个；全部用尽 → 回落
    LLM（`RECOVERED_LLM`）。
-4. **执行结果不可观测就不声称成功**：aux（redispatch=None）与 postcondition
-   观测不到 → 不写样本、不返回 recovered。
+4. **执行结果不可观测就不声称成功**：aux（redispatch=None）产出**待定**样本
+   （`result=None` + `pending_observation`），由**能观测**的调用方回填
+   （`resolve_deferred_sample`）；postcondition 观测不到（UNKNOWN）→ 不写样本、
+   不返回 recovered。绝不预置 SUCCESS。
 5. **E2 / 接线地雷 ④**：`effective_risk` 必须是 `Risk` 枚举——真实枚举流经全链
    得 EXECUTE；字符串会被 Guard 入口断言当场拦下（不静默降成功率）。
 6. **E8 观测面**：`screen_fingerprint_match` 如实记录差异（REVALIDATION 动作在 M3）。
@@ -26,7 +28,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent.context import RecoveryContext
-from agent.recovery import RecoveryEngine
+from agent.recovery import RecoveryEngine, resolve_deferred_sample
 from executor.policy import FailurePhase, Idempotency
 from experience import SQLiteExperienceStore
 from experience.models import CandidateSeed
@@ -41,6 +43,8 @@ PAGE = "<App><Node name='screen.HomeView' visible='true'/></App>"
 LOGIN_PAGE = "<App><Node name='screen.LoginView' visible='true'/></App>"
 OTHER_PAGE = ("<App><Node name='screen.HomeView' visible='true'/>"
               "<Node name='captcha_field' visible='true'/></App>")
+# 页面没有任何已登记 marker（屏识别必然失败）——用于钉住「回落登记屏」口径
+UNKNOWN_PAGE = "<App><Node name='mystery_widget' visible='true'/></App>"
 
 
 class _Repo:
@@ -375,21 +379,123 @@ def test_unobservable_postcondition_writes_no_sample(store):
 # --- 6. aux（无 dispatch 语义）与追溯链缺失 --------------------------------
 
 
-def test_aux_candidate_returns_strategy_without_sample(store):
+def test_aux_candidate_returns_strategy_with_deferred_sample(store):
     """aux（wait/assert）无 dispatch 语义：候选交调用方覆盖定位后重跑。
 
-    执行结果此刻不可观测 → 不写样本；但仍返回 strategy（否则调用方没东西
-    可覆盖）。"""
+    执行结果此刻不可观测 → 产出**待定**样本（`result=None` +
+    `pending_observation`），由调用方观测后回填；同时仍返回 strategy（否则
+    调用方没东西可覆盖）。
+
+    为什么不能「干脆不写」：只经 aux 命中的 Candidate 会 sample_count 恒为
+    0、永远到不了 4.5 的 min_samples，报告上读成「从未被使用」——P2 的
+    「知识积累」目标对 aux 目标整体失效（Task 2.4 评审 P2-1）。
+    为什么不能「直接写 SUCCESS」：猜错的 SUCCESS 会抬高 success_rate 把
+    Candidate 推向 VERIFIED（E4/E11 级别）。
+    """
     _seed(store)
     ctx, _ = _ctx(action=None, redispatch=None, find_all=lambda loc: [El()])
     r = _engine(store).recover(ctx)
 
     assert r.recovered and r.kind == "experience"
     assert r.strategy == {"type": "accessibility_id", "value": "signin_button"}
-    assert r.detail.get("experience_runs") == []
+    [sample] = r.detail["experience_runs"]
+    assert sample["result"] is None and sample["pending_observation"] is True
+    assert sample["guard_reason"] is None, \
+        "还没观测到，就不是「用了但错了」——不得预置失败原因"
     entry = next(s for s in r.detail["stages"]
                  if s["stage"] == "experience_candidate")
     assert entry["execution"] == "not_dispatched"
+
+
+def test_resolve_deferred_sample_fills_observed_outcome(store):
+    """回填：调用方观测到成/败 → 待定样本翻成 4.7 的 SUCCESS/FAILURE。
+
+    翻译留在引擎模块（4.7 单点），调用方只说「成没成」。
+    """
+    _seed(store)
+    ctx, _ = _ctx(action=None, redispatch=None, find_all=lambda loc: [El()])
+    r = _engine(store).recover(ctx)
+
+    assert resolve_deferred_sample(r, succeeded=True) == 1
+    assert r.detail["experience_runs"][0]["result"] == "SUCCESS"
+    assert "pending_observation" not in r.detail["experience_runs"][0]
+    # 幂等：同一结论再回填一次不会重复计数（标记已摘除）
+    assert resolve_deferred_sample(r, succeeded=False) == 0
+
+
+def test_resolve_deferred_sample_failure_keeps_reason(store):
+    """观测到失败 → FAILURE + 原因（默认 AUX_RERUN_FAILED，可显式覆盖）。"""
+    _seed(store)
+    ctx, _ = _ctx(action=None, redispatch=None, find_all=lambda loc: [El()])
+    r = _engine(store).recover(ctx)
+
+    resolve_deferred_sample(r, succeeded=False, failure_reason="WAIT_TIMEOUT")
+    [sample] = r.detail["experience_runs"]
+    assert sample["result"] == "FAILURE"
+    assert sample["guard_reason"] == "WAIT_TIMEOUT"
+
+
+def test_resolve_deferred_sample_noop_on_plain_result(store):
+    """动作步的样本没有待定标记 → 回填是 no-op（不误改已定的结果）。"""
+    _seed(store)
+    ctx, _ = _ctx(find_all=lambda loc: [El()])
+    r = _engine(store).recover(ctx)
+
+    assert r.detail["experience_runs"][0]["result"] == "SUCCESS"
+    assert resolve_deferred_sample(r, succeeded=False) == 0
+    assert r.detail["experience_runs"][0]["result"] == "SUCCESS"
+
+
+# --- 6b. 10.1 复检与屏识别回落（评审 P3-1 / P2-2 的口径钉子） --------------
+
+
+def test_experience_candidate_also_passes_10_1_guard(store):
+    """10.1 复检对 Experience 候选同样生效。
+
+    E1 的「同一输入同一结论」不止覆盖 Guard 链的六项判定，也覆盖 10.1：
+    **同一候选策略不因「来自 Experience 而非 LLM」就免检**。此前 Experience
+    路径不传 `policy_check`，注释还谎称「EXECUTE 后走正常 dispatch、其处自会
+    过 Guard」——`StepRunner._dispatch_action` 里**没有任何 Guard**（只有
+    `run_step` 对**原步骤的原元素**跑一次），那个兜底并不存在
+    （Task 2.4 评审 P3-1 实锤）。
+    """
+    from executor.guard import BlockedTarget, EnvKind, Guard
+
+    _seed(store, value="signin_button")
+    repo = _Repo(entries={"signin_button": ("HomeView", Risk.LOW, "button")})
+    guard = Guard(EnvKind.SANDBOX,
+                  blocked_targets=(BlockedTarget.parse("element:signin_*"),))
+    ctx, dispatched = _ctx(find_all=lambda loc: [El()])
+    r = _engine(store, repo=repo, guard=guard).recover(ctx)
+
+    assert not r.recovered and dispatched == [], "10.1 命中的候选绝不执行"
+    entry = next(s for s in r.detail["stages"]
+                 if s["stage"] == "experience_candidate")
+    assert (entry["outcome"], entry["reason"]) == ("BLOCK", "SECURITY_BLOCKED")
+    assert entry["record_as_sample"] is False, \
+        "4.7：安全拦截不是「用了但错了」——不计样本"
+
+
+def test_screen_recognition_failure_falls_back_to_registered_screen(store):
+    """屏识别失败 → 回落**登记屏**（P1 既有口径），不是 fail-closed。
+
+    这是有意保留的既有行为：`_current_screen_id` 在识别失败时退回
+    `ctx.screen_id`。收紧成 `SCREEN_UNKNOWN → MISS` 会砍掉「屏识别失败」场景
+    的全部恢复能力，**并且会同时改变 P1 的 LLM 路径**（两条路径共用本函数，
+    plan 的「P1 行为保留」是硬约束）——必须单独立项。
+
+    本测试把现状**钉住**：谁改这条口径，这里先红，逼他先处理那条约束
+    （Task 2.4 评审 P2-2）。
+    """
+    _seed(store)
+    ctx, dispatched = _ctx(page_source=lambda: UNKNOWN_PAGE,
+                           find_all=lambda loc: [El()])
+    r = _engine(store, repo=_Repo()).recover(ctx)
+
+    entry = next(s for s in r.detail["stages"] if s["stage"] == "screen")
+    assert entry["outcome"] == "CURRENT_SCREEN_UNKNOWN", "屏确实没识别出来"
+    assert r.recovered and len(dispatched) == 1, \
+        "当前口径：回落到登记屏（HomeView）后照常放行"
 
 
 def test_missing_run_id_writes_no_sample(store):

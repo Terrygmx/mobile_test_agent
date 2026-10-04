@@ -311,8 +311,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     # 照常工作）；--no-llm 显式禁用（R18-4 语义就此定档：flag 真实生效，
     # 不再是「参数存在=功能存在」）。budget 默认值即 10.5。
     # Task 2.4：Experience Store 接真（设计 7.1）。惰性构造——库文件在首次
-    # 真正查询/写入时才出现，`mta run --no-llm` 之类不碰经验的 run 不会在
-    # 工作区里留下一个空库（review_p2_task23 P3-6 同款纪律）。
+    # 真正查询/写入时才出现。**注意别把「惰性」读成「--no-llm 就不建库」**：
+    # Experience 命中本来就不需要 LLM，所以 --no-llm 的 run 恰恰会查经验库
+    # （Gate M2 的 G6 实测 stages 里有 `miss`，即查过）。真正不建库的是
+    # 「恢复流水线根本没进」（不可恢复 / 未接 store）的 run
+    # （Task 2.4 评审 P3-2：此处注释曾写成「--no-llm 之类不碰经验」）。
     from agent.recovery import RecoveryEngine
     from llm.budget import LLMBudget
     llm = budget = None

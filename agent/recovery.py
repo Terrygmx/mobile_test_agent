@@ -170,7 +170,7 @@ from llm.prompt import build_recovery_prompt, redact_ui_tree  # noqa: E402
 from runner.result import recovered_kind        # noqa: E402
 from source.screen import screen_fingerprint    # noqa: E402
 
-__all__ = ["RunMemo", "RecoveryEngine"]
+__all__ = ["RunMemo", "RecoveryEngine", "resolve_deferred_sample"]
 
 
 class RunMemo:
@@ -198,6 +198,31 @@ def _single_element(found) -> object:
             raise LookupError(f"expected exactly 1 element, got {len(found)}")
         return found[0]
     return found
+
+
+def resolve_deferred_sample(rec: RecoveryResult, *, succeeded: bool,
+                            failure_reason: str | None = None) -> int:
+    """aux 命中后的**观测回填**（设计 4.7 的 aux 半边，Task 2.4 评审 P2-1）。
+
+    引擎侧 aux（wait/assert）无 dispatch 语义，执行结果此刻不可观测——所以
+    `_queue_sample` 产出 `result=None` 的**待定**样本而不是写死 SUCCESS
+    （猜错的 SUCCESS 会抬高 success_rate 把 Candidate 推向 VERIFIED，
+    E4/E11 级别）。但**调用方能观测**：它在覆盖定位后重跑了一次断言/等待。
+    本函数就是那条回填路径——把观测结果翻成 4.7 的 `result`。
+
+    为什么不让调用方直接改 payload：那样「写什么样本」的决策就散到管线里
+    了，正是 4.7 单点纪律要避免的。调用方只说「成没成」，翻译留在本模块。
+    返回回填的样本数（0 = 没有待定样本，调用方无需在意）。
+    """
+    filled = 0
+    for sample in (rec.detail or {}).get("experience_runs") or []:
+        if not sample.pop("pending_observation", False):
+            continue
+        sample["result"] = "SUCCESS" if succeeded else "FAILURE"
+        if not succeeded:
+            sample["guard_reason"] = failure_reason or "AUX_RERUN_FAILED"
+        filled += 1
+    return filled
 
 
 class _FindAllAdapter:
@@ -281,6 +306,42 @@ class RecoveryEngine:
         """
         return ((screen_res.screen if screen_res and screen_res.screen
                  else ctx.screen_id) or None)
+
+    def _policy_check_for(self, exp, ctx: RecoveryContext):
+        """候选策略 → 10.1 Guard 复检 callable（与 LLM 路径同源）。
+
+        E1 的「同一输入同一结论」不止覆盖 Guard 链的六项判定，也覆盖 10.1
+        这一环：**同一候选策略，经 LLM 得 vs 经 Experience 得，Guard 结论
+        必须一致**。差别只该在「候选从哪来」，不该在「谁给它放行」。
+
+        候选值解析到**登记元素**后才判定：`blocked_targets` 的 element 模式
+        匹配 element_id，而候选值（`user_field`）与原目标
+        （`username_field`）不是同一个 id——不解析就拿不到判据。解析失败
+        （未登记）→ None，与 LLM 路径同款 fail-open（10.1 三条规则都依赖
+        登记信息，无登记无从判定）。
+
+        ⚠️ **已知缺口（本任务未修，见 Task 2.4 评审记录）**：生产
+        `cli/main.py` 装配 `RecoveryEngine` 时**没有传 `guard`**，于是
+        `self.guard is None` → 两条路径的 `policy_check` 都是 None、10.1
+        复检在生产中**从未生效**（LLM 路径自 P1 起即如此）。把 guard 接进
+        引擎会改变 P1 的 LLM 路径行为（新拦下 CRITICAL / blocked_targets
+        候选），与 plan 的「P1 行为保留」硬约束冲突，故必须单独立项。
+        本方法先把形态备好：guard 一旦接上，两条路径同时生效、且同源。
+        """
+        if self.guard is None or self.repo is None:
+            return None
+        try:
+            eff = self.repo.resolve(exp.strategy.value, build=ctx.app_build)
+        except Exception:  # noqa: BLE001 — UnknownReference 等 → 未登记
+            return None
+        from executor.guard import GuardContext
+
+        def _check() -> None:
+            self.guard.check(GuardContext(
+                risk=eff.risk, screen_id=eff.screen,
+                element_id=eff.id, action=ctx.action or "tap"))
+
+        return _check
 
     def recover(self, ctx: RecoveryContext) -> RecoveryResult:
         allowed = admitted_actions(
@@ -541,7 +602,8 @@ class RecoveryEngine:
                            action=ctx.action or "tap",
                            element_id=ctx.element_id,
                            screen_fingerprint=fingerprint),
-            adapter)
+            adapter,
+            policy_check=self._policy_check_for(exp, ctx))
         elapsed = int((time.monotonic() - t0) * 1000)
         fp_match = (None if exp.last_screen_fingerprint is None
                     or fingerprint is None
@@ -560,7 +622,8 @@ class RecoveryEngine:
             if gres.record_as_sample:
                 # 4.7 第 2/3 行：唯一性/类型失败是「用了但错了」→ 失败样本
                 self._queue_sample(samples, ctx, exp, gres, adapter,
-                                   fingerprint, elapsed, result="FAILURE",
+                                   fingerprint, elapsed, stages,
+                                   result="FAILURE",
                                    guard_reason=gres.reason)
             return None
 
@@ -570,11 +633,18 @@ class RecoveryEngine:
         execution = "SUCCESS"
         failure_reason = None
         if ctx.redispatch is None:
-            # aux（wait/assert）无 dispatch 语义：候选交调用方覆盖定位后重跑，
-            # 执行结果**此刻不可观测** → 不写样本。不猜 SUCCESS——猜错的
-            # SUCCESS 会直接抬高 success_rate 把 Candidate 推向 VERIFIED，
-            # 那是 E4/E11 级别的错误，不是记账瑕疵。
+            # aux（wait/assert）无 dispatch 语义：候选交调用方覆盖定位后重跑。
+            # 执行结果**此刻不可观测**——所以产出 `result=None` 的**待定样本**
+            # （`pending_observation`），由调用方观测后回填
+            # （`resolve_deferred_sample`）。既不写死 SUCCESS（猜错的 SUCCESS
+            # 会抬高 success_rate 把 Candidate 推向 VERIFIED，E4/E11 级别），
+            # 也不直接丢弃（丢了则「仅经 aux 命中的 Candidate」sample_count
+            # 恒为 0，永远到不了 4.5 的 min_samples，报告上读成「从未被使用」
+            # ——P2 的「知识积累」目标对 aux 目标整体失效）。
             execution = "not_dispatched"
+            self._queue_sample(samples, ctx, exp, gres, adapter, fingerprint,
+                               elapsed, stages, result="SUCCESS",
+                               deferred=True)
         else:
             try:
                 ctx.redispatch(element)
@@ -600,16 +670,15 @@ class RecoveryEngine:
 
         if execution == "SUCCESS":
             self._queue_sample(samples, ctx, exp, gres, adapter,
-                               fingerprint, elapsed, result="SUCCESS")
+                               fingerprint, elapsed, stages, result="SUCCESS")
         elif execution == "FAILURE":
             self._queue_sample(samples, ctx, exp, gres, adapter,
-                               fingerprint, elapsed, result="FAILURE",
+                               fingerprint, elapsed, stages, result="FAILURE",
                                guard_reason=failure_reason)
         if execution in ("FAILURE", "UNKNOWN"):
             # FAILURE：本候选没用 → 换下一个（设计 5.1 的 continue）
             # UNKNOWN：观测不到结果 → 不声称恢复（不猜）
-            return None
-        # SUCCESS / not_dispatched（aux 交调用方重跑）→ 本候选救回来了
+            return None        # SUCCESS / not_dispatched（aux 交调用方重跑）→ 本候选救回来了
         return self._recovered(
             "experience",
             {"stages": stages,
@@ -629,16 +698,27 @@ class RecoveryEngine:
     @staticmethod
     def _queue_sample(samples: list, ctx: RecoveryContext, exp, gres,
                       adapter: _FindAllAdapter, fingerprint: str | None,
-                      elapsed: int, *, result: str,
-                      guard_reason: str | None = None) -> None:
+                      elapsed: int, stages: list, *, result: str,
+                      guard_reason: str | None = None,
+                      deferred: bool = False) -> None:
         """4.7 的样本 payload（**唯一**的落库内容决策点）。
 
         只由 `record_as_sample`（MISS/风险拦截 = False）与执行结果决定是否
         被调用——E11 口径在这里收口，别的模块不再判一次。
         无 `run_id`（没有追溯链）时不落库：样本行没有归属 run 就等于伪造
         证据，宁可缺一条（E5 的「宁缺勿假」同款）。
+
+        `deferred=True`（aux 专用）：执行结果引擎侧不可观测 → 产出
+        `result=None` + `pending_observation` 的**待定**样本，等调用方观测
+        后经 `resolve_deferred_sample` 回填。待定样本**不带 guard_reason**
+        （还没观测到，不是「用了但错了」）。
         """
         if not ctx.run_id:
+            # 不落库不是「静默跳过」：留一条 stage，否则「有经验库但没记样本」
+            # 在报告上与「根本没查」不可区分（本模块一贯的「做不了就留痕」）。
+            stages.append({"stage": "experience_sample",
+                           "outcome": "no_run_id",
+                           "experience_id": exp.experience_id})
             return
         if gres.reason == "TYPE_MISMATCH":
             type_match: bool | None = False
@@ -651,13 +731,14 @@ class RecoveryEngine:
             "experience_id": exp.experience_id,
             "run_id": ctx.run_id,
             "app_build": ctx.app_build,
-            "result": result,
-            "guard_reason": guard_reason,
+            "result": None if deferred else result,
+            "guard_reason": None if deferred else guard_reason,
             "effective_risk": getattr(ctx.effective_risk, "name", None),
             "uniqueness_count": adapter.last_count,
             "element_type_match": type_match,
             "screen_fingerprint": fingerprint,
             "latency_ms": elapsed,
+            **({"pending_observation": True} if deferred else {}),
         })
 
     # --- LLM 校验链（9.3 五项 + 10.4 契约 + 10.5 budget/熔断） ---

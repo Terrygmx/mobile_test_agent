@@ -112,6 +112,16 @@ ASSERT_EXISTS = """\
       timeout: 0.05
 """
 
+# `disabled`：覆盖定位后 `find` 成功、但元素是 enabled 的 → 断言仍不过。
+# 用来构造「Guard 过了、重跑观测到失败」这一格（Guard 不是执行结果，
+# 它看不见这种失败）。
+ASSERT_DISABLED = """\
+  - assertion:
+      target: HomeView.login_button
+      condition: disabled
+      timeout: 0.05
+"""
+
 
 def _exp_runs(tmp_path, experience_id=None):
     import sqlite3
@@ -381,11 +391,17 @@ def test_p2_15_assertion_target_drift_recovers_as_third_kind(tmp_path):
         "SELECT kind FROM recoveries").fetchall()] == ["EXPERIENCE"]
 
 
-def test_p2_15_aux_hit_writes_no_execution_sample(tmp_path):
-    """aux 无 dispatch 语义：执行结果不可观测 → 不写样本（不猜 SUCCESS）。
+def test_p2_15_aux_hit_records_sample_from_rerun_observation(tmp_path):
+    """aux 命中的样本由**重跑观测**决定：重跑过 → SUCCESS，落库。
 
-    猜错的 SUCCESS 会抬高 success_rate 把 Candidate 推向 VERIFIED——
-    E4/E11 级别的错误，不是记账瑕疵。"""
+    引擎侧 aux 无 dispatch 语义（`execution == "not_dispatched"`，结果此刻
+    不可观测），但**调用方能观测**——它在覆盖定位后重跑了一次断言。所以
+    样本不是「猜的」：`result` 由那次重跑回填（Task 2.4 评审 P2-1）。
+
+    为什么必须记：只经 aux 命中的 Candidate 若 sample_count 恒为 0，就永远
+    到不了 4.5 的 min_samples、永远不能 VERIFIED，报告里还会读成「这条经验
+    从未被使用」——P2 的「知识积累」目标对 aux 目标整体失效。
+    """
     store = SQLiteExperienceStore(tmp_path / "experience.db")
     exp = _seed(store)
     ex = DriftExecutor(page_source=HOME_PAGE)
@@ -396,10 +412,58 @@ def test_p2_15_aux_hit_writes_no_execution_sample(tmp_path):
         bundle_id=APP)
 
     assert run.results[0].status == "RECOVERED"
-    assert _exp_runs(tmp_path, exp.experience_id) == []
+    # 引擎侧仍如实标 not_dispatched（它确实没执行）
     entry = next(s for s in _aux_stages(trace)
                  if s["stage"] == "experience_candidate")
     assert entry["execution"] == "not_dispatched"
+    # 但样本按**重跑观测**落库，且归属 aux 那一步
+    steps = trace.conn.execute(
+        "SELECT id, step_type, status FROM steps ORDER BY id").fetchall()
+    assert [s["step_type"] for s in steps] == ["launch_app", "assert"]
+    assert steps[-1]["status"] == "RECOVERED"
+    [run_row] = _exp_runs(tmp_path, exp.experience_id)
+    assert run_row["result"] == "SUCCESS"
+    assert run_row["step_id"] == steps[-1]["id"]
+    assert run_row["guard_reason"] is None
+    after = store.lookup(APP, "HomeView", "login_button")[0]
+    assert (after.sample_count, after.success_count) == (1, 1)
+    assert after.validated_builds == ["local"], \
+        "E7：成功样本追加 validated_builds——aux 命中同样算验证过这个 build"
+
+
+def test_p2_15_aux_rerun_failure_records_failure_sample(tmp_path):
+    """aux 重跑仍失败 → 样本记 FAILURE（不是「没观测到」，是**观测到失败**）。
+
+    没有这一条，aux 命中就只记成功、不记失败，失败率被系统性低估——4.7 的
+    口径是「用了但错了就记账」，而 aux 的「错」恰恰只能由调用方的重跑观测到。
+
+    同时：失败的 aux 步骤必须落 steps 行。此前这条路径直接把异常抛给外层，
+    steps 表**一行都没有**——trace 上「这一步没跑过」，排障无从下手（与 M5
+    基线实锤的 aux 失败不落库同一个缺口，只是入口更靠后）。
+    """
+    store = SQLiteExperienceStore(tmp_path / "experience.db")
+    exp = _seed(store)
+    ex = DriftExecutor(page_source=HOME_PAGE)
+
+    run, trace, _, _ = run_matrix(
+        tmp_path, _case("15c", ASSERT_DISABLED), ex=ex,
+        repo=drift_repo(tmp_path), recovery=_recovery(tmp_path, store=store),
+        bundle_id=APP)
+
+    r = run.results[0]
+    assert r.status == "FAIL" and r.failure_type == "ASSERTION_VALUE_MISMATCH"
+    steps = trace.conn.execute(
+        "SELECT id, step_type, status FROM steps ORDER BY id").fetchall()
+    assert [s["step_type"] for s in steps] == ["launch_app", "assert"]
+    assert steps[-1]["status"] != "RECOVERED", "重跑没过就不是恢复"
+    [run_row] = _exp_runs(tmp_path, exp.experience_id)
+    assert (run_row["result"], run_row["guard_reason"]) == (
+        "FAILURE", "AUX_RERUN_FAILED")
+    assert run_row["step_id"] == steps[-1]["id"]
+    after = store.lookup(APP, "HomeView", "login_button")[0]
+    assert (after.sample_count, after.success_count, after.failure_count) == (
+        1, 0, 1)
+    assert after.validated_builds == [], "E7：失败样本绝不追加 validated_builds"
 
 
 # --- 空库 / 未接库：P1 行为保留（回归底线） --------------------------------
