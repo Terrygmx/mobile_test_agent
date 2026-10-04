@@ -811,3 +811,7 @@ P3（自动探索、测试规划、Subagent）建立在这四个查询接口之�
 | Rollback = `git revert`，不自建版本系统 | Element Repository 已纳入 Git 管理，重复造轮子没有必要 |
 | Graph 不做自动探索，未观察到标 `NOT_OBSERVED` | P2 的知识边界就是"测试系统观察到的世界"，不能假装知道更多 |
 | Experience Store 单写者 | 避免并发更新丢失统计数据，且不需要立即引入分布式写入服务 |
+| 屏识别**跑过但没结论**时 fail-closed（`SCREEN_UNKNOWN → MISS`），但识别**没跑**时沿用登记屏先验 | §5 的 `current_screen is None → MISS` 只有在「识别跑过」时才有意义。此前的无条件回落让 §5 那条规则成死代码，更让 Experience 路径的屏校验**自比自**（`current_screen` 与 `exp.screen_id` 都等于 `ctx.screen_id` → 恒等），于是「页面无任何已登记 marker」时只要存在同名唯一元素，候选就会在未确认屏下执行。反之，没有 Repository 就没有 marker 表——「识别」这件事无从发生，任何屏校验都必然空转，此时收紧只掉能力不增安全，故保留 P1 的登记屏先验（Task 2.4 终审 P2-2 收口） |
+| 10.1 Guard 复检的终态 `failure_type` 两条路径共用一张映射表 | LLM 路径自 P1 起就把 Guard reason 映射成终态（`SECURITY_BLOCKED` 等）；Experience 路径「候选全被拦且无回落」时若报原症状（`ELEMENT_NOT_FOUND`），CI 会把「被策略拦下」读成「元素漂移」——排障方向完全错，且丢掉 BLOCKED/exit 4 的语义。表值里的 `LLM_` 前缀是既有报告契约值，保留不动（Task 2.4 终审 P3-1 收口） |
+| `recoveries` 表只记**成功**的恢复动作 | 它的语义是「恢复动作记录 + 9.5 review 的种子来源」，而 E5 规定失败尝试不产种子——记进来只会让 review 队列多出永远不该 ACCEPT 的行。失败尝试的痕迹在 `experience_runs`（4.7 样本 + guard_reason）与 `steps`（终态 + `recovery` 段）（Task 2.4 终审 P3-4 显性化） |
+| aux（wait/assert）命中的样本由**调用方观测后回填**，引擎产出「待定样本」 | aux 无 dispatch 语义，执行结果引擎侧不可观测；但调用方在覆盖定位后重跑了一次断言/等待，**它看得见**。写死 SUCCESS 会抬高 success_rate 把 Candidate 推向 VERIFIED（E4/E11 级）；直接丢弃则 aux-only Candidate 的 `sample_count` 恒为 0、永不能 VERIFIED，P2 的「知识积累」对 aux 目标整体失效（Task 2.4 评审 P2-1） |

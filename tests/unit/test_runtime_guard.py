@@ -16,7 +16,7 @@ import pytest
 
 from experience.models import Experience, ExperienceStatus
 from experience.runtime_guard import (
-    GUARD_REASON_TO_LLM_FAILURE,
+    GUARD_REASON_TO_FAILURE_TYPE,
     GuardResult,
     RuntimeContext,
     compute_effective_risk,
@@ -198,7 +198,7 @@ def test_policy_guard_non_guard_violation_reraised():
 # --- 4. E1 红线：LLM 候选校验与 Experience Guard 双向一致 ------------------------
 # 同一候选/同一屏/同一元素状态，分别走 agent/recovery._llm_stage（FakeLLM）
 # 与 experience_runtime_guard——(outcome, reason, record_as_sample) 必须
-# 逐位一致（LLM 的 failure_type 由 GUARD_REASON_TO_LLM_FAILURE 映射）。
+# 逐位一致（LLM 的 failure_type 由 GUARD_REASON_TO_FAILURE_TYPE 映射）。
 
 
 class FakeLLM:
@@ -318,7 +318,7 @@ def _experience_guard_outcome(repo_entries, find_script, current_screen,
     return r.outcome, r.reason, r.record_as_sample
 
 
-LLM_FAILURE_BY_REASON = {v: k for k, v in GUARD_REASON_TO_LLM_FAILURE.items()}
+LLM_FAILURE_BY_REASON = {v: k for k, v in GUARD_REASON_TO_FAILURE_TYPE.items()}
 
 
 @pytest.mark.parametrize(
@@ -357,7 +357,7 @@ def test_e1_red_line_llm_and_experience_agree(
         # 未登记候选：无 Experience 可对照物（Experience 按定义来自已
         # 登记策略）——只断言引擎侧 fail-closed 映射
         assert expected_reason == "TARGET_UNREGISTERED"
-        assert llm_failure == GUARD_REASON_TO_LLM_FAILURE[expected_reason]
+        assert llm_failure == GUARD_REASON_TO_FAILURE_TYPE[expected_reason]
         assert recovered is False
         return
     g_out, g_reason, g_sample = g
@@ -369,5 +369,5 @@ def test_e1_red_line_llm_and_experience_agree(
     if expected_reason is None:
         assert recovered is True
     else:
-        assert llm_failure == GUARD_REASON_TO_LLM_FAILURE[expected_reason]
+        assert llm_failure == GUARD_REASON_TO_FAILURE_TYPE[expected_reason]
         assert recovered is False

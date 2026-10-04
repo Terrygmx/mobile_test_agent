@@ -580,6 +580,61 @@ def test_p2_miss_emits_events_even_without_samples(tmp_path):
     assert kinds == ["experience_lookup", "experience_miss"]
 
 
+# --- 终态 failure_type 对称化（终审 P3-1）：无回落时的安全裁决 ---------------
+
+
+def test_p2_security_blocked_terminal_is_blocked_exit4(tmp_path):
+    """候选被 10.1 拦且**无回落** → 用例 BLOCKED / exit 4，不是 FAIL / exit 1。
+
+    LLM 路径早就是这么映射的（`GUARD_REASON_TO_FAILURE_TYPE` 的 miss）；同一
+    候选不该因来路不同而给 CI 两个不同的结论（E1）。报成 FAIL/ELEMENT_NOT_FOUND
+    会让 CI 把「被策略拦下」读成「元素漂移」——排障方向完全错。
+    """
+    from executor.guard import BlockedTarget, EnvKind, Guard
+
+    store = SQLiteExperienceStore(tmp_path / "experience.db")
+    _seed(store)
+    ex = DriftExecutor(page_source=HOME_PAGE)
+    guard = Guard(EnvKind.SANDBOX,
+                  blocked_targets=(BlockedTarget.parse("element:signin_*"),))
+
+    run, trace, _, ex = run_matrix(
+        tmp_path, _case("sec", TAP), ex=ex, repo=drift_repo(tmp_path),
+        recovery=_recovery(tmp_path, store=store), bundle_id=APP,
+        guard=guard)
+
+    r = run.results[0]
+    assert r.status == "BLOCKED" and r.failure_type == "SECURITY_BLOCKED"
+    assert run.exit_code == 4, "8.1/8.4：Guard 拦截是安全策略终态（exit 4）"
+    assert ex.tap_calls == 0, "被拦的候选绝不执行"
+    entry = next(s for s in _stages(r)
+                 if s["stage"] == "experience_candidate")
+    assert (entry["outcome"], entry["reason"]) == ("BLOCK", "SECURITY_BLOCKED")
+
+
+def test_p2_ordinary_failure_still_exit1_with_guard_wired(tmp_path):
+    """对照组：0 匹配（普通失败）在同样的 guard 接线下**仍是 FAIL / exit 1**。
+
+    只有安全/风险拦截才改终态——把 NOT_FOUND 也映射成 Guard 结论会让用例
+    集体变 BLOCKED，CI 从此分不清「漂移」与「被策略拦」。
+    """
+    from executor.guard import BlockedTarget, EnvKind, Guard
+
+    store = SQLiteExperienceStore(tmp_path / "experience.db")
+    _seed(store, value="never_there")
+    ex = DriftExecutor(page_source=HOME_PAGE)
+    guard = Guard(EnvKind.SANDBOX,
+                  blocked_targets=(BlockedTarget.parse("element:signin_*"),))
+
+    run, _, _, _ = run_matrix(
+        tmp_path, _case("sec2", TAP), ex=ex, repo=drift_repo(tmp_path),
+        recovery=_recovery(tmp_path, store=store), bundle_id=APP, guard=guard)
+
+    r = run.results[0]
+    assert r.status == "FAIL" and r.failure_type == "ELEMENT_NOT_FOUND"
+    assert run.exit_code == 1
+
+
 # --- 空库 / 未接库：P1 行为保留（回归底线） --------------------------------
 
 

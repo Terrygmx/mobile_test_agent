@@ -238,6 +238,12 @@ def run_matrix(tmp_path, case_yaml, *, ex=None, repo=None, recovery=None,
     ex = ex or FakeExecutor()
     runner = StepRunner(ex, ds, guard or Guard(EnvKind.SANDBOX))
     pipe._step_runner = runner
+    # 复刻生产接线（`cli/main.py`：`pipeline.recovery.guard = runner.guard`）：
+    # 10.1 Guard 复检与动作步**共用同一个 Guard 实例**（10.1 定档——Guard 不受
+    # LLM 输出影响，同一策略对象才保证这点）。替身不复刻这句，就会出现
+    # 「生产会拦、矩阵不拦」的假绿（Task 2.4 终审期实测踩到）。
+    if recovery is not None:
+        recovery.guard = runner.guard
     lifecycle = lifecycle or Lifecycle(store=store)
     pipe._lifecycle = lifecycle
     cases = cases if cases is not None else pipe.discover()

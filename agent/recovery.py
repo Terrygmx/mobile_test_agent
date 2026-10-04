@@ -158,7 +158,9 @@ from agent.policy import (           # noqa: E402
     admitted_actions,
 )
 from experience.runtime_guard import (  # noqa: E402
-    GUARD_REASON_TO_LLM_FAILURE,
+    GUARD_POLICY_BLOCK_REASONS,
+    GUARD_POLICY_BLOCK_REASONS,
+    GUARD_REASON_TO_FAILURE_TYPE,
     RuntimeContext,
     experience_locator,
     experience_runtime_guard,
@@ -315,13 +317,34 @@ class RecoveryEngine:
 
         LLM 与 Experience 两条路径**共用本函数**——同一件事在两处各推一次
         必然在某天分叉，而 E1 红线要求同一输入下两条路径的 Guard 结论逐位
-        一致。识别失败时退回 `ctx.screen_id`（步骤登记的屏）：这是 P1 既有
-        口径，保持它而不是收紧成 fail-closed，是为了不顺手砍掉「屏识别
-        失败」场景的既有恢复能力——收紧要单独立项（含 SCREEN_UNKNOWN 的
-        端到端验证）。
+        一致。
+
+        **两种情况必须分开**（Task 2.4 终审延后项，本次收口）：
+
+        1. **识别跑过**（`screen_res is not None`）→ 只认观测结果。页面没有
+           任何已登记 marker（`CURRENT_SCREEN_UNKNOWN`）、多个 marker 互斥
+           （`SCREEN_AMBIGUOUS`）、解析失败——都返回 `None`，即设计 §5/§4.7
+           的 `SCREEN_UNKNOWN → MISS 且不计样本`。
+           此前这里回落 `ctx.screen_id`，把那条规则变成死代码，更要命的是
+           让 Experience 路径的屏校验**自比自**：`current_screen` 与
+           `exp.screen_id` 都等于 `ctx.screen_id` → 永远相等 → Guard 的第一
+           环从不触发。于是「页面根本没有已登记 marker」时，只要恰好存在
+           同名唯一元素，候选就会在**未确认屏**的情况下执行。
+        2. **识别没跑**（`screen_res is None`：没有 Repository——marker 表
+           本身不存在；没有页面；或该动作未准入 LOCAL_RECONCILE）→ 沿用 P1
+           的**登记屏作为先验**。此时不是「证明失败」而是「无从判定」，任何
+           屏校验都必然空转（没有 marker 表可比），收紧只会白掉能力而不增加
+           安全性。这条保留即 plan「P1 行为保留」在此输入上的落实。
+
+        ⚠️ 情况 1 是**刻意**偏离 plan「空 experience 库时 Recovery 行为必须与
+        P1 完全一致」的一处（决策记录见设计附录与 `docs/p2_data_audit.md`）：
+        偏离面仅限「屏识别跑过且没结论」这一种 P1 从未规定的输入，方向是
+        **收紧**（照常恢复 → fail-closed 跳过）；P1 全部测试与 phase0 验证
+        脚本持续通过（回归底线）。
         """
-        return ((screen_res.screen if screen_res and screen_res.screen
-                 else ctx.screen_id) or None)
+        if screen_res is not None:
+            return screen_res.screen or None
+        return ctx.screen_id or None
 
     def _policy_check_for(self, exp, ctx: RecoveryContext):
         """候选策略 → 10.1 Guard 复检 callable（与 LLM 路径同源）。
@@ -336,13 +359,11 @@ class RecoveryEngine:
         （未登记）→ None，与 LLM 路径同款 fail-open（10.1 三条规则都依赖
         登记信息，无登记无从判定）。
 
-        ⚠️ **已知缺口（本任务未修，见 Task 2.4 评审记录）**：生产
-        `cli/main.py` 装配 `RecoveryEngine` 时**没有传 `guard`**，于是
-        `self.guard is None` → 两条路径的 `policy_check` 都是 None、10.1
-        复检在生产中**从未生效**（LLM 路径自 P1 起即如此）。把 guard 接进
-        引擎会改变 P1 的 LLM 路径行为（新拦下 CRITICAL / blocked_targets
-        候选），与 plan 的「P1 行为保留」硬约束冲突，故必须单独立项。
-        本方法先把形态备好：guard 一旦接上，两条路径同时生效、且同源。
+        **生产确实接上了**（Task 2.4 终审期实测更正）：`cli/main.py` 在装配
+        runner 之后有一句 `pipeline.recovery.guard = runner.guard`——两条路径
+        共用同一个 Guard 实例（10.1：Guard 不受 LLM 输出影响，同一策略对象
+        才保证这点）。此前 Task 2.4 评审修订记录里「生产没接 guard、10.1 复检
+        从未生效」的论断是**错的**，已由探针证伪并更正。
         """
         if self.guard is None or self.repo is None:
             return None
@@ -378,6 +399,12 @@ class RecoveryEngine:
         # §11.1 的 recovery 期事件，同样由引擎产出 payload、管线落库
         # （与 4.7 样本同款分工：引擎掌握「发生了什么」，管线补 run/tc id）。
         events: list[dict] = []
+        # 本次 recovery 里**因安全/风险被 Guard 拦下**的候选 reason。只在
+        # 「全被拦 + 无回落」时用来定终态（见 `_unrecovered`）。
+        blocks: list[str] = []
+        # 本次 recovery 里**因安全/风险被 Guard 拦下**的候选 reason。只在
+        # 「全被拦 + 无回落」时用来定终态（见 `_unrecovered`）。
+        blocks: list[str] = []
 
         # --- POSTCONDITION_CHECK（H7：非幂等 POST_DISPATCH 的唯一出口；
         #     幂等动作也先查——postcondition 成立即无需重发，矩阵 #18） ---
@@ -510,7 +537,7 @@ class RecoveryEngine:
         #     命中即免 LLM 调用——设计 3.1「LLM Budget 不变；Experience 命中
         #     时根本不消耗 Budget」） ---
         exp_result = self._try_experiences(ctx, stages, samples, events,
-                                           screen_res, page_red)
+                                           blocks, screen_res, page_red)
         if exp_result is not None:
             return exp_result
 
@@ -518,7 +545,7 @@ class RecoveryEngine:
         if self.llm is None:
             stages.append({"stage": "llm", "outcome": "disabled"})
             return self._unrecovered(ctx, stages, samples, events,
-                                     "no_llm_engine")
+                                     "no_llm_engine", blocks=blocks)
         return self._llm_stage(ctx, stages, screen_res, recon, page_red,
                                samples, events)
 
@@ -539,18 +566,42 @@ class RecoveryEngine:
 
     def _unrecovered(self, ctx: RecoveryContext, stages: list,
                      samples: list[dict], events: list[dict],
-                     reason: str) -> RecoveryResult:
-        """未恢复结论的统一构造（维持原症状 + 可观测的停在哪一步）。"""
+                     reason: str,
+                     blocks: list[str] | None = None) -> RecoveryResult:
+        """未恢复结论的统一构造（维持原症状 + 可观测的停在哪一步）。
+
+        `blocks`：本次 recovery 里因安全/风险被 Guard 拦下的候选 reason。
+        **全被拦且无回落**（无 LLM / `--no-llm`）时，终态用共享映射表的裁决
+        而不是原症状——LLM 路径早就是这么映射的（`GUARD_REASON_TO_FAILURE_TYPE`
+        的 `miss`），同一候选不该因来路不同而给 CI 两个不同的结论
+        （Task 2.4 终审 P3-1）。
+        """
         return RecoveryResult(
-            recovered=False, failure_type=ctx.failure_type,
+            recovered=False,
+            failure_type=self._terminal_failure_type(ctx, blocks),
             detail=self._attach({"stages": stages, "recovery": reason},
                                 samples, events))
+
+    @staticmethod
+    def _terminal_failure_type(ctx: RecoveryContext,
+                               blocks: list[str] | None) -> str:
+        """无回落时的终态 failure_type（安全裁决优先于原症状）。
+
+        多条候选各被拦时取**最严**的一条：`SECURITY_BLOCKED`（10.1 硬拦）
+        压过 `RISK_BLOCKED`（风险门控）。报成原症状（ELEMENT_NOT_FOUND）会让
+        CI 把「被策略拦下」读成「元素漂移」——排障方向完全错，而
+        `SECURITY_BLOCKED` 还会让用例走 BLOCKED/exit 4（8.1/8.4 的既有语义）。
+        """
+        for reason in ("SECURITY_BLOCKED", "RISK_BLOCKED"):
+            if blocks and reason in blocks:
+                return GUARD_REASON_TO_FAILURE_TYPE.get(reason, ctx.failure_type)
+        return ctx.failure_type
 
     # --- Experience 消费（设计 5.1 try_experiences；Task 2.4） ---
 
     def _try_experiences(self, ctx: RecoveryContext, stages: list,
                          samples: list[dict], events: list[dict],
-                         screen_res, page_red: str | None
+                         blocks: list[str], screen_res, page_red: str | None
                          ) -> RecoveryResult | None:
         """设计 5.1 主循环：lookup → 逐候选 Guard（4.7 决定是否记样本）→
         EXECUTE 则执行 + postcondition → 成功返回 `kind="experience"`；
@@ -612,7 +663,7 @@ class RecoveryEngine:
         for exp in candidates:
             hit = self._try_one_experience(
                 ctx, exp, stages, current_screen_id, fingerprint, samples,
-                events)
+                events, blocks)
             if hit is not None:
                 return hit
         stages.append({"stage": "experience", "outcome": "exhausted",
@@ -623,7 +674,8 @@ class RecoveryEngine:
                             current_screen_id: str | None,
                             fingerprint: str | None,
                             samples: list[dict],
-                            events: list[dict]) -> RecoveryResult | None:
+                            events: list[dict],
+                            blocks: list[str]) -> RecoveryResult | None:
         """单个候选：Guard → 4.7 样本 → EXECUTE 则执行 + postcondition。
 
         返回 RecoveryResult = 本候选救回来了；None = 换下一个候选
@@ -671,6 +723,14 @@ class RecoveryEngine:
         if gres.outcome != "EXECUTE":
             stages.append(entry)
             if gres.outcome == "BLOCK":
+                if gres.reason in GUARD_POLICY_BLOCK_REASONS:
+                    # 只有安全/风险拦截才是「裁决」；NOT_FOUND/AMBIGUOUS/
+                    # TYPE_MISMATCH 是普通失败，不参与终态改写。
+                    blocks.append(gres.reason)
+                if gres.reason in GUARD_POLICY_BLOCK_REASONS:
+                    # 只有安全/风险拦截才是「裁决」；NOT_FOUND/AMBIGUOUS/
+                    # TYPE_MISMATCH 是普通失败，不参与终态改写。
+                    blocks.append(gres.reason)
                 # 只有 BLOCK 才是「拦」（MISS 是「此刻不适用」，由上面的
                 # experience_hit 的 outcome/reason 如实表达）。事件名如实。
                 self._emit(events, "experience_guard_block",
@@ -1010,7 +1070,7 @@ class RecoveryEngine:
         if result.outcome != "EXECUTE":
             # miss 负责追加终态段——validate 段全路径恰好入栈一次
             #（E1 红线测试钉住：trace 的 validate 段必须带 outcome）
-            return miss(GUARD_REASON_TO_LLM_FAILURE.get(
+            return miss(GUARD_REASON_TO_FAILURE_TYPE.get(
                             result.reason, ctx.failure_type), validate_entry)
         stages.append(validate_entry)
         element = found_box[0]

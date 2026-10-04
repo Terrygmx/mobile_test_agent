@@ -33,6 +33,7 @@ from executor.policy import FailurePhase, Idempotency
 from experience import SQLiteExperienceStore
 from experience.models import CandidateSeed
 from experience.store import record_sample_runs
+from llm.budget import LLMBudget
 from repository.loader import LocatorStrategy
 from testcase.schema import Risk
 from tests.fault_injection.fi_support import El, FakeLLM, llm_json
@@ -476,16 +477,14 @@ def test_experience_candidate_also_passes_10_1_guard(store):
         "4.7：安全拦截不是「用了但错了」——不计样本"
 
 
-def test_screen_recognition_failure_falls_back_to_registered_screen(store):
-    """屏识别失败 → 回落**登记屏**（P1 既有口径），不是 fail-closed。
+def test_screen_identification_ran_and_failed_is_fail_closed(store):
+    """识别**跑过但没结论** → `SCREEN_UNKNOWN → MISS`，候选不执行、不记样本。
 
-    这是有意保留的既有行为：`_current_screen_id` 在识别失败时退回
-    `ctx.screen_id`。收紧成 `SCREEN_UNKNOWN → MISS` 会砍掉「屏识别失败」场景
-    的全部恢复能力，**并且会同时改变 P1 的 LLM 路径**（两条路径共用本函数，
-    plan 的「P1 行为保留」是硬约束）——必须单独立项。
-
-    本测试把现状**钉住**：谁改这条口径，这里先红，逼他先处理那条约束
-    （Task 2.4 评审 P2-2）。
+    设计 §5/§4.7 的明文规则，此前被 `ctx.screen_id` 回落变成死代码。更要命的
+    是那回落让 Experience 路径的屏校验**自比自**（`current_screen` 与
+    `exp.screen_id` 都等于 `ctx.screen_id` → 永远相等 → Guard 第一环从不触发），
+    于是「页面没有任何已登记 marker」时，只要恰好存在同名唯一元素，候选就会
+    在**未确认屏**的情况下执行（Task 2.4 终审 P2-2 的收口）。
     """
     _seed(store)
     ctx, dispatched = _ctx(page_source=lambda: UNKNOWN_PAGE,
@@ -494,8 +493,29 @@ def test_screen_recognition_failure_falls_back_to_registered_screen(store):
 
     entry = next(s for s in r.detail["stages"] if s["stage"] == "screen")
     assert entry["outcome"] == "CURRENT_SCREEN_UNKNOWN", "屏确实没识别出来"
+    assert not r.recovered and dispatched == [], "证明不了屏就不执行候选"
+    cand = next(s for s in r.detail["stages"]
+                if s["stage"] == "experience_candidate")
+    assert (cand["outcome"], cand["reason"]) == ("MISS", "SCREEN_UNKNOWN")
+    assert cand["record_as_sample"] is False, "4.7：SCREEN_UNKNOWN 不计样本"
+    assert r.detail.get("experience_runs") in (None, [])
+
+
+def test_screen_identification_not_run_keeps_the_registered_screen(store):
+    """识别**根本没跑**（无 Repository）→ 沿用登记屏先验（P1 行为保留）。
+
+    没有 Repository 就没有 marker 表，「屏识别」这件事无从发生——不是「证明
+    失败」而是「无从判定」，任何屏校验都必然空转。此时收紧只会白掉能力而不
+    增加安全性，故保留 P1 的登记屏先验。两条口径的边界就是「识别跑没跑」。
+    """
+    _seed(store)
+    ctx, dispatched = _ctx(find_all=lambda loc: [El()])
+    r = _engine(store, repo=None).recover(ctx)   # 无 repo → screen_res is None
+
+    assert not any(s["stage"] == "screen" for s in r.detail["stages"]), \
+        "前提：识别确实没跑（没有 screen 段）"
     assert r.recovered and len(dispatched) == 1, \
-        "当前口径：回落到登记屏（HomeView）后照常放行"
+        "沿用登记屏先验 → 照常放行（P1 行为保留）"
 
 
 def test_missing_run_id_writes_no_sample(store):
@@ -666,7 +686,6 @@ def test_payload_is_json_serializable(store):
     json.dumps(r.detail)
 
 
-
 # --- 6c. §11.1 的 recovery 期事件（Task 2.4 终审：事件从半接改全接） --------
 
 
@@ -704,7 +723,7 @@ def test_hit_path_emits_lookup_hit_execution(store):
 
     assert r.recovered and len(dispatched) == 1
     assert _event_types(r) == ["experience_lookup", "experience_hit",
-                              "experience_execution"]
+                               "experience_execution"]
     lookup = _events(r)[0]["detail"]
     assert lookup == {"app_id": APP, "screen_id": "HomeView",
                       "target_id": "login_button", "candidates": 1}
@@ -731,10 +750,10 @@ def test_miss_path_emits_lookup_then_miss(store):
 
 
 def test_guard_block_emits_guard_block_event_without_sample(store):
-    """Guard BLOCK（0 匹配）→ 有 `experience_guard_block` 事件、**没有样本**。
+    """Guard BLOCK（0 匹配）→ 有 `experience_guard_block` 事件、样本照记。
 
-    4.7：唯一性失败计样本，风险拦截不计——但**事件与样本不同生共死**：
-    只看样本会以为「压根没查过」，而 trace 上必须看得见「查了、拦了、为什么」。
+    4.7：唯一性失败是「用了但错了」→ 计样本；而**事件与样本不同生共死**——
+    只看样本会以为「压根没查过」，trace 上必须看得见「查了、拦了、为什么」。
     """
     _seed(store, value="never_there")
     ctx, _ = _ctx(find_all=lambda loc: [])
@@ -742,7 +761,7 @@ def test_guard_block_emits_guard_block_event_without_sample(store):
 
     assert not r.recovered
     assert _event_types(r) == ["experience_lookup", "experience_hit",
-                              "experience_guard_block"]
+                               "experience_guard_block"]
     assert _events(r)[2]["detail"]["reason"] == "TARGET_NOT_FOUND"
     assert _events(r)[2]["detail"]["record_as_sample"] is True
     [sample] = r.detail["experience_runs"]
@@ -796,130 +815,109 @@ def test_events_are_json_serializable(store):
     json.dumps(r.detail["experience_events"])
 
 
-# --- 6c. §11.1 的 recovery 期事件（Task 2.4 终审：事件从半接改全接） --------
+# --- 6d. 终态 failure_type 的对称化（终审 P3-1） ---------------------------
 
 
-def _events(r):
-    return r.detail.get("experience_events") or []
+def _guard_blocking(pattern="element:signin_*"):
+    from executor.guard import BlockedTarget, EnvKind, Guard
+    return Guard(EnvKind.SANDBOX,
+                 blocked_targets=(BlockedTarget.parse(pattern),))
 
 
-def _event_types(r):
-    return [e["event_type"] for e in _events(r)]
+def test_security_blocked_without_fallback_is_the_terminal_failure_type(store):
+    """候选被 10.1 拦且**无回落** → 终态是 `SECURITY_BLOCKED`，不是原症状。
 
-
-def test_event_names_are_the_design_11_1_vocabulary(store):
-    """引擎发的事件名必须**逐个**在 `EXPERIENCE_EVENT_TYPES` 里。
-
-    这条不是「测实现细节」：`record_experience_event` 对不在集合里的名字
-    fail-loud 抛错——引擎侧写错一个字，落库那一刻整例崩掉。这里把两侧的
-    词汇表钉在一起（与 4.7 样本的字段名同一类保护）。
+    与 LLM 路径同一映射表（E1：同一候选不因来路不同而结论不同）。报成原症状
+    （ELEMENT_NOT_FOUND）会让 CI 把「被策略拦下」读成「元素漂移」——排障方向
+    完全错；而 `SECURITY_BLOCKED` 还会让用例走 BLOCKED/exit 4（8.1/8.4）。
     """
-    from tracer.storage import EXPERIENCE_EVENT_TYPES
-
-    _seed(store)
-    ctx, _ = _ctx(find_all=lambda loc: [El()])
-    r = _engine(store).recover(ctx)
-
-    assert _event_types(r), "命中路径必须发事件"
-    unknown = set(_event_types(r)) - EXPERIENCE_EVENT_TYPES
-    assert not unknown, f"引擎发了设计词汇表外的事件名：{sorted(unknown)}"
-
-
-def test_hit_path_emits_lookup_hit_execution(store):
-    """命中并执行成功 → lookup / hit / execution 三条，字段对齐 §11.1 示例。"""
-    _seed(store)
+    _seed(store, value="signin_button")
+    repo = _Repo(entries={"signin_button": ("HomeView", Risk.LOW, "button")})
     ctx, dispatched = _ctx(find_all=lambda loc: [El()])
-    r = _engine(store).recover(ctx)
+    r = _engine(store, repo=repo, guard=_guard_blocking()).recover(ctx)
 
-    assert r.recovered and len(dispatched) == 1
-    assert _event_types(r) == ["experience_lookup", "experience_hit",
-                              "experience_execution"]
-    lookup = _events(r)[0]["detail"]
-    assert lookup == {"app_id": APP, "screen_id": "HomeView",
-                      "target_id": "login_button", "candidates": 1}
-    hit = _events(r)[1]["detail"]
-    assert hit["experience_id"] and hit["status_before"] == "CANDIDATE"
-    assert hit["screen_match"] is True and hit["uniqueness_count"] == 1
-    assert hit["type_match"] is True and hit["effective_risk"] == "LOW"
-    assert hit["build_in_validated_set"] is False, \
-        "还没记过成功样本 → 本 build 不在 validated 集合里（§11.1 字段）"
-    assert hit["outcome"] == "EXECUTE"
-    exe = _events(r)[2]["detail"]
-    assert exe["execution"] == "SUCCESS"
-    assert exe["result"] == "RECOVERED_EXPERIENCE", "§11.1 示例的 result 口径"
+    assert not r.recovered and dispatched == []
+    assert r.failure_type == "SECURITY_BLOCKED", \
+        "无回落时终态用 Guard 的裁决（与 LLM 路径同一映射表）"
 
 
-def test_miss_path_emits_lookup_then_miss(store):
-    """空库 → lookup（候选 0）+ miss；**不发 hit/execution**（没有候选）。"""
-    ctx, _ = _ctx(find_all=lambda loc: [El()])
+def test_risk_blocked_without_fallback_uses_the_same_mapping(store):
+    """风险门控（risk != LOW）同样改写终态——与 LLM 路径同表。"""
+    _seed(store)
+    ctx, _ = _ctx(effective_risk=Risk.HIGH, find_all=lambda loc: [El()])
     r = _engine(store).recover(ctx)
 
     assert not r.recovered
-    assert _event_types(r) == ["experience_lookup", "experience_miss"]
-    assert _events(r)[0]["detail"]["candidates"] == 0
+    assert r.failure_type == "LLM_RISK_BLOCKED", \
+        "值里的 LLM_ 前缀是既有报告契约值，保留不动（改名换值会割裂历史报告）"
 
 
-def test_guard_block_emits_guard_block_event_without_sample(store):
-    """Guard BLOCK（0 匹配）→ 有 `experience_guard_block` 事件、**没有样本**。
+def test_ordinary_guard_failure_does_not_rewrite_terminal(store):
+    """0 匹配 / 多匹配 / 类型不符是**普通失败**，不改终态（仍原症状）。
 
-    4.7：唯一性失败计样本，风险拦截不计——但**事件与样本不同生共死**：
-    只看样本会以为「压根没查过」，而 trace 上必须看得见「查了、拦了、为什么」。
+    只有安全/风险拦截才是「裁决」。把 NOT_FOUND 也映射成 Guard 结论会让用例
+    集体变成 BLOCKED，CI 从此分不清「漂移」与「被策略拦」。
     """
     _seed(store, value="never_there")
     ctx, _ = _ctx(find_all=lambda loc: [])
     r = _engine(store).recover(ctx)
 
     assert not r.recovered
-    assert _event_types(r) == ["experience_lookup", "experience_hit",
-                              "experience_guard_block"]
-    assert _events(r)[2]["detail"]["reason"] == "TARGET_NOT_FOUND"
-    assert _events(r)[2]["detail"]["record_as_sample"] is True
-    [sample] = r.detail["experience_runs"]
-    assert sample["result"] == "FAILURE", "唯一性失败是「用了但错了」→ 计样本"
+    assert r.failure_type == "ELEMENT_NOT_FOUND", "维持原症状"
 
 
-def test_risk_blocked_emits_event_without_sample(store):
-    """风险拦截：`record_as_sample=False`（4.7 第 4 行）——事件照发，样本不记。"""
-    _seed(store)
-    ctx, _ = _ctx(effective_risk=Risk.HIGH, find_all=lambda loc: [El()])
-    r = _engine(store).recover(ctx)
+def test_terminal_failure_type_precedence_is_order_independent(store):
+    """多条候选各被拦 → 取最严的一条，且**与候选顺序无关**。
+
+    ⚠️ 当前 Guard 顺序下两种 reason **不会同时出现**（风险检查在 10.1 之前，
+    而 `effective_risk` 是 ctx 级、对全部候选相同）——所以这条直接测纯函数
+    `_terminal_failure_type`，把「次序规则」的契约钉住：将来 risk 若改成
+    逐候选判定，结论不会退化成「取决于候选顺序」的静默行为。
+    """
+    from agent.recovery import RecoveryEngine
+
+    ctx, _ = _ctx()
+    cases = [(["SECURITY_BLOCKED", "RISK_BLOCKED"], "SECURITY_BLOCKED"),
+             (["RISK_BLOCKED", "SECURITY_BLOCKED"], "SECURITY_BLOCKED"),
+             (["RISK_BLOCKED"], "LLM_RISK_BLOCKED"),
+             ([], "ELEMENT_NOT_FOUND"),
+             (None, "ELEMENT_NOT_FOUND")]
+    for blocks, expected in cases:
+        assert RecoveryEngine._terminal_failure_type(ctx, blocks) == expected, \
+            f"blocks={blocks}"
+
+
+def test_risk_gate_fires_before_10_1_recheck_with_high_risk(store):
+    """`effective_risk != LOW` 时全部候选都在**风险门控**被拦（顺序使然）。
+
+    这是上一条「两种 reason 不会同时出现」的实证：ctx 的风险对每条候选相同，
+    且风险检查先于 10.1 复检，所以 SECURITY 那条分支在 HIGH 语境下不可达。
+    """
+    _seed(store, value="signin_button")
+    repo = _Repo(entries={"signin_button": ("HomeView", Risk.LOW, "button")})
+    ctx, _ = _ctx(find_all=lambda loc: [El()], effective_risk=Risk.HIGH)
+    r = _engine(store, repo=repo, guard=_guard_blocking()).recover(ctx)
 
     assert not r.recovered
-    blocked = next(e for e in _events(r)
-                   if e["event_type"] == "experience_guard_block")
-    assert blocked["detail"]["reason"] == "RISK_BLOCKED"
-    assert blocked["detail"]["record_as_sample"] is False
-    assert r.detail.get("experience_runs") in (None, [])
+    assert r.failure_type == "LLM_RISK_BLOCKED"
+    reasons = [e["detail"]["reason"] for e in _events(r)
+               if e["event_type"] == "experience_guard_block"]
+    assert reasons == ["RISK_BLOCKED"], "风险门控先于 10.1 复检命中"
 
 
-def test_aux_execution_event_backfilled_with_observed_outcome(store):
-    """aux 的 execution 事件先标待定，调用方回填后反映**观测到的**终态。"""
-    _seed(store)
-    ctx, _ = _ctx(action=None, redispatch=None, find_all=lambda loc: [El()])
-    r = _engine(store).recover(ctx)
+def test_llm_fallback_verdict_wins_over_experience_blocks(store):
+    """有回落时终态由 LLM 那一次决定——Experience 的拦截不改写它。
 
-    exe = next(e for e in _events(r)
-               if e["event_type"] == "experience_execution")["detail"]
-    assert exe["execution"] == "not_dispatched"
-    assert exe["result"] is None and exe["pending_observation"] is True
-
-    resolve_deferred_sample(r, succeeded=False,
-                            failure_reason="AUX_RERUN_FAILED")
-    assert exe["execution"] == "FAILURE" and exe["result"] is None
-    assert exe["reason"] == "AUX_RERUN_FAILED"
-    assert "pending_observation" not in exe
-
-
-def test_no_store_and_incomplete_key_emit_no_events(store):
-    """没查库就不发事件——事件是「发生过什么」的记录，不是「想过什么」。"""
-    ctx, _ = _ctx(app_id="", find_all=lambda loc: [El()])
-    r = _engine(store).recover(ctx)
-    assert _events(r) == []
-
-
-def test_events_are_json_serializable(store):
-    """事件 payload 会进 `rec.detail`（→ steps.detail_json），必须可序列化。"""
-    _seed(store)
+    「被拦」是**尝试过的候选**的裁决；LLM 是之后新起的一次尝试，它的结论才是
+    最后发生的症状。否则会拿旧的拦截盖掉新的失败，掩盖真正的排障线索。
+    """
+    _seed(store, value="signin_button")
+    repo = _Repo(entries={"signin_button": ("HomeView", Risk.LOW, "button")})
     ctx, _ = _ctx(find_all=lambda loc: [El()])
-    r = _engine(store).recover(ctx)
-    json.dumps(r.detail["experience_events"])
+    eng = _engine(store, repo=repo, guard=_guard_blocking(),
+                  llm=FakeLLM(['{"nope": true}']), budget=LLMBudget())
+    r = eng.recover(ctx)
+
+    assert not r.recovered
+    assert r.failure_type != "SECURITY_BLOCKED", \
+        "LLM 的 miss 才是终态（这里 LLM_INVALID_OUTPUT）"

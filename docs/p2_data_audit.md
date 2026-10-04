@@ -618,3 +618,88 @@ Task 2.4 / M2）**，前置评审的 2×P2 + 6×P3 处置全部核销，遗留 0
 - 全量 pytest **926 passed**（925 + 1：`unfilled_deferred_sample` 那条）。
 - Gate M2 真机复跑全绿：`verdict=PASS`、`device_half=PASS`、12 项判据全 PASS、
   elapsed 54.0s、G1 `13 passed`；新探活 detail 已带下界说明。
+
+---
+
+## Task 2.4 清延后项（2/2）——10.1 终态对称 + SCREEN_UNKNOWN 收紧（2026-10-04）
+
+终审「建议动作」第 4 条：M3 起步前先清 plan 的延后项清单，别让它们随任务滚动。
+本提交处理剩下两条（**都会改行为**，故与 (1/2) 的加法性改动分开）：
+
+### 先更正一处错误论断（重要）
+
+Task 2.4 评审修订记录里写过「生产 `cli/main.py` 装配 `RecoveryEngine` 时**没传
+`guard`** → 两条路径的 `policy_check` 在生产中一直是 `None`、10.1 复检**从未
+生效**」。**该论断是错的，已由探针证伪**：
+
+- `cli/main.py:508` 有一句 `pipeline.recovery.guard = runner.guard`（在 runner
+  装配之后），两条路径共用同一个 Guard 实例；
+- 探针：`guard=None` 时 `_policy_check_for` 返回 None；`guard` 接上后返回可调用
+  的 checker 且放行（无 violation）。
+
+错因：只看了 `RecoveryEngine(...)` 的构造参数，**没看后续的属性注入**。
+10.1 复检在生产中一直是生效的（LLM 路径自 P1 起、Experience 路径自本任务起）。
+已同步更正 `review/review_p2_task24_2026-10-04.md` 与
+`agent/recovery.py::_policy_check_for` 的 docstring。
+
+**Item 4a（把 guard 接进引擎）因此不存在**——无需改动。
+
+### Item 4b：10.1 拦后终态 `failure_type` 对称化（终审 P3-1）
+
+- 症状：Experience 路径被 10.1 拦后对外 `failure_type` 仍是原症状
+  （`ELEMENT_NOT_FOUND`），而 LLM 路径同候选给 `SECURITY_BLOCKED`——映射表只有
+  LLM 侧一个消费点。触发面：**候选全被拦且无回落**（`--no-llm` / 未配 LLM）。
+- 后果：CI 会把「被策略拦下」读成「元素漂移」，排障方向完全错；且丢掉
+  BLOCKED/exit 4 的语义。
+- 修法：`_try_experiences` 收集**安全/风险拦截**的 reason（
+  `GUARD_POLICY_BLOCK_REASONS = {SECURITY_BLOCKED, RISK_BLOCKED}`，新增于
+  `experience/runtime_guard.py`）；无回落时经新的
+  `RecoveryEngine._terminal_failure_type` 用**同一张映射表**产出终态。多条候选
+  取最严（SECURITY > RISK），且与候选顺序无关。
+- **映射表改名** `GUARD_REASON_TO_LLM_FAILURE` → `GUARD_REASON_TO_FAILURE_TYPE`：
+  现在有两个消费方，名字里的 LLM 前缀已不准。**值不动**（`LLM_` 前缀是既有报告
+  契约值，改名换值会让历史报告的同一症状出现两种写法）。
+- 边界（有意）：只有安全/风险拦截改写终态；`NOT_FOUND` / `AMBIGUOUS` /
+  `TYPE_MISMATCH` 是普通失败，**不改**——否则用例集体变 BLOCKED，CI 分不清
+  「漂移」与「被策略拦」。有回落时终态由 LLM 那一次决定（它是最后发生的症状）。
+- 实测发现：两种 reason 在当前 Guard 顺序下**不会同时出现**（风险检查先于 10.1
+  复检，而 `effective_risk` 是 ctx 级、对全部候选相同）→ 次序规则用纯函数直接
+  测，并把「不会同时出现」也钉成一条实证测试。
+
+### Item 1：SCREEN_UNKNOWN 收紧（终审 P2-2）
+
+- 症状：`_current_screen_id` 在识别失败时回落 `ctx.screen_id`，使设计 §5/§4.7 的
+  `SCREEN_UNKNOWN → MISS` 成为**死代码**；更严重的是让 Experience 路径的屏校验
+  **自比自**——`current_screen` 与 `exp.screen_id` 都等于 `ctx.screen_id` → 恒等
+  → Guard 第一环从不触发。于是「页面没有任何已登记 marker」时，只要恰好存在同名
+  唯一元素，候选就会在**未确认屏**的情况下执行。
+- **修法（关键是划对边界）**：两种输入必须分开——
+  1. **识别跑过**（`screen_res is not None`）→ 只认观测结果；无 marker /
+     多 marker 互斥 / 解析失败 → `None` → `SCREEN_UNKNOWN → MISS`（§5 落地）；
+  2. **识别没跑**（`screen_res is None`：无 Repository——marker 表本身不存在；
+     无页面；该动作未准入 LOCAL_RECONCILE）→ 沿用 P1 的**登记屏先验**。
+     此时不是「证明失败」而是「无从判定」，任何屏校验都必然空转，收紧只掉能力
+     不增安全。
+- **实测边界**：先按「一律不回落」实现 → **29 个测试失败**（全在 P2 期单测
+  fixture，`_engine(store)` 默认 `repo=None`），**P1 的 24 行矩阵与 LLM 矩阵全过**。
+  29 个失败正说明「无 repo」那一类被回落承载着，而它在生产里对应的是
+  `--fake-driver` 无 `--generated` 的模式。按上边界重写后只剩 1 个失败（钉住旧
+  行为的钉子测试），P1 全绿。
+- **对「P1 行为保留」的刻意偏离**（决策记录已进设计附录）：偏离面仅限「屏识别
+  跑过且没结论」这一种 P1 从未规定的输入，方向是**收紧**（照常恢复 →
+  fail-closed 跳过）；「识别没跑」的那条 P1 行为原样保留。回归底线（P1 全部
+  tests + 真机 Gate）实测通过。
+
+### 顺带修正（测试替身与生产接线的漂移）
+
+`tests/fault_injection/fi_support.run_matrix` **没有复刻** `cli/main.py` 的
+`pipeline.recovery.guard = runner.guard`，于是出现「生产会拦、矩阵不拦」的假绿
+（本次实测踩到）。已补上，替身从此忠实反映生产接线。
+
+### 复跑证据
+
+- 全量 pytest **949 passed**（946 + 3：终态对称 2 + 屏识别边界 1）。
+- Gate M2 真机复跑全绿：`verdict=PASS`、`device_half=PASS`、12 项判据全 PASS、
+  G1 `18 passed`。
+  （中间一次因网关连续 3 次 `LLM_PROVIDER_ERROR` + 后续 `wait ProfileView`
+  超时而红，复跑即绿——环境抖动，非回归。）

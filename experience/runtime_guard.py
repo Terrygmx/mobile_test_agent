@@ -47,7 +47,9 @@ __all__ = [
     "GuardResult", "RuntimeContext", "guard_candidate",
     "experience_runtime_guard", "experience_locator",
     "compute_effective_risk",
-    "GUARD_REASON_TO_LLM_FAILURE",
+    "GUARD_REASON_TO_FAILURE_TYPE",
+    "GUARD_POLICY_BLOCK_REASONS",
+    "GUARD_POLICY_BLOCK_REASONS",
 ]
 
 
@@ -73,8 +75,14 @@ class RuntimeContext:
     screen_fingerprint: str | None = None
 
 
-# LLM 侧 failure_type 映射（recovery._llm_stage 消费；单一真值源）
-GUARD_REASON_TO_LLM_FAILURE: dict[str, str] = {
+# Guard reason → **终态 failure_type** 映射（单一真值源，两个消费方：
+# `recovery._llm_stage` 的 miss，与 `recovery._unrecovered` 的「候选全被
+# 安全/风险拦且无回落」终态）。Task 2.4 终审 P3-1 前只有 LLM 侧一个消费点，
+# 故旧名带 `_LLM_`；两个消费方共享一张表才是 E1「同一候选不因来路不同而
+# 结论不同」的落点，名字里的 LLM 前缀随之作废。
+# 值里的 `LLM_` 前缀是**既有报告契约值**（JUnit/HTML 已按它呈现），保留不
+# 动——改名换值会让历史报告的同一症状出现两种写法。
+GUARD_REASON_TO_FAILURE_TYPE: dict[str, str] = {
     "SCREEN_UNKNOWN": "LLM_TARGET_SCREEN_MISMATCH",
     "SCREEN_MISMATCH": "LLM_TARGET_SCREEN_MISMATCH",
     "TARGET_UNREGISTERED": "LLM_TARGET_SCREEN_MISMATCH",
@@ -85,6 +93,20 @@ GUARD_REASON_TO_LLM_FAILURE: dict[str, str] = {
     "SECURITY_BLOCKED": "SECURITY_BLOCKED",
     "LLM_LOW_CONFIDENCE": "LLM_LOW_CONFIDENCE",
 }
+
+
+# 「安全 / 风险拦截」类 reason——它们的终态**不是原症状**而是 Guard 的裁决。
+# 与 TARGET_NOT_FOUND / AMBIGUOUS / TYPE_MISMATCH 区分：后三者是「用了但错了」
+# 的普通失败，不改终态；前两者是策略裁决，无回落时必须如实报成拦截
+# （Task 2.4 终审 P3-1：LLM 路径早就是这么映射的，Experience 路径要对齐）。
+GUARD_POLICY_BLOCK_REASONS = frozenset({"SECURITY_BLOCKED", "RISK_BLOCKED"})
+
+
+# 「安全 / 风险拦截」类 reason——它们的终态**不是原症状**而是 Guard 的裁决。
+# 与 TARGET_NOT_FOUND / AMBIGUOUS / TYPE_MISMATCH 区分：后三者是「用了但错了」
+# 的普通失败，不改终态；前两者是策略裁决，无回落时必须如实报成拦截
+# （Task 2.4 终审 P3-1：LLM 路径早就是这么映射的，Experience 路径要对齐）。
+GUARD_POLICY_BLOCK_REASONS = frozenset({"SECURITY_BLOCKED", "RISK_BLOCKED"})
 
 
 def _norm_type(t: str | None) -> str:
