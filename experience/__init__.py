@@ -23,6 +23,11 @@ from experience.models import (
     VerificationPolicy,
 )
 from experience.schema_migrations import migrate, current_version
+from experience.store import (
+    EmptyExperienceStore,
+    ExperienceStore,
+    SQLiteExperienceStore,
+)
 
 # review_p2_task12 P3-5：默认库路径**单点定义**——Task 2.2 的 --exp-db
 # 装配直接 import，两处字面量必漂移。
@@ -32,4 +37,5 @@ __all__ = [
     "Experience", "ExperienceStatus", "CandidateSeed", "ExperienceRun",
     "StateEvent", "VerificationPolicy", "VerificationDecision",
     "migrate", "current_version", "DEFAULT_EXPERIENCE_DB",
+    "ExperienceStore", "SQLiteExperienceStore", "EmptyExperienceStore",
 ]

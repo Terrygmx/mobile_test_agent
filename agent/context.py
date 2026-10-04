@@ -8,15 +8,19 @@ callable 注入（`refind` / `redispatch` / `page_source` / `postcondition_check
 与「禁止在 Executor 内直接 call_llm()」（9.1）同一隔离纪律：设备访问和
 LLM 调用都只存在于注入边界。
 
-`ExperienceStore` / `EmptyExperienceStore` 是设计 20 节的 V2 预留接口——
-引擎在「Local Reconciliation 之后、LLM 之前」调用 `lookup()`，P1 恒返回 []。
+`ExperienceStore` / `EmptyExperienceStore` 的**唯一定义**在
+`experience.store`（P2 设计 7 节；本模块旧稿「设计 20 节」编号引用已更正），
+此处 re-export 防两套接口。Empty 是 P1 占位（恒返回 []），Task 2.4 引擎
+接真 Store 后退役；引擎在「Local Reconciliation 之后、LLM 之前」调用。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Protocol, runtime_checkable
+from typing import Callable
 
 from executor.policy import FailurePhase, Idempotency
+# 全仓唯一定义（review 纪律：防两套接口）——本模块只 re-export
+from experience.store import EmptyExperienceStore, ExperienceStore
 
 __all__ = [
     "RecoveryContext",
@@ -24,22 +28,6 @@ __all__ = [
     "ExperienceStore",
     "EmptyExperienceStore",
 ]
-
-
-@runtime_checkable
-class ExperienceStore(Protocol):
-    """20 节 V2 预留：经验库按 (app_build, screen, target_id) 查恢复策略。"""
-
-    def lookup(self, app_build: str, screen: str,
-               target_id: str) -> list[dict]: ...
-
-
-class EmptyExperienceStore:
-    """P1 实现：永远返回 []（20 节）。位置固定在 reconciliation 后、LLM 前。"""
-
-    def lookup(self, app_build: str, screen: str,
-               target_id: str) -> list[dict]:
-        return []
 
 
 @dataclass

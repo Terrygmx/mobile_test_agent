@@ -144,10 +144,14 @@ def recover(expected_id: str, error: Exception, ex: Executor,
 # ---------------------------------------------------------------------------
 
 from agent.context import (          # noqa: E402
-    EmptyExperienceStore,
-    ExperienceStore,
     RecoveryContext,
     RecoveryResult,
+)
+# P2-03：ExperienceStore/Empty 的唯一定义在 experience.store——
+# 直接 import 单一真值源（context.py 只 re-export 兼容旧路径）
+from experience.store import (   # noqa: E402
+    EmptyExperienceStore,
+    ExperienceStore,
 )
 from agent.policy import (           # noqa: E402
     RecoveryAction,

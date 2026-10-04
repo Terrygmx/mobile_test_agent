@@ -123,3 +123,28 @@ runs=102 / recoveries=50 / reviews=1 / seed_ready=1（原 0）。
 - **P3-5**：DEFAULT_EXPERIENCE_DB 单点常量（experience/__init__ 导出，
   Task 2.2 的 --exp-db 装配直接 import，杜绝两处字面量漂移）。
 - 实测：pytest 826 passed（+4）。
+
+---
+
+## Task 2.1 完成记录（P2-03 ExperienceStore 单写者，2026-10-04）
+
+- **交付**：experience/store.py——`ExperienceStore` Protocol（设计 7.1
+  接口真身）+ `SQLiteExperienceStore`（SQLite 实现）+ `EmptyExperienceStore`
+  （P1 占位**过渡保留**，旧签名行为不变，Task 2.4 引擎接真 Store 后退役）。
+- **接口**：lookup（按 app/screen/target 三键；REJECTED 不返回——人工判定
+  不可用的策略不该被消费路径看见，行仍在库 list() 可见）/ create_candidate
+  （E5 双重校验：模型 + Store 写入前；同键多次 ACCEPT 各自成行）/ record_run
+  （追加样本 + 原子推进统计，**不触碰 validated_builds**）/ record_success_build
+  （E7 唯一追加入口，集合语义幂等）/ get_runs（时序升序，limit 取最近 N——
+  Verifier 滑动窗口语义）/ update_status（跳变写 experience_state_events，
+  同状态 no-op 不产生事件）/ list。
+- **E9 单写者**：进程内 threading.Lock 串行化全部写方法 + SQLite 层
+  BEGIN IMMEDIATE / busy_timeout 5000（跨进程串行）；Reader 每调用独立
+  连接可并发（并发写 8 线程 ×10 全量落账、3 读者与写并发不炸的测试钉住）。
+  约定（设计 7.2）：产生写操作的套件 CI 串行执行——本类不替 CI 调度。
+- **11.2 保留纪律**：无任何 delete 路径；DEGRADED/REJECTED 后 runs 全量
+  可查（测试钉住）。
+- **接线**：agent/context.py 删除 Protocol/Empty 定义改为 re-export
+  （全仓唯一定义，防两套接口；旧稿「设计 20 节」引用更正为 P2 设计 7 节）；
+  agent/recovery.py import 直连 experience.store，行为不变。
+- 实测：pytest 842 passed（+16）。
