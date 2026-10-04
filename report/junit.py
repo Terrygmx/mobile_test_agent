@@ -30,7 +30,12 @@ def _tc_counts(run: RunResult) -> tuple[int, int, int, int]:
 
 
 def _system_out_text(run: RunResult, report_url: str | None) -> str | None:
-    """8.5：failure_type、恢复摘要、报告链接。全无内容时不输出该节点。"""
+    """8.5：failure_type、恢复摘要、报告链接。全无内容时不输出该节点。
+
+    设计 10（Task 2.4）：恢复摘要里加一层分类（RECOVERED_LLM /
+    RECOVERED_EXPERIENCE / RECOVERED_ASSERTION_TARGET）——CI 的 system-out
+    是排障第一现场，「这次是 LLM 救的还是经验救的」在那里就要看得见。
+    """
     lines: list[str] = []
     for r in run.results:
         if r.status == "PASS":
@@ -40,6 +45,9 @@ def _system_out_text(run: RunResult, report_url: str | None) -> str | None:
             line += f" failure_type={r.failure_type}"
         if r.failure_phase:
             line += f" phase={r.failure_phase}"
+        labels = r.detail.get("recovered_kinds")
+        if labels:
+            line += f" recovered_kind={','.join(labels)}"
         lines.append(line)
         recovery = r.detail.get("recovery")
         if recovery:

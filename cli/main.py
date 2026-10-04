@@ -65,6 +65,11 @@ def build_parser() -> argparse.ArgumentParser:
                             "读取用；如 com.phaset0.logindemo）")
     run_p.add_argument("--udid", metavar="UDID",
                        help="目标模拟器 UDID（默认自动发现 booted 设备）")
+    # Task 2.4：Experience Store 库路径。默认 out/experience.db（与
+    # trace.db 分库——前者可变状态单写者，后者 append-only 流水）。
+    run_p.add_argument("--exp-db", metavar="PATH",
+                       default=str(DEFAULT_EXPERIENCE_DB),
+                       help="Experience Store 库路径（默认 out/experience.db）")
     run_p.add_argument("--metadata", metavar="PATH",
                        help="12.3 source_metadata.json 路径（默认 "
                             "<generated>/source_metadata.json 或 "
@@ -292,7 +297,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     from repository.resolver import Severity
     from testcase.lint import lint as lint_cases, max_severity
 
-    pipeline = SessionPipeline(suites_root=args.suites_root, secrets=secrets)
+    pipeline = SessionPipeline(suites_root=args.suites_root, secrets=secrets,
+                               app_id=args.bundle_id or "")
     try:
         cases = pipeline.discover(suite=args.suite, tag=args.tag,
                                   case=args.case)
@@ -304,6 +310,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     # Task 4.2：RecoveryEngine 装配。LLM_API_KEY 缺省 = 无 LLM（确定性半边
     # 照常工作）；--no-llm 显式禁用（R18-4 语义就此定档：flag 真实生效，
     # 不再是「参数存在=功能存在」）。budget 默认值即 10.5。
+    # Task 2.4：Experience Store 接真（设计 7.1）。惰性构造——库文件在首次
+    # 真正查询/写入时才出现，`mta run --no-llm` 之类不碰经验的 run 不会在
+    # 工作区里留下一个空库（review_p2_task23 P3-6 同款纪律）。
     from agent.recovery import RecoveryEngine
     from llm.budget import LLMBudget
     llm = budget = None
@@ -311,7 +320,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         from llm.provider import LLMProvider
         llm = LLMProvider()
         budget = LLMBudget()
-    pipeline.recovery = RecoveryEngine(repo=repo, llm=llm, budget=budget)
+    pipeline.recovery = RecoveryEngine(repo=repo, llm=llm, budget=budget,
+                                       experience_store=_LazyExperienceStore(
+                                           args.exp_db))
     issues = lint_cases(cases, repo, secrets)
     for i in issues:
         prefix = "ERROR" if i.severity is Severity.ERROR else "WARN "

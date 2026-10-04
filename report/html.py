@@ -80,9 +80,14 @@ def render_run_report(
         j = r.junit
         badge_cls = {"pass": "st-pass", "failure": "st-fail",
                      "error": "st-error", "skipped": "st-skip"}[j.status]
+        # 设计 10（Task 2.4）：恢复分类进明细列——聚合卡片与退出码不变
+        # （RECOVERED 仍是独立一栏、仍 ≠ PASS），只是能一眼看出「LLM 救的
+        # 还是经验救的」。非恢复用例留空，不写 N/A（那一栏本来就无意义）。
+        labels = r.detail.get("recovered_kinds") or []
         rows.append(
             f"<tr><td>{_esc(r.testcase_id)}</td>"
             f'<td><span class="badge {badge_cls}">{_esc(r.status)}</span></td>'
+            f"<td>{_esc(','.join(labels))}</td>"
             f"<td>{_esc(r.failure_type or '')}</td>"
             f"<td>{_esc(r.failure_phase or '')}</td>"
             f"<td>{_esc(r.failure_attribution)}</td>"
@@ -138,10 +143,10 @@ th, td {{ border: 1px solid #ddd; padding: 6px 10px; text-align: left;
 <div class="cards">{cards}</div>
 {breaker_html}
 <table><thead><tr>
-<th>用例</th><th>状态</th><th>failure_type</th><th>phase</th>
+<th>用例</th><th>状态</th><th>恢复分类</th><th>failure_type</th><th>phase</th>
 <th>attribution</th><th>cleanup</th><th>耗时(s)</th>
 </tr></thead><tbody>
-{''.join(rows) or '<tr><td colspan="7">（无用例执行）</td></tr>'}
+{''.join(rows) or '<tr><td colspan="8">（无用例执行）</td></tr>'}
 </tbody></table>
 {unexec_html}
 </body></html>"""

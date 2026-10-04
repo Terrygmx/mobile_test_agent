@@ -323,3 +323,142 @@ runs=102 / recoveries=50 / reviews=1 / seed_ready=1（原 0）。
 - 实测：pytest 881 passed（+7：修订项测试；test_review_seed.py 10 → 17）。
 
 
+
+---
+
+## Task 2.4 完成记录（P2-03/04/05 集成：Recovery 接真 Store + 结果语义，2026-10-04）
+
+**Objective**：`try_experiences` 主循环落地 + `detail.kind` 细分。本任务是
+Gate M2 的集成载体——P1 的 `EmptyExperienceStore` 占位到此退役，「知识
+积累」第一次真的接上恢复引擎。
+
+### 交付
+
+- `agent/recovery.py`：`_try_experiences()`（设计 5.1 主循环：lookup →
+  逐候选 Guard → 4.7 记样本 → EXECUTE 则执行 + postcondition → 成功返回
+  `kind="experience"`；全部候选用尽回落 LLM，仍受 P1 Budget 控制）+
+  `_try_one_experience()`（单候选）+ `_queue_sample()`（4.7 payload 的
+  **唯一**落库内容决策点）+ `_FindAllAdapter`（数量观测端）+ `_recovered()`
+  / `_current_screen_id()` / `_with_samples()` / `_unrecovered()` 四个收口
+  辅助。`experience_store=None` 表达「没有经验库」，与「空库」在报告上
+  可区分（`no_store` vs `miss`）。
+- `experience/store.py`：`EmptyExperienceStore` **退役删除**；
+  新增模块级 `record_sample_runs(store, samples, *, step_id)`——引擎产出
+  payload、管线补真 `steps.id` 的两段式。
+- `experience/runtime_guard.py`：新增 `experience_locator(exp)`——
+  `LocatorStrategy` → Executor `Locator`（`list[dict]`）的**唯一**转换点，
+  Guard 的 `find_all` 与执行端重发共用。
+- `executor/executor.py`：新增 `find_all(locator)`（接线地雷 ③ 定案：
+  **给 Executor 加方法**，而非写异常语义→计数的适配器）；顺带把
+  `BY_MAP` / `_by_for()` 提成模块级，`find` 与新方法共用。
+- `agent/context.py`：`RecoveryContext` 增 `find_all` / `app_id` / `run_id` /
+  `step_index`；`RecoveryResult.detail` 记约定键 `recovered_kind` /
+  `experience_runs`。
+- `source/screen.py`：新增纯函数 `screen_fingerprint(page_source)`（E8 的
+  观测面：可见元素 `name`/`label` 去重排序后 sha256 前 16 位；页面不可
+  解析 → `None`，不猜）。
+- `runner/result.py`：新增设计 10 的分类表 `RECOVERED_KIND_BY_MECHANISM`
+  + `recovered_kind(mechanism, context=None)`；`context="assertion_target"`
+  压过机制分类 → `RECOVERED_ASSERTION_TARGET`。
+- `cli/pipeline.py`：`_write_experience_runs()`；动作步与 aux（wait/assert）
+  的恢复块都盖 `recovered_kind` 并落样本；`_recovery_context` /
+  `_aux_recover` 注入 `find_all` / `app_id` / `run_id` / `step_index`；
+  `SessionPipeline.__init__` 增 `app_id`。
+- `cli/main.py`：`run` 加 `--exp-db`；装配改 `RecoveryEngine(...,
+  experience_store=_LazyExperienceStore(args.exp_db))`。
+- `tracer/storage.py`：`RECOVERY_KINDS` 增 `"EXPERIENCE"`（P1 14.2 的枚举
+  缺它，不补则 `_write_recovery_row` fail-loud 直接炸）。
+- `report/junit.py` + `report/html.py`：明细增恢复分类（HTML 加「恢复分类」
+  列）。聚合逻辑与退出码**不变**（仍 RECOVERED ≠ PASS / exit 5）。
+
+### 接线地雷清账（plan Task 2.4 显性化的四条，全部落地）
+
+1. **P1 旧签名 `lookup(ctx.app_build, ...)`**：换成真键
+   `lookup(app_id, screen_id, target_id)`；`RecoveryContext` 补 `app_id`
+   （来自 `--bundle-id`，与 `app_build` 严格区分）。键三段缺一即
+   `incomplete_key` 如实报出，**不拿 app_build / 当前屏顶替**（顶替会查到
+   别人家的经验）。
+2. **`EmptyExperienceStore` 退役**：`experience_store=None` 表达「未接库」。
+3. **生产 `Executor` 没有 `find_all`**：定案「加方法」。
+4. **`effective_risk` 必须是 Risk 枚举**：`_aux_recover` 从登记元素 metadata
+   取 `eff.risk`（E2：不信任 LLM 自报）。
+
+### 本任务实锤的两个真 bug（都在 TDD 过程中被测试逮住）
+
+- **① `_aux_recover` 的 `element_id` 是容器前缀引用**（
+  `TargetRef.id` = `HomeView.login_button`），而 Experience Store 主键第三段
+  与源 metadata 里都是**裸 id**。P1 时代 `element_id` 不进 Store 键，所以
+  一直没显形；Task 2.4 一接真 Store，aux 路径（矩阵 #15）整条不可达——
+  `lookup` 恒 miss。修法：与 `_run_action_step` 对齐，取解析后的 `eff.id`
+  （解析失败才退回 `ref_id`）。**同一个概念在两条路径上各写一遍必然漂移**
+  ——这正是本项目反复吃到的教训。
+- **② 未恢复的结论被丢掉了 4.7 样本**。初版 `_try_experiences` 内部建局部
+  `samples = []`，只在「已恢复」的返回里带出去；Guard 判定的失败样本
+  （NOT_FOUND / AMBIGUOUS / TYPE_MISMATCH）与执行失败样本随未恢复结论一起
+  被丢弃。**后果是失败率被系统性低估、成功率虚高**——E11/E4 级别的错误，
+  不是记账瑕疵。修法：`samples` 提到 `recover()` 作用域，并让管线在
+  **未恢复分支**也调 `_write_experience_runs`（动作步与两个 aux 分支共三处）。
+  测试 `test_p2_02_not_found_is_failure_sample` 就是钉这一条的。
+
+### 决策记录（有意为之，留待评审）
+
+- **`ctx.effective_risk` 的归一**：Experience 分支不因 `effective_risk is
+  None` 硬拦。理由——`None`（无可证明的风险）在 fake-driver / 未登记
+  metadata 的语境里是常态，按最高风险 fail-closed 会**整条砍掉**这些场景
+  的既有恢复能力；而登记目标若真高风险，步骤在执行前就已被 10.1 Guard
+  拦成 `SECURITY_BLOCKED`，到不了恢复。**这是本任务最值得被 review 挑战
+  的一处**（见「已知后果」）。
+- **`step_index` 进 ctx 但不当 `steps.id` 用**：恢复发生在
+  `Lifecycle.record_step()` **之前**，那一刻 `steps.id` 还不存在
+  （AUTOINCREMENT）。拿 YAML 步序冒充是两个 id 空间互相撞——本项目在
+  「build ≠ bundle」上吃过同款亏。故拆两段：引擎产出 payload，管线在
+  `record_step()` 之后补真 id。
+- **`not_dispatched`（aux 无 dispatch 语义）不写样本**：aux 的候选交调用方
+  覆盖定位后重跑，执行结果此刻不可观测。猜一个 SUCCESS 会抬高
+  `success_rate` 把 Candidate 推向 VERIFIED——E4 级别。同理
+  `postcondition` 观测异常记 `UNKNOWN`，也不写样本、不声称恢复。
+- **`EXPERIENCE_EVENT_TYPES`（设计 11.1 的 12 个事件名）仍无人消费**：
+  定义在 `tracer/storage.py` 且 fail-loud，但 Task 2.4 没有接
+  `experience_lookup/hit/miss/guard_block/execution` 的写入点。**有意不接**
+  ——半接的埋点比不接更坏（报告上「有时有有时没有」）。已记入 plan
+  Task 4.1 一并落地。
+- **`Experience.as_dict` 单向辅助**：仅用于导出，不反向构造（避免出现
+  第二个模型真值源）。
+
+### Gate M2 真机验证（`phase0/verify_p2_m2.py`，2026-10-04 实跑全绿）
+
+产物：`out/p2_m2_gate/summary.json`（verdict=PASS，device_half=PASS，
+elapsed 71.6s）。**判据逐条可机械复核**（R13-3 的教训：只留文字、无产物
+= 事后无法复核）：
+
+| 项 | 判据 | 实测 |
+|---|---|---|
+| PF ×4 | 模拟器 booted / Appium 200 / LLM 网关 200 / SwiftUI 宏工具链可用 | 全 PASS |
+| G1 | P2 矩阵 pytest 全绿 | `12 passed` |
+| G0 | 基线重扫描 + 真实改名重编译安装 + 重扫描登记新 id | PASS |
+| G2 | 第一次 run：`RECOVERED_LLM` / exit 5 / recoveries kind=LLM / PENDING review | `run_44ca6e6a`，review #1 |
+| G3 | 人工 ACCEPT → Candidate（E5 种子） | `exp_c74593a6c746` CANDIDATE `(com.phaset0.logindemo, LoginView, username_field)` strategy=`user_field` |
+| G4 | 第二次 run：`RECOVERED_EXPERIENCE` / exit 5 / **LLM calls = 0** | `run_d624560b`，`llm_calls=0`，LLM 行 0 条 |
+| G5 | 4.7 记账：experience_runs 1 行 SUCCESS / step_id=真 steps.id / validated_builds | `step_id=3`（= 该 run 的 RECOVERED 步 id）、`run_id` 与 runs 一致、`sample_count=success_count=1`、`validated_builds=['local']` |
+| G6 | 空库 + `--no-llm` 同场景仍 FAIL / exit 1（P1 行为保留） | exit 1，`llm_calls=0`，stages 见 `miss` + `llm: disabled` |
+
+**这是「知识积累」唯一可观测的形状**：同一漂移，第一次靠 LLM（花 1 次
+调用 + 人工确认），第二次起 LLM **零出手**。
+
+### 环境依赖（写下来免得下次白排查）
+
+- 设备半边的 G0/G2–G6 需要 `sandbox-exec` 可用：Swift 编译器在
+  `sandbox-exec` 里拉起 `swift-plugin-server` 展开 SwiftUI 的 `@State` 宏，
+  宿主禁止 `sandbox_apply` 时报
+  `malformed response ... could not be found for macro 'State()'`，看起来
+  像代码坏了。脚本已把它固化成 `PF_swift_macro_toolchain` 前置项，并在
+  summary 里用 `device_half ∈ {PASS, FAIL, SKIPPED_ENV}` 三态区分
+  「环境没准备好」与「跑了但判据没过」。
+- 本机带 `HTTP_PROXY`，环回端口（4723/15721）的代理转发行为不稳定
+  （实测 4723 被拒、15721 放行）。脚本 `_env()` 显式 `no_proxy` 豁免环回，
+  自身探测也装无代理 opener。
+- `--basetemp` 必须指到工作区内（受限环境拦系统临时目录写入 → 200+ 个
+  `PermissionError: EEXIST` 假失败）。
+
+- 实测：pytest **919 passed**（+36：`test_recovery_experience.py` 24 项 +
+  `test_p2_matrix_m2.py` 12 项）。

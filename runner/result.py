@@ -6,6 +6,10 @@
      RECOVERED**，8.3 明令禁止 `(PASS+RECOVERED)/TOTAL`）、Recovery Rate；
   3. `junit_status_for`（8.5）：RECOVERED → failure[type=RECOVERED_NEEDS_REVIEW]。
 
+Task 2.4 追加第四块：`recovered_kind`（设计 10 节）——RECOVERED 的
+**明细**分类（LLM / EXPERIENCE / ASSERTION_TARGET / …）。它不改聚合与
+退出码，只让报告能回答「这次是 LLM 救的还是经验救的」。
+
 终态优先级**不在这里重写**：复用 `tracer.storage.aggregate_status`
 （8.1 的唯一实现，R14-5 已把它修成顺序无关）。两处各写一份优先级，
 改一处忘另一处就是 review 里 R13-1 那种「双源分叉」。
@@ -105,6 +109,46 @@ def junit_status_for(status: str, failure_type: str | None = None
     if jtype is None:
         jtype = failure_type
     return JUnitStatus(status=jstatus, type=jtype, message=message)
+
+
+# --- 设计 10 节：RECOVERED 的明细分类（P2 细分，Task 2.4） ----------------
+
+# 机制 → 分类标签。设计 10 只列了 P2 新出现的三类（LLM / EXPERIENCE /
+# ASSERTION_TARGET）；P1 的确定性机制按同一条命名规则给出，避免「有些
+# RECOVERED 有分类、有些没有」的半截状态（报告里 None 会被读成「未知」）。
+RECOVERED_KIND_BY_MECHANISM = {
+    "llm": "RECOVERED_LLM",
+    "experience": "RECOVERED_EXPERIENCE",
+    "settle_retry": "RECOVERED_SETTLE_RETRY",
+    "run_memo": "RECOVERED_RUN_MEMO",
+    "postcondition": "RECOVERED_POSTCONDITION",
+    "local_reconcile": "RECOVERED_DETERMINISTIC_CANDIDATE",
+}
+
+# 断言目标定位漂移（P1 7.3 / 设计 10 第三类）：只允许恢复**定位**，不允许
+# 改期望值（E3）。它压过机制分类——「Experience 命中的断言漂移」记
+# RECOVERED_ASSERTION_TARGET 而不是 RECOVERED_EXPERIENCE，因为对使用者
+# 有意义的问题是「改的是定位还是期望值」。
+ASSERTION_TARGET_CONTEXT = "assertion_target"
+
+
+def recovered_kind(mechanism: str | None,
+                   context: str | None = None) -> str | None:
+    """设计 10 节：`RECOVERED` 的明细分类（单一真值源）。
+
+    聚合口径与退出码**不变**（仍 RECOVERED ≠ PASS）——分类只进明细，
+    回答「这次是 LLM 救的还是经验救的」。
+
+    `context == "assertion_target"` → 第三类（断言目标定位漂移）。
+    未知机制 → `RECOVERED_<大写机制名>`（不返回 None：静默的空分类会被
+    读成「没恢复」，而调用点本来就是「已恢复」分支）。
+    """
+    if context == ASSERTION_TARGET_CONTEXT:
+        return "RECOVERED_ASSERTION_TARGET"
+    if not mechanism:
+        return None
+    return RECOVERED_KIND_BY_MECHANISM.get(mechanism,
+                                           f"RECOVERED_{mechanism.upper()}")
 
 
 @dataclass(frozen=True)

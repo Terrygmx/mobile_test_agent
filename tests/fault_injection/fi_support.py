@@ -43,17 +43,25 @@ class El:
 
 class FakeExecutor:
     """可编排故障的 Executor：find 按调用序弹脚本（Exception 抛出、耗尽
-    后重复最后一项），tap 前 N 次可炸（POST_DISPATCH 故障）。"""
+    后重复最后一项），tap 前 N 次可炸（POST_DISPATCH 故障）。
+
+    `find_all`（Task 2.4 新增）：Experience Runtime Guard 的数量观测端。
+    默认 `[El()]`（恰一命中 = 可执行）——不设脚本的行走 happy path；
+    要构造 NOT_FOUND / AMBIGUOUS 的行显式给脚本（`[]` / `[El(), El()]`）。
+    """
 
     def __init__(self, find_script=None, tap_fail_times=0,
                  page_source=("<App><Node name='screen.HomeView' "
-                              "visible='true'/></App>")):
+                              "visible='true'/></App>"),
+                 find_all_script=None):
         self.find_script = list(find_script or [])
         self.find_calls = 0
         self.tap_calls = 0
         self.input_calls = 0
         self.tap_fail_times = tap_fail_times
         self._page = page_source
+        self.find_all_script = list(find_all_script or [])
+        self.find_all_calls = 0
 
     def find(self, strategies):
         idx = min(self.find_calls, len(self.find_script) - 1)
@@ -64,6 +72,16 @@ class FakeExecutor:
         if isinstance(item, Exception):
             raise item
         return item
+
+    def find_all(self, locator):
+        idx = min(self.find_all_calls, len(self.find_all_script) - 1)
+        self.find_all_calls += 1
+        if not self.find_all_script:
+            return [El()]
+        item = self.find_all_script[idx]
+        if isinstance(item, Exception):
+            raise item
+        return list(item)
 
     def tap(self, strategies):
         self.tap_calls += 1
@@ -189,7 +207,8 @@ def load_case(text: str):
 
 def run_matrix(tmp_path, case_yaml, *, ex=None, repo=None, recovery=None,
                cases=None, guard=None, ds=None, lifecycle=None,
-               failure_policy="ABORT_SUITE", env=None, bundle_id=None):
+               failure_policy="ABORT_SUITE", env=None, bundle_id=None,
+               app_id=None):
     """矩阵行装配：run_all 全链（lint 不在此——矩阵行的 YAML 都先保证
     schema 可解析；lint 语义行 #23 单独走 mta lint）。
 
@@ -197,13 +216,19 @@ def run_matrix(tmp_path, case_yaml, *, ex=None, repo=None, recovery=None,
     None = no-op 桩）。
     `bundle_id`：落 runs.app_bundle_id——P2（Task 2.3）的 Candidate 主键
     第一段；走 accept→create_candidate 的矩阵行必须给（缺了 E5 种子字段
-    不齐，accept 会 fail-loud）。默认 None = 历史行为不变。"""
+    不齐，accept 会 fail-loud）。默认 None = 历史行为不变。
+    `app_id`：Experience Store 主键第一段（Task 2.4）。缺省跟 `bundle_id`
+    ——生产 `mta run` 也是这么接的（同一个 --bundle-id）。要测「app_id
+    缺失」的行显式给 `app_id=""`。
+    """
     store = TraceStore(tmp_path / "trace.db")
     store.start_run("run_matrix", app_bundle_id=bundle_id)
     sdir = tmp_path / "suites"
     sdir.mkdir(exist_ok=True)
     (sdir / "matrix.yaml").write_text(case_yaml, encoding="utf-8")
-    pipe = SessionPipeline(suites_root=sdir, store=store, recovery=recovery)
+    pipe = SessionPipeline(suites_root=sdir, store=store, recovery=recovery,
+                           app_id=(bundle_id or "") if app_id is None
+                           else app_id)
     pipe.deps = PipelineDeps(env=env, repo=repo)
     ds = ds or FakeDS()
     ex = ex or FakeExecutor()

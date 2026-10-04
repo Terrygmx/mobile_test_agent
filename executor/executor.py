@@ -14,6 +14,22 @@ from session.device_session import DeviceSession
 #           {"type": "predicate", "value": "label == '登录'"}]
 Locator = list[dict]
 
+# 策略名 → Appium by 串。find 与 find_all 共用**同一张表**（两处各写一份
+# 必然漂移——本项目对「平行实现」的一贯教训；Task 2.4 抽出）。
+BY_MAP = {
+    "accessibility_id": "accessibility id",
+    "predicate": "-ios predicate string",
+    "class_chain": "-ios class chain",
+}
+
+
+def _by_for(strat: dict) -> str:
+    by = BY_MAP.get(strat["type"])
+    if by is None:  # review P1-6：未知策略报清晰错误
+        raise ValueError(f"unknown locator strategy {strat['type']!r}, "
+                         f"supported={sorted(BY_MAP)}")
+    return by
+
 
 class ElementNotFound(Exception):
     pass
@@ -52,22 +68,30 @@ class Executor:
         依赖 label（按钮文案）与 class+label 组合定位，故增加 class_chain 策略。
         """
         self.ds.ensure_alive()
-        by_map = {
-            "accessibility_id": "accessibility id",
-            "predicate": "-ios predicate string",
-            "class_chain": "-ios class chain",
-        }
         for strat in locator:
-            by = by_map.get(strat["type"])  # review P1-6：未知策略报清晰错误
-            if by is None:
-                raise ValueError(f"unknown locator strategy {strat['type']!r}, "
-                                 f"supported={sorted(by_map)}")
-            elements = self.driver.find_elements(by, strat["value"])
+            elements = self.driver.find_elements(_by_for(strat), strat["value"])
             if len(elements) == 1:
                 return elements[0]
             if len(elements) > 1:
                 raise AmbiguousElement(f"{strat}: {len(elements)} matches, fail closed")
         raise ElementNotFound(f"no element for {locator}")
+
+    def find_all(self, locator: Locator) -> list:
+        """返回**首个有命中的策略**的全部匹配（0 个 → `[]`）。
+
+        与 `find` 的唯一差别是数量语义：`find` 把 0/≥2 变成异常（fail
+        closed，动作路径的纪律），`find_all` 把数量交回调用方——Experience
+        Runtime Guard（设计 5 节）必须自己看到 0/1/≥2 才能分别判
+        `TARGET_NOT_FOUND` / `EXECUTE` / `TARGET_AMBIGUOUS`；用异常语义反推
+        计数只能得到「≥2」而拿不到真数量，是猜值。Task 2.4 接线地雷 ③ 的
+        定案：给 Executor 加本方法（而不是在 Guard 侧写异常→计数的适配器）。
+        """
+        self.ds.ensure_alive()
+        for strat in locator:
+            elements = self.driver.find_elements(_by_for(strat), strat["value"])
+            if elements:
+                return list(elements)
+        return []
 
     def tap(self, locator: Locator) -> None:
         self.find(locator).click()

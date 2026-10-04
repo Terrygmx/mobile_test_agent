@@ -15,6 +15,7 @@ marker 匹配严格按 repo 中 ScreenDef.marker（`screen.<Name>`），不无�
 """
 from __future__ import annotations
 
+import hashlib
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
@@ -101,3 +102,35 @@ def marker_visible(page_source: str, repo: Repository, screen_id: str) -> bool:
                 and el.get("visible", "true") != "false":
             return True
     return False
+
+
+def screen_fingerprint(page_source: str) -> str | None:
+    """当前页面的**结构指纹**（设计 4.1 注 / E8 的观测面，Task 2.4）。
+
+    定义：页面上可见元素的 `name`/`label` 去重排序后的 sha256 前 16 位。
+
+    定位与边界（写给 M3）：
+      - 只做**观测**——fingerprint **不是主键的一部分**，变化只触发
+        `REVALIDATION_REQUIRED`（E8），绝不驱动清空或拒绝；
+      - 不依赖 Repository（纯页面函数）——「当前页面结构是否仍与历史观测
+        相似」这句话的主语是页面，不是 metadata；M3 若要把粒度收窄到
+        「本屏登记元素的出现集合」，改本函数一处即可，调用方只拿字符串比。
+      - 页面不可解析 → `None`（不猜指纹；比对侧对 None 一律记「不可观测」，
+        不当成 mismatch——把「没看到」记成「变了」会让 REVALIDATION 误触发）。
+    """
+    try:
+        root = ET.fromstring(page_source)
+    except ET.ParseError:
+        return None
+    names: set[str] = set()
+    for el in root.iter():
+        if el.get("visible", "true") == "false":
+            continue
+        for attr in ("name", "label"):
+            v = el.get(attr)
+            if v:
+                names.add(v)
+    if not names:
+        return None
+    digest = hashlib.sha256("\n".join(sorted(names)).encode("utf-8"))
+    return digest.hexdigest()[:16]

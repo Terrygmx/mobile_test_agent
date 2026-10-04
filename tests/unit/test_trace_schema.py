@@ -82,7 +82,11 @@ EXPECTED_COLUMNS = {
 FAILURE_PHASES = {"PRE_DISPATCH", "POST_DISPATCH"}
 # 14.2 recoveries.kind 取值
 RECOVERY_KINDS = {"LLM", "POSTCONDITION", "SETTLE_RETRY", "RUN_MEMO",
-                  "DETERMINISTIC_CANDIDATE"}
+                  "DETERMINISTIC_CANDIDATE",
+                  # P2 Task 2.4：设计 3.1 的第六种机制（Experience 命中解决，
+                  # LLM 未被调用）。P1 设计 14.2 的枚举没有它——P2 必须扩展，
+                  # 否则 recoveries 行记不下 Experience 恢复（fail-loud 抛错）。
+                  "EXPERIENCE"}
 # 8.2 failure_attribution 取值
 ATTRIBUTIONS = {"UNTRIAGED", "APP_DEFECT", "AUTOMATION_DEFECT",
                 "ENVIRONMENT_DEFECT", "TEST_DATA_DEFECT", "INFRASTRUCTURE_DEFECT"}

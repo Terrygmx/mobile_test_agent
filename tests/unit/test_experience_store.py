@@ -22,7 +22,7 @@ from experience.models import (
     ExperienceRun,
     ExperienceStatus,
 )
-from experience.store import SQLiteExperienceStore, EmptyExperienceStore
+from experience.store import SQLiteExperienceStore
 from repository.loader import LocatorStrategy
 
 
@@ -296,10 +296,18 @@ def test_get_runs_limit_takes_most_recent(store):
     assert [r.run_id for r in runs] == ["r3", "r4"]  # 最近 2 条，仍按时间升序
 
 
-# --- EmptyExperienceStore：P1 占位行为不变 ---------------------------------------
+# --- 空库语义（Task 2.4：EmptyExperienceStore 退役后的替代） -------------------
 
 
-def test_empty_store_placeholder_unchanged():
-    """P1 引擎的调用形态（旧签名）行为不变——Task 2.4 接真 Store 后退役。"""
-    empty = EmptyExperienceStore()
-    assert empty.lookup("1025", "LoginView", "username_field") == []
+def test_empty_db_lookup_returns_empty_list(tmp_path):
+    """P1 行为保留原则的另一半：空 experience 库的 lookup 就是 []。
+
+    Task 2.4 退役了 `EmptyExperienceStore` 占位（旧签名把 app_build 当
+    app_id 传——两个键语义不同）。空库语义由真 Store 承担，「没有库」由
+    `RecoveryEngine(experience_store=None)` 表达，两者在行为上等价、在
+    报告上可区分（no_store vs miss）。
+    """
+    store = SQLiteExperienceStore(tmp_path / "experience.db")
+    assert store.lookup("com.phaset0.logindemo", "LoginView",
+                        "username_field") == []
+    assert store.list() == []

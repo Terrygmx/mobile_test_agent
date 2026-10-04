@@ -45,7 +45,8 @@ from executor.policy import Risk
 
 __all__ = [
     "GuardResult", "RuntimeContext", "guard_candidate",
-    "experience_runtime_guard", "compute_effective_risk",
+    "experience_runtime_guard", "experience_locator",
+    "compute_effective_risk",
     "GUARD_REASON_TO_LLM_FAILURE",
 ]
 
@@ -184,15 +185,30 @@ def guard_candidate(
     return GuardResult(outcome="EXECUTE", record_as_sample=True)
 
 
+def experience_locator(exp: "Experience") -> list[dict]:
+    """Experience 的候选策略 → Executor 的 `Locator`（`list[dict]`）。
+
+    模型侧 `strategy` 是 `repository.loader.LocatorStrategy`（5.2 单一真值
+    源），Executor 侧的 `Locator` 是 `[{"type","value"}]`（5.2 的执行形态）
+    ——转换只此一处，两个消费方（Guard 的 find_all 与执行端的重发）共用，
+    免得各自 `{"type": ..., "value": ...}` 一遍后漂移。
+    """
+    return [{"type": exp.strategy.type, "value": exp.strategy.value}]
+
+
 def experience_runtime_guard(exp: "Experience", ctx: RuntimeContext,
                              executor) -> GuardResult:
     """设计 5 节入口：Experience 的运行时守卫（Task 2.4 的
     try_experiences 逐候选消费本函数）。policy_check 不在此传——EXECUTE
-    后的动作执行走正常 dispatch，其处自会过 10.1 Guard（单点裁决）。"""
+    后的动作执行走正常 dispatch，其处自会过 10.1 Guard（单点裁决）。
+
+    `executor` 只需提供 `find_all(Locator) -> list`（数量观测端；生产
+    `Executor.find_all` / 引擎的 ctx 注入适配器都满足该形态）。
+    """
     return guard_candidate(
         current_screen=ctx.current_screen,
         candidate_screen=exp.screen_id,
-        find=lambda: executor.find_all(exp.strategy),
+        find=lambda: executor.find_all(experience_locator(exp)),
         expected_type=ctx.expected_type,
         effective_risk=ctx.effective_risk,
     )

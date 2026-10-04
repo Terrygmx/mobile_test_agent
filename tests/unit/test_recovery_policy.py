@@ -105,6 +105,11 @@ def _ctx(**kw) -> RecoveryContext:
     return RecoveryContext(**defaults)
 
 
+# Experience 消费的前置之一：读得到页（Guard 的 Screen 校验要它）。缺页时
+# 引擎 fail-closed 跳过经验阶段——见 test_engine_experience_needs_page。
+_PAGE = "<App><Node name='screen.HomeView' visible='true'/></App>"
+
+
 def test_engine_settle_retry_recovers():
     """settle：re-find 命中 → 重发原动作 → RECOVERED(kind=settle_retry)。"""
     calls: list[str] = []
@@ -168,27 +173,63 @@ def test_engine_not_admitted_passes_through_original_failure():
 
 
 def test_engine_experience_store_consulted_after_reconcile_before_llm():
-    """20 节预留位：ExperienceStore 在 reconciliation 后、LLM 前被查询，
-    P1 恒 []，stage 顺序 settle → experience → llm(disabled)。"""
+    """Experience 消费位（P2 设计 5.1）：在 reconciliation 后、LLM 前被查询。
+
+    Task 2.4 起签名是 P2 的 `lookup(app_id, screen_id, target_id)`（P1 旧
+    签名把 app_build 当 app_id 传，已随 EmptyExperienceStore 退役）。空库
+    → 回落 LLM，stage 顺序 settle → experience(miss) → llm(disabled)。
+    """
 
     class SpyStore:
         def __init__(self):
             self.calls: list[tuple] = []
 
-        def lookup(self, app_build, screen, target_id):
-            self.calls.append((app_build, screen, target_id))
+        def lookup(self, app_id, screen, target_id):
+            self.calls.append((app_id, screen, target_id))
             return []
 
     spy = SpyStore()
-    ctx = _ctx(refind=lambda: (_ for _ in ()).throw(LookupError("gone")),
-               redispatch=lambda el: None)
+    ctx = _ctx(app_id="com.phaset0.logindemo",
+               refind=lambda: (_ for _ in ()).throw(LookupError("gone")),
+               redispatch=lambda el: None,
+               page_source=lambda: _PAGE,
+               find_all=lambda loc: [])
     r = RecoveryEngine(repo=None, experience_store=spy,
                        sleep=lambda s: None).recover(ctx)
     assert not r.recovered
-    assert spy.calls == [("local", "HomeView", "go_profile")]
+    assert spy.calls == [("com.phaset0.logindemo", "HomeView", "go_profile")]
     stages = [s["stage"] for s in r.detail["stages"]]
     assert stages == ["settle", "experience", "llm"], \
-        "ExperienceStore 必须在 reconciliation 后、LLM 前（20 节）"
+        "Experience 必须在 reconciliation 后、LLM 前（设计 5.1）"
+    exp_stage = next(s for s in r.detail["stages"]
+                     if s["stage"] == "experience")
+    assert exp_stage["outcome"] == "miss"
+
+
+def test_engine_experience_needs_app_id_not_app_build():
+    """app_id 与 app_build 是两个键（Task 2.4 地雷 ①）：没有 app_id 时
+    **不得**拿 app_build 顶上——那是 P1 旧签名的错，静默顶上会用错误的键
+    查到别人家的经验。缺键如实报 incomplete_key 并回落 LLM。"""
+
+    class SpyStore:
+        def __init__(self):
+            self.calls: list[tuple] = []
+
+        def lookup(self, app_id, screen, target_id):
+            self.calls.append((app_id, screen, target_id))
+            return []
+
+    spy = SpyStore()
+    ctx = _ctx(app_build="1025",   # build 有值，app_id 缺
+               refind=lambda: (_ for _ in ()).throw(LookupError("gone")),
+               redispatch=lambda el: None)
+    r = RecoveryEngine(repo=None, experience_store=spy,
+                       sleep=lambda s: None).recover(ctx)
+    assert spy.calls == [], "app_id 缺失时不得查询（更不得拿 app_build 顶）"
+    exp_stage = next(s for s in r.detail["stages"]
+                     if s["stage"] == "experience")
+    assert exp_stage == {"stage": "experience", "outcome": "incomplete_key",
+                         "missing": "app_id"}
 
 
 def test_engine_experience_position_after_reconciliation_with_repo():
@@ -196,6 +237,10 @@ def test_engine_experience_position_after_reconciliation_with_repo():
     前——「reconciliation 之后」这个位置约束要用带 fake repo 的用例闭环：
     stages 顺序必须含 screen → reconcile，且 experience 在 reconcile 之后。"""
     from types import SimpleNamespace
+
+    class EmptyStore:
+        def lookup(self, app_id, screen, target_id):
+            return []
 
     repo = SimpleNamespace(
         generated_screens={
@@ -210,15 +255,28 @@ def test_engine_experience_position_after_reconciliation_with_repo():
                       "resolution_type": "literal", "screen": "HomeView"}],
         "screens": ["HomeView"]}
     ctx = _ctx(
+        app_id="com.phaset0.logindemo",
         refind=lambda: (_ for _ in ()).throw(LookupError("drifted")),
         page_source=lambda: page,
         source_metadata=source_metadata)
-    r = RecoveryEngine(repo=repo, sleep=lambda s: None).recover(ctx)
+    r = RecoveryEngine(repo=repo, experience_store=EmptyStore(),
+                       sleep=lambda s: None).recover(ctx)
     stages = [st["stage"] for st in r.detail["stages"]]
     assert stages == ["settle", "screen", "reconcile", "experience", "llm"], \
-        f"ExperienceStore 必须在 reconciliation 之后（20 节）: {stages}"
+        f"Experience 必须在 reconciliation 之后（设计 5.1）: {stages}"
     recon = next(st for st in r.detail["stages"] if st["stage"] == "reconcile")
     assert recon["outcome"] == "DRIFT"
+
+
+def test_engine_no_store_reports_no_store_not_miss():
+    """「没有经验库」与「库是空的」在报告上必须可区分（Task 2.4：Empty
+    占位退役后由 None 表达）——no_store 意味着这台机器根本没接经验。"""
+    ctx = _ctx(refind=lambda: (_ for _ in ()).throw(LookupError("gone")),
+               redispatch=lambda el: None)
+    r = RecoveryEngine(repo=None, sleep=lambda s: None).recover(ctx)
+    exp_stage = next(s for s in r.detail["stages"]
+                     if s["stage"] == "experience")
+    assert exp_stage == {"stage": "experience", "outcome": "no_store"}
 
 
 def test_engine_run_memo_consumes_saved_strategy():

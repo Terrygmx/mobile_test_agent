@@ -24,7 +24,7 @@ from pathlib import Path
 import yaml
 
 from runner.lifecycle import Lifecycle
-from runner.result import RunResult, TestcaseResult
+from runner.result import RunResult, TestcaseResult, recovered_kind
 from source.screen import current_screen
 from runner.runner import RunStepContext, StepOutcome, StepRunner
 from session.device_session import InfraError
@@ -109,13 +109,18 @@ class SessionPipeline:
 
     def __init__(self, suites_root: Path | str | None, *,
                  store=None, deps: PipelineDeps | None = None,
-                 recovery=None, secrets=None):
+                 recovery=None, secrets=None, app_id: str = ""):
         self.suites_root = Path(suites_root) if suites_root else None
         self.store = store
         self.deps = deps
         # Task 4.1：RecoveryEngine（确定性半边）。None = 不恢复（旧行为，
         # P0 链路不受影响）——接线由 cmd_run 按组件装配注入。
         self.recovery = recovery
+        # Task 2.4：Experience Store 的主键第一段（bundle id）。**不是**
+        # app_build——后者是「哪一次构建」，在 ctx 里另有字段。缺省空串 =
+        # 本次 run 不消费经验（--fake-driver / 未给 --bundle-id 时如实如此，
+        # 引擎会记 incomplete_key 而不是猜键）。
+        self.app_id = app_id
         # review_m4_task43 P2-1：`${VAR}` 分派前经 SecretProvider 解析
         # （14.4「变量解析在 Runner 层完成」的落点拍板 = 管线 ctx 装配处，
         # StepRunner 保持纯值执行）。None = 不解析（直接构造的测试不受影响）。
@@ -203,6 +208,12 @@ class SessionPipeline:
         detail: dict = {}
         step_recovered: str | None = None   # 本步刚恢复的 kind（record 用）
         recovered_kinds: list[str] = []     # 8.1：任一步恢复 → 用例 RECOVERED
+        # 设计 10：与 recovered_kinds 一一对应的明细分类（RECOVERED_LLM /
+        # RECOVERED_EXPERIENCE / RECOVERED_ASSERTION_TARGET / …）。两个列表
+        # 并存而不是只留分类：机制名是排障入口（settle/run_memo/llm），分类
+        # 是「谁救的」的汇总口径，P1 的 recovery_kinds 契约不能改（报告与
+        # 既有测试都读它）。
+        recovered_labels: list[str] = []
 
         if manage_env:
             try:
@@ -245,12 +256,16 @@ class SessionPipeline:
                         if (not outcome.ok and self.recovery is not None
                                 and outcome.phase is not None):
                             rec = self.recovery.recover(self._recovery_context(
-                                runner, step, outcome, step_ctx, tc, attempt))
+                                runner, step, outcome, step_ctx, tc, attempt,
+                                run_id=run_id))
                             if rec.recovered:
                                 # 恢复成功：步骤继续，但终态是 RECOVERED 不是
                                 # SUCCESS（8.1；RECOVERED 不得掩盖为 PASS）
                                 outcome.ok = True
                                 outcome.detail["recovery_kind"] = rec.kind
+                                # 设计 10：明细多一层分类（LLM 救的还是经验救的）
+                                outcome.detail["recovered_kind"] = recovered_kind(
+                                    rec.kind)
                                 outcome.detail["recovery"] = rec.detail
                                 step_recovered = rec.kind
                             else:
@@ -269,8 +284,17 @@ class SessionPipeline:
                             # 14.2 大写枚举）；LLM 恢复建 PENDING review。
                             self._write_recovery_row(
                                 step_row_id, outcome.element_id or "", rec)
+                            self._write_experience_runs(step_row_id, rec)
                             recovered_kinds.append(step_recovered)
+                            recovered_labels.append(
+                                recovered_kind(step_recovered))
                             step_recovered = None
+                        elif rec is not None:
+                            # 未恢复也要落 4.7 样本：Guard 判定的失败样本
+                            # （唯一性/类型/执行失败）不因「步骤最终 FAIL」而
+                            # 作废——E11 的口径是「用了但错了就记账」，不是
+                            # 「救活了才记账」。
+                            self._write_experience_runs(step_row_id, rec)
                         rec = None
                         if not outcome.ok:
                             # 8.1/8.4：Guard 拦截是安全策略终态——用例
@@ -313,29 +337,31 @@ class SessionPipeline:
                             # 默认不准入（on_wait_timeout=false），开了才走
                             rec = self._aux_recover(
                                 runner, tc, attempt, step.wait_for.target,
-                                e, "wait")
+                                e, "wait", run_id=run_id, idx=idx)
                             if rec is None or not rec.recovered \
                                     or rec.strategy is None:
                                 # M5 基线实锤（trace 完整性缺口）：失败的
                                 # aux 步骤此前不落 steps 行——trace「看起来
                                 # 跑到一半就没了」，error 文本无处可查。
                                 # 与动作步失败同纪律：失败步骤也落库。
-                                self._record_aux_step(
+                                aux_row = self._record_aux_step(
                                     lifecycle, idx, "wait_for",
                                     _target_label(step.wait_for.target),
                                     latency_ms=int((time.time() - t1) * 1000),
                                     ok=False,
                                     failure_type=_map_exception(e)[1],
                                     detail={"error": str(e)})
+                                # 同动作步：未恢复的 Guard 失败样本照样落库
+                                self._write_experience_runs(aux_row, rec)
                                 raise
                             self._recovered_locators[
                                 self._ref_key(step.wait_for.target)] = \
                                 [dict(rec.strategy)]
                             wait_engine.wait_for(step.wait_for)
-                            self._record_aux_recovered(
+                            recovered_labels.append(self._record_aux_recovered(
                                 lifecycle, idx, "wait_for",
                                 _target_label(step.wait_for.target),
-                                rec, latency_ms=int((time.time() - t1) * 1000))
+                                rec, latency_ms=int((time.time() - t1) * 1000)))
                             recovered_kinds.append(rec.kind)
                             continue
                         self._record_aux_step(
@@ -356,18 +382,20 @@ class SessionPipeline:
                                 raise
                             rec = self._aux_recover(
                                 runner, tc, attempt, step.assertion.target,
-                                e, "assert")
+                                e, "assert", run_id=run_id, idx=idx)
                             if rec is None or not rec.recovered \
                                     or rec.strategy is None:
                                 # 与 wait 分支同缺口：失败断言步骤也要落
                                 # steps 行（M5 基线 trace 完整性实锤）
-                                self._record_aux_step(
+                                aux_row = self._record_aux_step(
                                     lifecycle, idx, "assert",
                                     _target_label(step.assertion.target),
                                     latency_ms=int((time.time() - t1) * 1000),
                                     ok=False,
                                     failure_type=_map_exception(e)[1],
                                     detail={"error": str(e)})
+                                # 同动作步：未恢复的 Guard 失败样本照样落库
+                                self._write_experience_runs(aux_row, rec)
                                 raise
                             self._recovered_locators[
                                 self._ref_key(step.assertion.target)] = \
@@ -375,11 +403,11 @@ class SessionPipeline:
                             result = assertion_engine.check(step.assertion)
                             if not result.passed:
                                 raise  # 覆盖重验仍不过 → 原异常语义 FAIL
-                            self._record_aux_recovered(
+                            recovered_labels.append(self._record_aux_recovered(
                                 lifecycle, idx, "assert",
                                 _target_label(step.assertion.target),
                                 rec, latency_ms=int((time.time() - t1) * 1000),
-                                context="assertion_target")
+                                context="assertion_target"))
                             recovered_kinds.append(rec.kind)
                             continue
                         self._record_aux_step(
@@ -467,6 +495,9 @@ class SessionPipeline:
         if recovered_kinds and status == "PASS":
             status = "RECOVERED"
             detail["recovery_kinds"] = recovered_kinds
+            # 设计 10：聚合口径与退出码不变（仍 RECOVERED ≠ PASS），只是
+            # 明细里多一层分类
+            detail["recovered_kinds"] = recovered_labels
 
         result = TestcaseResult(
             testcase_id=tc.id, status=status, failure_type=failure_type,
@@ -513,12 +544,17 @@ class SessionPipeline:
         raise _WdaRerunRequested(attempt=attempt + 1)
 
     def _recovery_context(self, runner, step, outcome, step_ctx, tc,
-                          attempt):
+                          attempt, *, run_id: str | None = None):
         """从步骤执行上下文装配 RecoveryContext（9.1）。
 
         设备交互端以 callable 注入——引擎不持有 Executor（9.1 隔离纪律）。
         source_metadata 置 None：12.3 两键 metadata → reconcile_local 子集
         的适配在 Task 4.2（LLM prompt 同需该切片）一并做。
+
+        Task 2.4 起还注入 Experience 消费所需的三样：`app_id`（Store 主键，
+        来自 --bundle-id，**不是** app_build）、`find_all`（Guard 的数量观测
+        端——异常语义反推不出真数量）、`run_id`/`step_index`（样本追溯；真
+        `steps.id` 由 record_step 之后回填，见 experience.store）。
         """
         from agent.context import RecoveryContext
 
@@ -546,12 +582,20 @@ class SessionPipeline:
             # RUN_MEMO 策略消费端（9.4）：memo 存的恢复策略经它重找
             find_with=(lambda strategies: ex.find(list(strategies)))
             if ex is not None else None,
+            # Experience Guard 的数量观测端（Task 2.4 地雷 ③）。只在 executor
+            # 真的提供 find_all 时注入：否则 Guard 会把 AttributeError 当成
+            # 「0 匹配」→ 写成**假失败样本**（4.7 里 NOT_FOUND 计入失败率），
+            # 悄悄压低成功率。缺了就让引擎如实报 no_find_all（不查、不记）。
+            find_all=(lambda locator: ex.find_all(list(locator)))
+            if callable(getattr(ex, "find_all", None)) else None,
             redispatch=(lambda element: runner.dispatch(step_ctx, element))
             if runner is not None else None,
             page_source=(getattr(ex, "page_source", None)
                          if ex is not None else None),
             postcondition_check=post_fn,
-            testcase_id=tc.id, attempt=attempt, app_build="local")
+            testcase_id=tc.id, attempt=attempt, app_build="local",
+            app_id=self.app_id, run_id=run_id,
+            step_index=step_ctx.step_index)
 
     def _run_app_level_action(self, runner: StepRunner, action: str,
                               step: ActionStep) -> tuple[bool, str | None]:
@@ -733,16 +777,47 @@ class SessionPipeline:
 
     def _record_aux_recovered(self, lifecycle, idx, step_type, target_id,
                               rec, *, latency_ms: int = 0,
-                              context: str | None = None) -> None:
-        """aux 步骤恢复成功：steps 行 RECOVERED + recoveries 行。"""
+                              context: str | None = None) -> str:
+        """aux 步骤恢复成功：steps 行 RECOVERED + recoveries 行 + 4.7 样本。
+
+        返回设计 10 的分类标签，调用方记进用例明细（`context` 只有调用方
+        知道——引擎看不到「这是断言目标」，所以分类的上下文在此补上；分类
+        函数仍是 `runner.result.recovered_kind` 单一实现）。
+        """
+        label = recovered_kind(rec.kind, context=context)
         step_row_id = lifecycle.record_step(
             StepOutcome(ok=True, step_index=idx, action=step_type,
                         element_id=target_id, latency_ms=latency_ms,
                         detail={"recovery_kind": rec.kind,
+                                "recovered_kind": label,
                                 "recovery_context": context,
                                 "recovery": rec.detail}),
             step_index=idx, status="RECOVERED")
         self._write_recovery_row(step_row_id, target_id, rec, context)
+        self._write_experience_runs(step_row_id, rec)
+        return label
+
+    def _write_experience_runs(self, step_row_id: int | None, rec) -> None:
+        """4.7 样本落库（设计 5.1 的 record_run_if_needed / record_execution_result）。
+
+        **分工**（Task 2.4 决策）：引擎判定「写什么」（`record_as_sample` 的
+        E11 口径 + 执行结果），管线补 `steps.id`——恢复发生在
+        `record_step()` 之前，那一刻这个 id 还不存在（拿 YAML 步序冒充是
+        两个 id 空间互相撞，本项目在「build ≠ bundle」上吃过同款亏）。
+        成功样本同时追加 `validated_builds`（设计 4.7 末行 / E7）。
+
+        **未恢复的结论也要调本函数**（`rec.recovered is False`）：Guard 判定
+        的失败样本（唯一性/类型）与执行失败样本都挂在未恢复结论的 detail 上，
+        只写「已恢复」那一支等于把失败样本全丢掉——成功率会系统性偏高
+        （E11/E4 级别）。`rec is None`（引擎未接）安全跳过。
+        """
+        exp_store = getattr(self.recovery, "experience_store", None)
+        samples = ((rec.detail or {}) if rec is not None else {}).get(
+            "experience_runs") or []
+        if exp_store is None or not step_row_id or not samples:
+            return
+        from experience import record_sample_runs
+        record_sample_runs(exp_store, samples, step_id=step_row_id)
 
     def _screen_wait_failure(self, runner, wait_spec, exc) -> str | None:
         """screen 目标 wait 超时的终态分类（13.2；矩阵 #11/#12 vs #13）。
@@ -781,7 +856,8 @@ class SessionPipeline:
         return None
 
     def _aux_recover(self, runner, tc, attempt, target_ref, exc,
-                     step_type: str):
+                     step_type: str, *, run_id: str | None = None,
+                     idx: int | None = None):
         """aux 步骤（wait/assert）的恢复入口（4.2 ⑤⑥）。
 
         断言目标漂移（矩阵 #15）与 wait 超时（on_wait_timeout 接通）经
@@ -802,7 +878,7 @@ class SessionPipeline:
         failure_type = _map_exception(exc)[1]
         phase = FailurePhase.PRE_DISPATCH
         ref_id = getattr(target_ref, "id", "") or ""
-        eff_screen, eff_type = "", None
+        eff_screen, eff_type, eff_risk, eff_id = "", None, None, ""
         strategies: tuple = ()
         repo = self.deps.repo if self.deps else None
         if repo is not None and ref_id:
@@ -810,6 +886,18 @@ class SessionPipeline:
                 eff = repo.resolve(target_ref, build="local")
                 eff_screen = eff.screen
                 eff_type = getattr(eff, "type", None)
+                # Task 2.4 接线地雷 ④：effective_risk 必须是 Risk 枚举——
+                # 不传（None）会被 Guard 按最高风险 fail-closed 拦成
+                # RISK_BLOCKED，aux 路径的 Experience 命中就永远不可达
+                # （矩阵 #15 会以「恢复不了」的形式假绿）。风险取**登记
+                # 元素**的 metadata（E2：不信任 LLM 自报）。
+                eff_risk = getattr(eff, "risk", None)
+                # Task 2.4 实锤：element_id 必须是**解析后的裸 id**——
+                # `TargetRef.id` 是容器前缀引用（HomeView.login_button），
+                # 而 Experience Store 的主键第三段与源 metadata 里的都是裸
+                # id；带前缀去 lookup 恒 miss（矩阵 #15 曾因此整条不可达）。
+                # 与 `_run_action_step` 同一条纪律，见彼处 M4 Gate 注。
+                eff_id = getattr(eff, "id", "") or ""
                 strategies = tuple({"type": st.type, "value": st.value}
                                    for st in eff.strategies)
             except Exception:  # noqa: BLE001 — 引用解析失败照常进引擎
@@ -817,19 +905,23 @@ class SessionPipeline:
         ex = runner.ex if runner is not None else None
         ctx = RecoveryContext(
             failure_type=failure_type, phase=phase,
-            element_id=ref_id, screen_id=eff_screen,
+            element_id=eff_id or ref_id, screen_id=eff_screen,
             strategies=strategies,
             action=None,                      # aux 无动作语义
+            effective_risk=eff_risk,
             effective_idempotency=Idempotency.IDEMPOTENT,  # 读操作可重验
             expected_type=eff_type,
             refind=(lambda: ex.find(list(strategies)))
             if ex is not None and strategies else None,
             find_with=(lambda sts: ex.find(list(sts)))
             if ex is not None else None,
+            find_all=(lambda locator: ex.find_all(list(locator)))
+            if callable(getattr(ex, "find_all", None)) else None,
             redispatch=None,                  # 只验证不执行（H7 精神）
             page_source=(getattr(ex, "page_source", None)
                          if ex is not None else None),
-            testcase_id=tc.id, attempt=attempt, app_build="local")
+            testcase_id=tc.id, attempt=attempt, app_build="local",
+            app_id=self.app_id, run_id=run_id, step_index=idx)
         return self.recovery.recover(ctx)
 
     @staticmethod

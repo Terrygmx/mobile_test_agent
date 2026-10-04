@@ -64,7 +64,13 @@ ATTRIBUTIONS = {
 FAILURE_PHASES = {"PRE_DISPATCH", "POST_DISPATCH"}
 
 RECOVERY_KINDS = {"LLM", "POSTCONDITION", "SETTLE_RETRY", "RUN_MEMO",
-                  "DETERMINISTIC_CANDIDATE"}
+                  "DETERMINISTIC_CANDIDATE",
+                  # Task 2.4：P1 设计 14.2 的机制枚举只有 P1 的五个。
+                  # `RecoveryResult.kind` 到 P2 多了 "experience"（设计 3.1
+                  # 「Experience Store 命中解决，LLM 未被调用」），recoveries
+                  # 行必须能如实记下这条机制——不加这一项时 _write_recovery_row
+                  # 会 fail-loud 抛 ValueError（本集合是允许清单，不是文档）。
+                  "EXPERIENCE"}
 
 REVIEW_STATUSES = {"PENDING", "ACCEPT", "REJECT"}
 

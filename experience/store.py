@@ -1,18 +1,22 @@
 """store.py — ExperienceStore（设计 7.1 接口 + E9 单写者，P2-03 / Task 2.1）。
 
-两个实现、一个过渡现实：
+一个接口、一个真实现：
 
   - `ExperienceStore`（Protocol）：P2 设计 7.1 的接口真身——`lookup` 按
-    (app_id, screen_id, target_id) 返回 `Experience` 列表。M2 消费方
+    (app_id, screen_id, target_id) 返回 `Experience` 列表。消费方
     （Runtime Guard / recovery 接线 / CLI）只认这个。
   - `SQLiteExperienceStore`：SQLite 实现。**单写者（E9）**：进程内
     `threading.Lock` 串行化全部写方法 + `BEGIN IMMEDIATE` / `busy_timeout`
     落到 SQLite 层（跨进程也串行）；Reader（lookup/get_runs/list）每次
     调用独立连接，可并发。约定（设计 7.2）：会产生写操作的套件 CI 中
     **串行执行**，或统一经过写入队列——本类不替 CI 做调度。
-  - `EmptyExperienceStore`：P1 占位（旧签名 `lookup(app_build, screen,
-    target_id) -> list[dict]` 恒返回 []）。**过渡保留**：P1 引擎的调用
-    形态与 P2 接口不同，Task 2.4 引擎接真 Store 时统一并退役本类。
+
+> **Task 2.4 过渡债清账**：P1 的 `EmptyExperienceStore`（旧签名
+> `lookup(app_build, screen, target_id) -> list[dict]` 恒返回 []）**已退役**。
+> 旧签名把 `app_build`（哪一次构建）当 `app_id`（哪个 App）用——两个键
+> 语义不同，正是 Task 2.4 要清的地雷。空库的语义改由真 Store 承担
+> （`lookup` 天然返回 `[]`），"没有 Store" 由 `RecoveryEngine` 的
+> `experience_store=None` 显式表达。
 
 追溯与保留纪律：
   - E5：`create_candidate` 只收 `CandidateSeed`（三件套模型层 + Store
@@ -41,7 +45,7 @@ from experience.models import (
 )
 from experience.schema_migrations import migrate
 
-__all__ = ["ExperienceStore", "SQLiteExperienceStore", "EmptyExperienceStore"]
+__all__ = ["ExperienceStore", "SQLiteExperienceStore", "record_sample_runs"]
 
 
 def _now() -> str:
@@ -73,14 +77,6 @@ class ExperienceStore(Protocol):
                       app_build: str | None = None) -> None: ...
 
     def list(self, status: ExperienceStatus | None = None) -> list[Experience]: ...
-
-
-class EmptyExperienceStore:
-    """P1 占位（恒返回 []）——旧签名，Task 2.4 引擎接真 Store 后退役。"""
-
-    def lookup(self, app_build: str, screen: str,
-               target_id: str) -> list[dict]:
-        return []
 
 
 class SQLiteExperienceStore:
@@ -381,3 +377,39 @@ class SQLiteExperienceStore:
                 "UPDATE experiences SET status=?, updated_at=?"
                 " WHERE experience_id=?",
                 (new_status.value, now, experience_id))
+
+
+# --- 4.7 样本落库（引擎决定写什么，trace 写入方补 steps.id） --------------
+
+def record_sample_runs(store: ExperienceStore, samples: list[dict], *,
+                       step_id: int) -> int:
+    """把引擎产出的 4.7 样本 payload 落库，返回写入行数。
+
+    **为什么 step_id 不在 payload 里**（Task 2.4 决策记录）：恢复发生在
+    `Lifecycle.record_step()` **之前**——那一刻 `steps.id` 尚未分配
+    （AUTOINCREMENT，只有 INSERT 之后才有值）。可选的替代是拿 YAML 的
+    `step_index` 填进 `step_id`，但那是两个 id 空间互相冒充（本项目在
+    「build ≠ bundle」上吃过同款亏），所以拆成两步：引擎产出 payload
+    （它掌握 4.7 判定与运行期观测），trace 写入方在 `record_step()` 之后
+    补上真 id 再调本函数。
+
+    `result == "SUCCESS"` 时同时 `record_success_build`（设计 4.7 末行 /
+    E7：validated_builds 只由成功样本追加）。
+    """
+    for s in samples:
+        exp_id = s["experience_id"]
+        store.record_run(exp_id, ExperienceRun(
+            experience_id=exp_id,
+            run_id=s["run_id"],
+            step_id=step_id,
+            app_build=s["app_build"],
+            screen_fingerprint=s.get("screen_fingerprint"),
+            result=s["result"],
+            guard_reason=s.get("guard_reason"),
+            effective_risk=s.get("effective_risk"),
+            uniqueness_count=s.get("uniqueness_count"),
+            element_type_match=s.get("element_type_match"),
+            latency_ms=s.get("latency_ms")))
+        if s["result"] == "SUCCESS":
+            store.record_success_build(exp_id, s["app_build"])
+    return len(samples)

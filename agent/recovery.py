@@ -148,12 +148,10 @@ from agent.context import (          # noqa: E402
     RecoveryContext,
     RecoveryResult,
 )
-# P2-03：ExperienceStore/Empty 的唯一定义在 experience.store——
-# 直接 import 单一真值源（context.py 只 re-export 兼容旧路径）
-from experience.store import (   # noqa: E402
-    EmptyExperienceStore,
-    ExperienceStore,
-)
+# P2-03：ExperienceStore 的唯一定义在 experience.store——
+# 直接 import 单一真值源（context.py 只 re-export 兼容旧路径）。
+# P1 的 EmptyExperienceStore 占位已在 Task 2.4 退役（旧签名 build≠app_id）。
+from experience.store import ExperienceStore   # noqa: E402
 from agent.policy import (           # noqa: E402
     RecoveryAction,
     RecoveryConfig,
@@ -161,11 +159,16 @@ from agent.policy import (           # noqa: E402
 )
 from experience.runtime_guard import (  # noqa: E402
     GUARD_REASON_TO_LLM_FAILURE,
+    RuntimeContext,
+    experience_locator,
+    experience_runtime_guard,
     guard_candidate,
 )
 from llm.budget import BudgetConfig, LLMBudget  # noqa: E402
 from llm.parser import parse_llm_output         # noqa: E402
 from llm.prompt import build_recovery_prompt, redact_ui_tree  # noqa: E402
+from runner.result import recovered_kind        # noqa: E402
+from source.screen import screen_fingerprint    # noqa: E402
 
 __all__ = ["RunMemo", "RecoveryEngine"]
 
@@ -197,11 +200,36 @@ def _single_element(found) -> object:
     return found
 
 
+class _FindAllAdapter:
+    """把 ctx 注入的 `find_all` 适配成 `experience_runtime_guard` 要的
+    executor 形态（只需 `.find_all(Locator) -> list`），顺带捕获**数量**与
+    **唯一命中元素**。
+
+    引擎不持有 Executor（9.1 隔离纪律），但 Experience 的执行端要复用
+    Guard 刚找到的那个元素——按候选策略再 find 一次等于多一次设备往返，
+    且两次之间 UI 可能又变（TOCTOU）。与 `_llm_stage` 的 `found_box`
+    同款做法。`last_count` 是 4.7 样本里 `uniqueness_count` 的来源
+    （异常语义反推不出真数量，所以必须由 find_all 给出）。
+    """
+
+    def __init__(self, find_all) -> None:
+        self._find_all = find_all
+        self.last_count: int | None = None
+        self.matched: object | None = None
+
+    def find_all(self, locator) -> list:
+        found = self._find_all(locator)
+        items = list(found) if isinstance(found, (list, tuple)) else [found]
+        self.last_count = len(items)
+        self.matched = items[0] if len(items) == 1 else None
+        return items
+
+
 class RecoveryEngine:
     """9.2 流水线。P1 交付确定性半边：决策表 → postcondition → settle →
-    当前屏识别 → Local Reconciliation → ExperienceStore（恒空）→ LLM 钩子
-    （4.2 之前恒 None）。引擎不持有 Executor/LLM——设备交互经 ctx 注入，
-    LLM 调用点同样只在引擎（9.1：禁止 Executor 内 call_llm）。"""
+    当前屏识别 → Local Reconciliation → Experience Store → LLM 钩子
+    （P2 Task 2.4 接真 Store）。引擎不持有 Executor/LLM——设备交互经 ctx
+    注入，LLM 调用点同样只在引擎（9.1：禁止 Executor 内 call_llm）。"""
 
     def __init__(self, config: RecoveryConfig | None = None,
                  repo=None,
@@ -213,7 +241,10 @@ class RecoveryEngine:
                  sleep=time.sleep) -> None:
         self.config = config or RecoveryConfig()
         self.repo = repo
-        self.experience_store = experience_store or EmptyExperienceStore()
+        # None = 没有经验库（不是「空库」）。空库由真 Store 表达（lookup
+        # 返回 []）——Task 2.4 退役 EmptyExperienceStore 后，两者在行为上
+        # 等价（P1 行为保留原则），但在报告上可区分（no_store vs miss）。
+        self.experience_store = experience_store
         self.run_memo = run_memo or RunMemo()
         # Task 4.2：llm + budget + guard——LLM 候选执行前过 9.3 校验链，
         # 风险门控复用 Guard 实例（10.1：Guard 不受 LLM 输出影响）。
@@ -221,6 +252,35 @@ class RecoveryEngine:
         self.budget = budget
         self.guard = guard
         self._sleep = sleep
+
+    @staticmethod
+    def _recovered(kind: str, detail: dict,
+                   strategy: dict | None = None) -> RecoveryResult:
+        """已恢复结论的统一构造：盖上设计 10 节的明细分类。
+
+        单一入口而不是五处各写一遍 `detail["recovered_kind"]`——漏一处就是
+        「同一类恢复有时有分类有时没有」，报告读起来自相矛盾。分类本身
+        不改聚合与退出码（RECOVERED ≠ PASS 不变）。
+        """
+        detail = dict(detail)
+        detail["recovered_kind"] = recovered_kind(kind)
+        return RecoveryResult(recovered=True, kind=kind, detail=detail,
+                              strategy=strategy)
+
+    @staticmethod
+    def _current_screen_id(screen_res,
+                           ctx: RecoveryContext) -> str | None:
+        """当前屏 id（9.3-3 的判定基准）。
+
+        LLM 与 Experience 两条路径**共用本函数**——同一件事在两处各推一次
+        必然在某天分叉，而 E1 红线要求同一输入下两条路径的 Guard 结论逐位
+        一致。识别失败时退回 `ctx.screen_id`（步骤登记的屏）：这是 P1 既有
+        口径，保持它而不是收紧成 fail-closed，是为了不顺手砍掉「屏识别
+        失败」场景的既有恢复能力——收紧要单独立项（含 SCREEN_UNKNOWN 的
+        端到端验证）。
+        """
+        return ((screen_res.screen if screen_res and screen_res.screen
+                 else ctx.screen_id) or None)
 
     def recover(self, ctx: RecoveryContext) -> RecoveryResult:
         allowed = admitted_actions(
@@ -233,6 +293,11 @@ class RecoveryEngine:
                 detail={"recovery": "not_admitted"})
 
         stages: list[dict] = []
+        # 4.7 样本在引擎侧累积，**无论最终是否恢复**都要随结果带出去：Guard
+        # 判定的失败样本（NOT_FOUND / AMBIGUOUS / TYPE_MISMATCH）与执行失败
+        # 样本都是要计入失败率的真观测，只挂在「已恢复」的结果上等于把它们
+        # 丢掉（E11 的失败口径被吞掉，成功率会系统性偏高）。
+        samples: list[dict] = []
 
         # --- POSTCONDITION_CHECK（H7：非幂等 POST_DISPATCH 的唯一出口；
         #     幂等动作也先查——postcondition 成立即无需重发，矩阵 #18） ---
@@ -253,9 +318,8 @@ class RecoveryEngine:
                                    "outcome": bool(ok)})
                 if ok is True:
                     # 动作已生效，不重发（H7：未再次点击）
-                    return RecoveryResult(
-                        recovered=True, kind="postcondition",
-                        detail={"stages": stages})
+                    return self._recovered("postcondition",
+                                           {"stages": stages})
                 if ok is False:
                     return RecoveryResult(
                         recovered=False,
@@ -286,9 +350,9 @@ class RecoveryEngine:
                                    "outcome": f"redispatch:"
                                               f"{type(e).__name__}"})
                     break
-                return RecoveryResult(
-                    recovered=True, kind="settle_retry",
-                    detail={"stages": stages, "settle_attempt": attempt})
+                return self._recovered(
+                    "settle_retry",
+                    {"stages": stages, "settle_attempt": attempt})
 
         # --- 取页（一次）+ 脱敏（review_m4_task42 P2-2 定档）---
         # H14：redact 前置于一切消费——current_screen / reconcile_local /
@@ -355,29 +419,246 @@ class RecoveryEngine:
                         element = _single_element(ctx.find_with((memo,)))
                         if ctx.redispatch is not None:
                             ctx.redispatch(element)
-                            return RecoveryResult(
-                                recovered=True, kind="run_memo",
-                                detail={"stages": stages,
-                                        "memo_strategy": memo})
+                            return self._recovered(
+                                "run_memo",
+                                {"stages": stages, "memo_strategy": memo})
                     except Exception as e:  # noqa: BLE001
                         stages.append({"stage": "run_memo",
                                        "outcome": f"{type(e).__name__}"})
 
-        # --- ExperienceStore（P2 设计 7 节；P1 旧稿「20 节」——reconciliation
-        #     后、LLM 前；占位恒 []，Task 2.4 接真 Store） ---
-        if ctx.element_id:
-            exp = self.experience_store.lookup(
-                ctx.app_build, ctx.screen_id or "", ctx.element_id)
-            stages.append({"stage": "experience",
-                           "outcome": len(exp) if exp else "empty"})
+        # --- Experience Store（P2 设计 5.1 / 7.1：reconciliation 后、LLM 前。
+        #     命中即免 LLM 调用——设计 3.1「LLM Budget 不变；Experience 命中
+        #     时根本不消耗 Budget」） ---
+        exp_result = self._try_experiences(ctx, stages, samples,
+                                           screen_res, page_red)
+        if exp_result is not None:
+            return exp_result
 
         # --- LLM（9.2 第 8 步；--no-llm / 未配置 → disabled 如实可见） ---
         if self.llm is None:
             stages.append({"stage": "llm", "outcome": "disabled"})
-            return RecoveryResult(
-                recovered=False, failure_type=ctx.failure_type,
-                detail={"stages": stages, "recovery": "no_llm_engine"})
-        return self._llm_stage(ctx, stages, screen_res, recon, page_red)
+            return self._unrecovered(ctx, stages, samples, "no_llm_engine")
+        return self._llm_stage(ctx, stages, screen_res, recon, page_red,
+                              samples)
+
+    @staticmethod
+    def _with_samples(detail: dict, samples: list[dict]) -> dict:
+        """把 4.7 样本挂进结论 detail（有才挂——纯 LLM 的 run 不该凭空多出
+        一个空键，报告读起来会像「查了经验库但没记样本」）。"""
+        if samples:
+            detail["experience_runs"] = samples
+        return detail
+
+    def _unrecovered(self, ctx: RecoveryContext, stages: list,
+                     samples: list[dict], reason: str) -> RecoveryResult:
+        """未恢复结论的统一构造（维持原症状 + 可观测的停在哪一步）。"""
+        return RecoveryResult(
+            recovered=False, failure_type=ctx.failure_type,
+            detail=self._with_samples({"stages": stages, "recovery": reason},
+                                      samples))
+
+    # --- Experience 消费（设计 5.1 try_experiences；Task 2.4） ---
+
+    def _try_experiences(self, ctx: RecoveryContext, stages: list,
+                         samples: list[dict], screen_res, page_red: str | None
+                         ) -> RecoveryResult | None:
+        """设计 5.1 主循环：lookup → 逐候选 Guard（4.7 决定是否记样本）→
+        EXECUTE 则执行 + postcondition → 成功返回 `kind="experience"`；
+        全部候选用尽返回 None（调用方回落 LLM，仍受 P1 Budget 控制）。
+
+        排序：本任务直接用 Store 的 `updated_at DESC`（M3 换入
+        `rank_experiences`——VERIFIED 优先 / success_rate / 最近成功时间）。
+        排序只决定「先试哪条」，不改变每条各自的 Guard 判定。
+
+        每一处「做不了」都留一条 stage，不静默跳过：静默的「有经验库但没
+        查」在报告上与「查了没有」不可区分，排障只能靠猜——与 LLM 阶段的
+        `disabled` 同款纪律（review_m4_task41 P3-2）。
+        """
+        if self.experience_store is None:
+            stages.append({"stage": "experience", "outcome": "no_store"})
+            return None
+        # 主键 (app_id, screen_id, target_id) 三段缺一就查不出东西——不猜键。
+        # app_id 缺失是常态（--fake-driver / 未给 --bundle-id）；screen_id 缺失
+        # 出现在 Repository 解析不到目标（aux 引用悬空）时。两种都如实报出，
+        # 不拿 app_build / 当前屏顶替（顶替会查到别人家的经验）。
+        missing = [name for name, value in (
+            ("app_id", ctx.app_id), ("screen_id", ctx.screen_id),
+            ("element_id", ctx.element_id)) if not value]
+        if missing:
+            stages.append({"stage": "experience", "outcome": "incomplete_key",
+                           "missing": missing[0]})
+            return None
+        if page_red is None:
+            # Screen 校验是 Guard 第一环（设计 5 节）：读不到页 = 证明不了
+            # 当前屏 → fail-closed 跳过，且**不记样本**（不是「用了但错了」）。
+            stages.append({"stage": "experience", "outcome": "no_page_source"})
+            return None
+        if ctx.find_all is None:
+            # 数量观测端缺失时 Guard 只能把「拿不到元素」当成 0 匹配——那会
+            # 写成假失败样本（4.7 里 NOT_FOUND 是要计入失败率的）。宁可不查。
+            stages.append({"stage": "experience", "outcome": "no_find_all"})
+            return None
+        try:
+            candidates = self.experience_store.lookup(
+                ctx.app_id, ctx.screen_id or "", ctx.element_id)
+        except Exception as e:  # noqa: BLE001 — 读库故障不伪装成「没有经验」
+            stages.append({"stage": "experience",
+                           "outcome": f"lookup_error:{type(e).__name__}"})
+            return None
+        if not candidates:
+            stages.append({"stage": "experience", "outcome": "miss"})
+            return None
+        stages.append({"stage": "experience", "outcome": "hit",
+                       "count": len(candidates)})
+
+        current_screen_id = self._current_screen_id(screen_res, ctx)
+        fingerprint = screen_fingerprint(page_red)
+        for exp in candidates:
+            hit = self._try_one_experience(
+                ctx, exp, stages, current_screen_id, fingerprint, samples)
+            if hit is not None:
+                return hit
+        stages.append({"stage": "experience", "outcome": "exhausted",
+                       "count": len(candidates)})
+        return None
+
+    def _try_one_experience(self, ctx: RecoveryContext, exp, stages: list,
+                            current_screen_id: str | None,
+                            fingerprint: str | None,
+                            samples: list[dict]) -> RecoveryResult | None:
+        """单个候选：Guard → 4.7 样本 → EXECUTE 则执行 + postcondition。
+
+        返回 RecoveryResult = 本候选救回来了；None = 换下一个候选
+        （BLOCK / 执行失败 / 结果不可观测——设计 5.1 的 `continue`）。
+        """
+        t0 = time.monotonic()
+        adapter = _FindAllAdapter(ctx.find_all)
+        gres = experience_runtime_guard(
+            exp,
+            RuntimeContext(current_screen=current_screen_id,
+                           expected_type=ctx.expected_type,
+                           effective_risk=ctx.effective_risk,
+                           action=ctx.action or "tap",
+                           element_id=ctx.element_id,
+                           screen_fingerprint=fingerprint),
+            adapter)
+        elapsed = int((time.monotonic() - t0) * 1000)
+        fp_match = (None if exp.last_screen_fingerprint is None
+                    or fingerprint is None
+                    else exp.last_screen_fingerprint == fingerprint)
+        entry = {"stage": "experience_candidate",
+                 "experience_id": exp.experience_id,
+                 "status": exp.status.value,
+                 "outcome": gres.outcome,
+                 "reason": gres.reason,
+                 "record_as_sample": gres.record_as_sample,
+                 "screen_fingerprint_match": fp_match,
+                 "uniqueness_count": adapter.last_count}
+
+        if gres.outcome != "EXECUTE":
+            stages.append(entry)
+            if gres.record_as_sample:
+                # 4.7 第 2/3 行：唯一性/类型失败是「用了但错了」→ 失败样本
+                self._queue_sample(samples, ctx, exp, gres, adapter,
+                                   fingerprint, elapsed, result="FAILURE",
+                                   guard_reason=gres.reason)
+            return None
+
+        # EXECUTE：执行 + postcondition（设计 5.1 的
+        # perform_and_check_postcondition）
+        element = adapter.matched
+        execution = "SUCCESS"
+        failure_reason = None
+        if ctx.redispatch is None:
+            # aux（wait/assert）无 dispatch 语义：候选交调用方覆盖定位后重跑，
+            # 执行结果**此刻不可观测** → 不写样本。不猜 SUCCESS——猜错的
+            # SUCCESS 会直接抬高 success_rate 把 Candidate 推向 VERIFIED，
+            # 那是 E4/E11 级别的错误，不是记账瑕疵。
+            execution = "not_dispatched"
+        else:
+            try:
+                ctx.redispatch(element)
+            except Exception as e:  # noqa: BLE001 — 执行失败 = 本候选没用
+                execution = "FAILURE"
+                failure_reason = f"redispatch:{type(e).__name__}"
+        if execution == "SUCCESS" and ctx.has_postcondition \
+                and ctx.postcondition_check is not None:
+            # 设计 6：非幂等目标「postcondition 确认成功才记一次 SUCCESS
+            # 样本」——postcondition 是执行结果的唯一判据。
+            try:
+                ok = ctx.postcondition_check()
+            except Exception:  # noqa: BLE001 — 观测故障不当判定（P1 同款）
+                ok = None
+            entry["postcondition"] = ok
+            if ok is False:
+                execution = "FAILURE"
+                failure_reason = "postcondition_not_satisfied"
+            elif ok is None:
+                execution = "UNKNOWN"      # 观测不到 → 不写样本、不声称恢复
+        entry["execution"] = execution
+        stages.append(entry)
+
+        if execution == "SUCCESS":
+            self._queue_sample(samples, ctx, exp, gres, adapter,
+                               fingerprint, elapsed, result="SUCCESS")
+        elif execution == "FAILURE":
+            self._queue_sample(samples, ctx, exp, gres, adapter,
+                               fingerprint, elapsed, result="FAILURE",
+                               guard_reason=failure_reason)
+        if execution in ("FAILURE", "UNKNOWN"):
+            # FAILURE：本候选没用 → 换下一个（设计 5.1 的 continue）
+            # UNKNOWN：观测不到结果 → 不声称恢复（不猜）
+            return None
+        # SUCCESS / not_dispatched（aux 交调用方重跑）→ 本候选救回来了
+        return self._recovered(
+            "experience",
+            {"stages": stages,
+             "experience_id": exp.experience_id,
+             "candidate": experience_locator(exp)[0],
+             "screen": exp.screen_id,
+             # 9.5 补丁导出 / recoveries 行需要：候选类型 = Guard 已**验证过**
+             # 的运行时类型（== ctx.expected_type）。期望类型未知时留 None——
+             # 后续 review accept 会 fail-loud 拒绝建种子（宁缺勿猜）。
+             "candidate_type": ctx.expected_type,
+             "screen_fingerprint_match": fp_match,
+             # 4.7 样本（不含 step_id——恢复发生在 record_step 之前，
+             # steps.id 那时还不存在；由管线在 record_step 之后补真 id）
+             "experience_runs": samples},
+            experience_locator(exp)[0])
+
+    @staticmethod
+    def _queue_sample(samples: list, ctx: RecoveryContext, exp, gres,
+                      adapter: _FindAllAdapter, fingerprint: str | None,
+                      elapsed: int, *, result: str,
+                      guard_reason: str | None = None) -> None:
+        """4.7 的样本 payload（**唯一**的落库内容决策点）。
+
+        只由 `record_as_sample`（MISS/风险拦截 = False）与执行结果决定是否
+        被调用——E11 口径在这里收口，别的模块不再判一次。
+        无 `run_id`（没有追溯链）时不落库：样本行没有归属 run 就等于伪造
+        证据，宁可缺一条（E5 的「宁缺勿假」同款）。
+        """
+        if not ctx.run_id:
+            return
+        if gres.reason == "TYPE_MISMATCH":
+            type_match: bool | None = False
+        elif gres.outcome == "EXECUTE":
+            # 类型校验跑过并通过（期望类型未知时校验被跳过 → None，不谎报）
+            type_match = True if ctx.expected_type else None
+        else:
+            type_match = None      # 没走到类型校验（NOT_FOUND/AMBIGUOUS）
+        samples.append({
+            "experience_id": exp.experience_id,
+            "run_id": ctx.run_id,
+            "app_build": ctx.app_build,
+            "result": result,
+            "guard_reason": guard_reason,
+            "effective_risk": getattr(ctx.effective_risk, "name", None),
+            "uniqueness_count": adapter.last_count,
+            "element_type_match": type_match,
+            "screen_fingerprint": fingerprint,
+            "latency_ms": elapsed,
+        })
 
     # --- LLM 校验链（9.3 五项 + 10.4 契约 + 10.5 budget/熔断） ---
 
@@ -416,7 +697,10 @@ class RecoveryEngine:
 
     def _llm_stage(self, ctx: RecoveryContext, stages: list,
                    screen_res, recon: dict | None,
-                   page_red: str | None) -> RecoveryResult:
+                   page_red: str | None,
+                   samples: list[dict] | None = None) -> RecoveryResult:
+        samples = samples if samples is not None else []
+
         def miss(failure_type: str, stage: dict,
                  count_failure: bool = True) -> RecoveryResult:
             stages.append(stage)
@@ -426,7 +710,8 @@ class RecoveryEngine:
                 self.budget.record_failure()
             return RecoveryResult(
                 recovered=False, failure_type=failure_type,
-                detail={"stages": stages, "recovery": "llm_missed"})
+                detail=self._with_samples(
+                    {"stages": stages, "recovery": "llm_missed"}, samples))
 
         if page_red is None:
             return miss(ctx.failure_type, {"stage": "llm",
@@ -494,8 +779,9 @@ class RecoveryEngine:
         # 结论逐位一致）。
         # Screen（9.3-3）先于设备操作：纯 Repository 比对 + 候选 risk 读取
         #（fail-closed：未登记 = candidate_screen=None）。
-        current_screen_id = (screen_res.screen if screen_res
-                             and screen_res.screen else ctx.screen_id) or ""
+        # 当前屏推导与 Experience 路径共用 `_current_screen_id`（E1：两条
+        # 路径同一输入必须同一结论，推导也不许各写一份）。
+        current_screen_id = self._current_screen_id(screen_res, ctx) or ""
         candidate_screen = risk = None
         eff = None
         try:
@@ -557,14 +843,16 @@ class RecoveryEngine:
                             {"stage": "redispatch",
                              "outcome": f"{type(e).__name__}: "
                                         f"{str(e)[:120]}"})
-        result = RecoveryResult(
-            recovered=True, kind="llm",
-            detail={"stages": stages, "candidate": candidate,
-                    "confidence": conf,
-                    # 9.5 补丁导出需要：候选登记屏 + 类型（无则导出 fail-loud）
-                    "screen": current_screen_id,
-                    "candidate_type": getattr(eff, "type", None)},
-            strategy=candidate)
+        result = self._recovered(
+            "llm",
+            self._with_samples(
+                {"stages": stages, "candidate": candidate,
+                 "confidence": conf,
+                 # 9.5 补丁导出需要：候选登记屏 + 类型（无则导出 fail-loud）
+                 "screen": current_screen_id,
+                 "candidate_type": getattr(eff, "type", None)},
+                samples),
+            candidate)
         # ⑦（9.4）：LLM 校验通过后写 RUN_MEMO——同 run 同漂移免重复调用
         if ctx.element_id:
             self.run_memo.save(current_screen_id, ctx.element_id,
