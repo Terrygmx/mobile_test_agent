@@ -76,7 +76,11 @@ def test_fi_02_llm_recovery_recovered_exit5(tmp_path):
 
 def test_fi_02b_review_accept_exports_patch_h15(tmp_path):
     """9.5：accept 导出 overrides 补丁（只落 --out/stdout，不写
-    repository/overrides——H15）；reject 需 note。"""
+    repository/overrides——H15）；reject 需 note。
+
+    P2（Task 2.3）起 accept 同时是 Candidate 的唯一入口：本行给出完整
+    追溯链（bundle_id + step 关联），并显式 `--exp-db` 隔离——绝不写仓库的
+    out/experience.db（测试污染真实经验库 = 污染数据）。"""
     from agent.recovery import RecoveryEngine
     from cli.main import main
 
@@ -84,18 +88,32 @@ def test_fi_02b_review_accept_exports_patch_h15(tmp_path):
                                    ElementNotFound("drifted"), _El()])
     recovery = RecoveryEngine(repo=_repo(tmp_path), llm=FakeLLM([_llm_json()]),
                               budget=LLMBudget(), sleep=lambda s: None)
-    _run(tmp_path, DRIFT_CASE, ex=ex, repo=_repo(tmp_path), recovery=recovery)
+    _run(tmp_path, DRIFT_CASE, ex=ex, repo=_repo(tmp_path), recovery=recovery,
+         bundle_id="com.matrix.app")
     out = tmp_path / "patch.yaml"
+    exp_db = tmp_path / "experience.db"
     code = main(["review", "list", "--db", str(tmp_path / "trace.db")])
     assert code == 0
     code = main(["review", "accept", "1", "--db", str(tmp_path / "trace.db"),
-                 "--reviewer", "tester", "--out", str(out)])
+                 "--reviewer", "tester", "--out", str(out),
+                 "--exp-db", str(exp_db)])
     assert code == 0
     patch = out.read_text(encoding="utf-8")
     assert "signin_button" in patch and "login_button" in patch
     assert "origin: manual" in patch
     # H15：补丁只能落 --out 指定文件，repository/overrides 无人碰
     assert not (tmp_path / "repository").exists()
+    # P2：ACCEPT 顺带建出 Candidate（种子三件套来自本 run 的真实链）
+    import sqlite3
+    conn = sqlite3.connect(exp_db)
+    try:
+        rows = conn.execute(
+            "SELECT status, app_id, screen_id, target_id, seed_run_id,"
+            " seed_recovery_review_id FROM experiences").fetchall()
+    finally:
+        conn.close()
+    assert rows == [("CANDIDATE", "com.matrix.app", "HomeView",
+                     "login_button", "run_matrix", 1)]
     # 二次决策拒绝（已 ACCEPT 不可再动）
     code = main(["review", "reject", "1", "--db", str(tmp_path / "trace.db"),
                  "--note", "double decide"])

@@ -15,6 +15,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from tracer.storage import SEED_SELECT
+
 DEFAULT_DB = "out/trace.db"
 
 
@@ -123,23 +125,13 @@ def seedable_accepts(conn: sqlite3.Connection) -> list[dict]:
     追溯链不断。悬空链的行**保留**并标 False——审计要暴露质量缺口，
     不是静默过滤（这些行即使有 ACCEPT 也不能做种子，M2 的
     create_candidate 会因 E5 校验拒绝它们）。
+
+    join 片段与 `TraceStore.get_review_seed`（Task 2.3 的消费入口）共用
+    `tracer.storage.SEED_SELECT`——同一 join 两处维护会漂移。
     """
     rows = _rows(
         conn,
-        "SELECT rr.id AS seed_recovery_review_id,"
-        "       rec.step_id AS seed_step_id,"
-        "       tc.run_id AS seed_run_id,"
-        "       ru.app_bundle_id AS app_id,"
-        "       rec.screen, rec.expected_target AS target_id,"
-        "       rec.candidate_target, rec.candidate_type, rec.app_build,"
-        "       rec.kind, rr.reviewer, rr.reviewed_at"
-        " FROM recovery_reviews rr"
-        " JOIN recoveries rec ON rec.id = rr.recovery_id"
-        " LEFT JOIN steps s ON s.id = rec.step_id"
-        " LEFT JOIN testcase_runs tc ON tc.id = s.testcase_run_id"
-        " LEFT JOIN runs ru ON ru.run_id = tc.run_id"
-        " WHERE rr.review_status = 'ACCEPT'"
-        " ORDER BY rr.id")
+        SEED_SELECT + " WHERE rr.review_status = 'ACCEPT' ORDER BY rr.id")
     for r in rows:
         r["seed_ready"] = all([
             r["seed_run_id"] is not None,

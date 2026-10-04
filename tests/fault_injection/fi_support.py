@@ -189,14 +189,17 @@ def load_case(text: str):
 
 def run_matrix(tmp_path, case_yaml, *, ex=None, repo=None, recovery=None,
                cases=None, guard=None, ds=None, lifecycle=None,
-               failure_policy="ABORT_SUITE", env=None):
+               failure_policy="ABORT_SUITE", env=None, bundle_id=None):
     """矩阵行装配：run_all 全链（lint 不在此——矩阵行的 YAML 都先保证
     schema 可解析；lint 语义行 #23 单独走 mta lint）。
 
     `env`：EnvironmentManager 替身（#20/#24 的 cleanup 失败注入；
-    None = no-op 桩）。"""
+    None = no-op 桩）。
+    `bundle_id`：落 runs.app_bundle_id——P2（Task 2.3）的 Candidate 主键
+    第一段；走 accept→create_candidate 的矩阵行必须给（缺了 E5 种子字段
+    不齐，accept 会 fail-loud）。默认 None = 历史行为不变。"""
     store = TraceStore(tmp_path / "trace.db")
-    store.start_run("run_matrix")
+    store.start_run("run_matrix", app_bundle_id=bundle_id)
     sdir = tmp_path / "suites"
     sdir.mkdir(exist_ok=True)
     (sdir / "matrix.yaml").write_text(case_yaml, encoding="utf-8")

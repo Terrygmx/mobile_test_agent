@@ -73,6 +73,38 @@ INFRA_EVENT_TYPES = {
     "DEVICE_UNAVAILABLE",
 }
 
+# 设计 11.1 的 Experience 事件全集（P2 追加到 P1 Trace）。**不在本集合的
+# 事件名一律拒绝**——与 RECOVERY_KINDS / REVIEW_STATUSES 同款 fail-loud：
+# 事件名打错必须当场报错，不能静默写进一个查不到的孤儿行。
+EXPERIENCE_EVENT_TYPES = {
+    "experience_lookup", "experience_hit", "experience_miss",
+    "experience_guard_block", "experience_execution",
+    "candidate_created", "candidate_verified",
+    "experience_degraded", "experience_rejected", "experience_revalidated",
+    "promotion_proposed", "promotion_approved",
+}
+
+# E5 种子解析（设计 8.1）：recovery_reviews → recoveries → steps →
+# testcase_runs → runs 的 join 是「这条 ACCEPT 是否真的可追溯」的唯一事实
+# 来源。审计脚本（scripts/p2_audit_recoveries.py 的 seedable_accepts，Task
+# 1.1）与本模块 get_review_seed 共用本片段——同一 join 两处维护必然漂移
+# （P2-04 的「两套校验合一」同款纪律）。
+SEED_SELECT = (
+    "SELECT rr.id AS seed_recovery_review_id,"
+    " rr.review_status, rr.reviewer, rr.reviewed_at, rr.note,"
+    " rec.id AS recovery_id, rec.kind,"
+    " rec.step_id AS seed_step_id,"
+    " tc.run_id AS seed_run_id, tc.id AS seed_tc_run_id,"
+    " ru.app_bundle_id AS app_id,"
+    " rec.screen, rec.expected_target AS target_id,"
+    " rec.candidate_target, rec.candidate_type, rec.app_build"
+    " FROM recovery_reviews rr"
+    " JOIN recoveries rec ON rec.id = rr.recovery_id"
+    " LEFT JOIN steps s ON s.id = rec.step_id"
+    " LEFT JOIN testcase_runs tc ON tc.id = s.testcase_run_id"
+    " LEFT JOIN runs ru ON ru.run_id = tc.run_id"
+)
+
 # 8.1 终态优先级（高→低）。注意这条链只覆盖 8.1 明列的六档；
 # ABORTED / SKIPPED 不在其中（8.1 没给它们的相对顺序），单列一条兜底链。
 _STATUS_PRIORITY = [
@@ -621,6 +653,40 @@ class TraceStore:
             " reviewed_at=?, note=? WHERE id=?",
             (review_status, reviewer, _now(), redact(note), review_id))
         self.conn.commit()
+
+    def get_review_seed(self, review_id: int) -> dict | None:
+        """单条 review 的 E5 种子字段（设计 8.1：ACCEPT → Candidate 的输入）。
+
+        返回的字段是 `CandidateSeed` 的**唯一供给**：三件套（seed_run_id /
+        seed_step_id / seed_recovery_review_id）+ app_id / screen / target /
+        候选策略信息。追溯链断裂的行**照样返回**（字段为 None），由调用方
+        fail-loud 报错——审计要暴露缺口，消费方不得静默跳过（E5）。
+        """
+        row = self.conn.execute(
+            SEED_SELECT + " WHERE rr.id=?", (review_id,)).fetchone()
+        return dict(row) if row is not None else None
+
+    # -- Experience 事件（设计 11.1） --
+
+    def record_experience_event(self, event_type: str, *, run_id: str,
+                                tc_run_id: int | None = None,
+                                detail: dict | None = None) -> None:
+        """设计 11.1：Experience 事件**追加到 P1 Trace**，不新建独立存储体系。
+
+        落点是 trace.db 的通用事件流 `infra_events`——P1 schema 0.1（14.2）
+        没有独立的 events 表，infra_events 是该库唯一的事件日志；P2 的
+        experience_* / candidate_* / promotion_* 事件统一走本入口（Task 2.4
+        的 lookup/hit/miss/guard_block/execution 同此）。
+
+        `action_taken` 留空——P1 稳定性报告的 WDA 指标按
+        `action_taken='RESTART_WDA'` 过滤（scripts/p1_stability_report.py），
+        本类事件不会污染那条判据。
+        """
+        if event_type not in EXPERIENCE_EVENT_TYPES:
+            raise ValueError(
+                f"invalid experience event_type: {event_type!r} "
+                f"(allowed: {sorted(EXPERIENCE_EVENT_TYPES)})")
+        self.record_infra_event(run_id, tc_run_id, event_type, detail=detail)
 
     # -- infra_events --
 

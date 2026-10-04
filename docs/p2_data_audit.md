@@ -219,3 +219,55 @@ runs=102 / recoveries=50 / reviews=1 / seed_ready=1（原 0）。
 - **P3-5**：phase0/verify_p1_m4.py 注释指向更新（candidate_risk_allowed
   → runtime_guard 共享链）。
 - 实测：pytest 864 collected、全量绿。
+
+---
+
+## Task 2.3 完成记录（P2-05 review accept → create_candidate，2026-10-04）
+
+- **交付**：`agent/review.py` 新增 `seed_candidate()`（ACCEPT → Candidate
+  的唯一入口）+ `_resolve_seed_fields()`（E5 种子字段取+校验）；
+  `decide_review()` 加 `experience_store` 参数并在 ACCEPT 分支串起
+  「先校验 → 改状态 → create_candidate」，返回新建/命中的 Candidate；
+  `cli/main.py` 的 `review accept` 加 `--exp-db`（默认
+  `DEFAULT_EXPERIENCE_DB`，单一真值源 import，不写字面量）。
+- **顺序纪律（本任务的关键决策）**：**先校验种子字段、再改 review 状态、
+  最后建 Candidate**。反过来的话，种子不全时 review 已落 ACCEPT，二次
+  accept 被「不可二次决策」挡住，Candidate 永远建不出来——fail-loud 必须
+  发生在状态变更之前。悬空链（P0 遗留 `step_id=0`/关联不到 steps）与
+  Task 1.1 审计的 `seed_ready=False` 同一判据：审计暴露缺口、消费方拒绝
+  消费，两侧都不静默跳过（E5）。
+- **幂等**：按 `seed_recovery_review_id` 判定，同一 review 二次 seeding
+  返回既有行、不重复建（重放/重复触发安全）。REJECTED 行 `lookup` 看不见
+  （Store 层语义），此时重建不视为重复。
+- **trace 事件 `candidate_created`（设计 11.1）**：落点是 trace.db 的
+  `infra_events`（P1 schema 0.1 没有独立 events 表，它是该库唯一的事件
+  流）。新增 `TraceStore.record_experience_event()` 作为统一入口 +
+  `EXPERIENCE_EVENT_TYPES`（设计 11.1 的 12 个事件名，**不在集合即拒绝**
+  ——与 RECOVERY_KINDS 同款 fail-loud），Task 2.4 的
+  lookup/hit/miss/guard_block/execution 直接复用。**不污染 P1 判据**：稳定性
+  报告的 WDA 指标按 `action_taken='RESTART_WDA'` 过滤，本类事件
+  `action_taken` 留空。
+- **去重复**：`TraceStore.get_review_seed()` 与审计脚本的 `seedable_accepts`
+  共用 `tracer.storage.SEED_SELECT`（同一 join 两处维护必然漂移——P2-04
+  「两套校验合一」同款纪律）；审计脚本改为消费该片段，签名与输出列不变。
+- **决策记录**：`Experience.strategy.origin = "experience"`——P2 9.2 已把
+  experience 纳入 origin 词汇（Task 4.1 扩 `loader.ORIGINS`）；本策略非
+  人工手写（manual）也非源码生成（source）。Task 4.1 落地前它只存于
+  experience.db、不经 Repository loader（其 ORIGINS 校验不含 experience），
+  不构成拦截。策略类型固定 `accessibility_id`（LLM 候选给的是 identifier
+  值），与 `export_overrides_patch` 同源。
+- **P1 回归碰撞与处理**：`test_fi_02b`（H15 补丁导出）此前 accept 恒 exit 0
+  ——P2 起 accept 默认建 Candidate，该行 run 无 `app_bundle_id` → E5 拦下。
+  处理：①`fi_support.run_matrix` 加可选 `bundle_id`（默认 None，历史行为
+  不变），本行补全追溯链（真实设备路径恒有 bundle_id，是测试替身的数据
+  缺口）；②该行显式 `--exp-db` 隔离——**绝不写仓库的 out/experience.db**
+  （测试污染真实经验库 = 污染数据）。H15 断言全部保留，另加一条「ACCEPT
+  顺带建出 Candidate」的正向断言（测试因此变强而非变弱）。
+- **已知后果（留待评审判断）**：`mta review accept` 现在对「种子链不全」
+  的 review 一律 exit 3、状态保持 PENDING——H15 的补丁导出因此与该 run
+  的追溯链完整性耦合。现存唯一 ACCEPT（review #1，Task 1.1 冒烟产物）在
+  Task 2.3 之前就已 ACCEPT，故**未自动补种**；如需入种子库，可走
+  `seed_candidate(trace_store, experience_store, 1)` 单独补种，或跑新一轮
+  drift 产出新的 PENDING review 后 accept。
+- 实测：pytest 874 passed（+10：test_review_seed.py 10 项）。
+

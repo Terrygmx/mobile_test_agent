@@ -17,6 +17,7 @@ from typing import Sequence
 import yaml
 
 from environment.secrets import EnvSecretProvider
+from experience import DEFAULT_EXPERIENCE_DB
 from repository.resolver import Repository, Severity
 from testcase.lint import lint, max_severity
 from tracer.storage import ATTRIBUTIONS
@@ -168,7 +169,9 @@ def build_parser() -> argparse.ArgumentParser:
     rev_list.add_argument("--status", default="PENDING",
                           choices=["PENDING", "ACCEPT", "REJECT", "ALL"],
                           help="按状态过滤（默认 PENDING）")
-    rev_acc = rev_sub.add_parser("accept", help="确认恢复 → 导出 overrides 补丁")
+    rev_acc = rev_sub.add_parser(
+        "accept", help="确认恢复 → 导出 overrides 补丁 + 建 Experience "
+                       "Candidate（P2 设计 8.1 / E5）")
     rev_acc.add_argument("review_id", type=int)
     rev_acc.add_argument("--db", metavar="PATH", default="out/trace.db")
     rev_acc.add_argument("--reviewer", metavar="NAME",
@@ -177,6 +180,10 @@ def build_parser() -> argparse.ArgumentParser:
     rev_acc.add_argument("--out", metavar="PATH",
                          help="补丁落盘路径（缺省 stdout；H15：写 Repository "
                               "由人工完成）")
+    rev_acc.add_argument("--exp-db", metavar="PATH",
+                         default=str(DEFAULT_EXPERIENCE_DB),
+                         help="Experience 库路径（ACCEPT 触发 create_candidate；"
+                              "默认 out/experience.db）")
     rev_rej = rev_sub.add_parser("reject", help="拒绝恢复")
     rev_rej.add_argument("review_id", type=int)
     rev_rej.add_argument("--db", metavar="PATH", default="out/trace.db")
@@ -738,11 +745,17 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 def cmd_review(args: argparse.Namespace) -> int:
     """9.5 人工确认流程。accept 导出补丁（stdout 或 --out），任何路径都不
-    写 repository/overrides（H15）。"""
+    写 repository/overrides（H15）。
+
+    P2（设计 8.1 / E5）：accept 同时是 Experience Candidate 的**唯一入口**
+    ——状态流转后立刻 `create_candidate`（种子字段不齐则 fail-loud、状态
+    不变、退出码 3，绝不静默跳过）。
+    """
     import getpass
 
     from agent.review import ReviewError, decide_review, \
         export_overrides_patch, list_reviews
+    from experience import SQLiteExperienceStore
     from tracer.storage import TraceStore
 
     store = TraceStore(args.db)
@@ -762,9 +775,18 @@ def cmd_review(args: argparse.Namespace) -> int:
                     print(f"    note: {r['note']}")
             return 0
         if args.review_cmd == "accept":
-            decide_review(store, args.review_id, "ACCEPT", reviewer,
-                          args.note)
+            exp_store = SQLiteExperienceStore(args.exp_db)
+            candidate = decide_review(store, args.review_id, "ACCEPT",
+                                      reviewer, args.note,
+                                      experience_store=exp_store)
             patch = export_overrides_patch(store, args.review_id, reviewer)
+            if candidate is not None:
+                print(f"experience: Candidate {candidate.experience_id} "
+                      f"[{candidate.status.value}] "
+                      f"app={candidate.app_id} screen={candidate.screen_id} "
+                      f"target={candidate.target_id} "
+                      f"strategy={candidate.strategy.value} "
+                      f"(seed review #{candidate.seed_recovery_review_id})")
             if args.out:
                 Path(args.out).write_text(patch, encoding="utf-8")
                 print(f"review: #{args.review_id} ACCEPT；补丁已写 "
