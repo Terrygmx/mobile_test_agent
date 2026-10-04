@@ -133,6 +133,12 @@ M1 审计/Schema(1.5d) ─► M2 Store/Guard(4d) ─► M3 验证/降级(3d) ─
 
 ### Task 2.4: Recovery 引擎接真 Store + 结果语义细化（设计 3 / 3.1 / 5.1 / 10）
 
+> **⚠️ 接线前置（Task 2.1 评审 P3-3 显性化）**：引擎过渡债一次清掉——
+> ①`agent/recovery.py` 的 `experience_store.lookup(ctx.app_build, ...)`
+> 调用形态是 P1 旧签名（build ≠ bundle，键语义不同），接真 Store 必须
+> **连调用点带键来源**一起改（`RecoveryContext` 现无 app_id/screen 的
+> 可靠来源，需补字段）；②`EmptyExperienceStore` 与旧签名随之退役。
+
 **Objective:** `try_experiences` 主循环落地 + `detail.kind` 细分。此任务是 Gate M2 的集成载体。
 
 **Files:**

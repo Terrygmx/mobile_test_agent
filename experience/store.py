@@ -100,7 +100,9 @@ class SQLiteExperienceStore:
     # --- 连接 ---
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path, timeout=30)
+        # busy_timeout 单点 5s（review P3-2：connect timeout=30 与 PRAGMA
+        # 5000 曾意图不一致，后设者胜靠阅读顺序）
+        conn = sqlite3.connect(self._path, timeout=5)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 5000")
         return conn
@@ -275,6 +277,12 @@ class SQLiteExperienceStore:
         """追加一次「实际被尝试」（E11 口径由调用方保证），并原子推进
         Experience 统计。**不触碰 validated_builds**（E7：只在
         record_success_build 追加）。"""
+        # review P3-4：两处 experience_id 不一致 = 调用方 bug，显形而非
+        # 静默以参数为准
+        if run.experience_id not in (None, experience_id):
+            raise ValueError(
+                f"run.experience_id ({run.experience_id!r}) != 参数"
+                f" experience_id ({experience_id!r})")
         with self._write_tx() as conn:
             row = conn.execute(
                 "SELECT sample_count, success_count, failure_count"

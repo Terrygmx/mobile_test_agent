@@ -148,3 +148,24 @@ runs=102 / recoveries=50 / reviews=1 / seed_ready=1（原 0）。
   （全仓唯一定义，防两套接口；旧稿「设计 20 节」引用更正为 P2 设计 7 节）；
   agent/recovery.py import 直连 experience.store，行为不变。
 - 实测：pytest 842 passed（+16）。
+
+---
+
+## Task 2.1 评审修订记录（review_p2_task21 收口，2026-10-04）
+
+评审结论「通过（可收口 Task 2.1）」，5×P3 全部顺手清掉：
+
+- **P3-1**：设计 7.1 回填修订记录——REJECTED 由 Store 层排除，§5.1
+  rank_experiences 只对可用候选排序（接口契约的单方面收紧改为有记录
+  的语义收窄）。
+- **P3-2**：busy_timeout 单点 5s（connect timeout=30 与 PRAGMA 5000
+  曾意图不一致）。
+- **P3-3**：①引擎过渡债显性化——Task 2.4 计划节补接线前置（lookup
+  旧签名键语义不同、RecoveryContext 缺 app_id/screen 来源、Empty 随
+  退役）；②recovery.py 两处残留「20 节」注释更正（context.py 已改、
+  此处漏网）。
+- **P3-4**：record_run 对 run.experience_id 与参数不一致显形（ValueError，
+  不再静默以参数覆盖）。
+- **P3-5**：测试死 walrus 表达式清理；并发读者 errors.append 无锁
+  （CPython 原子）加注释防「好心修复」。
+- 实测：pytest 842 passed。

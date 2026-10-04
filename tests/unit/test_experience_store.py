@@ -82,8 +82,7 @@ def test_create_candidate_rejects_incomplete_triplet(store):
 
 def test_same_key_two_candidates_coexist(store):
     """同 (app,screen,target) 的两次 ACCEPT（不同候选策略）各自成行。"""
-    e1 = store.create_candidate(_seed(strategy_value := None) if False else
-                                _seed())
+    e1 = store.create_candidate(_seed())
     e2 = store.create_candidate(
         _seed(review_id=8, recovery_id=2, seed_recovery_review_id=8,
               seed_run_id="run_z", seed_step_id=44,
@@ -259,6 +258,7 @@ def test_readers_are_safe_during_writes(store):
     """E9：Reader（lookup/get_runs/list）与写并发——不炸、不挂。"""
     e = store.create_candidate(_seed())
     stop = threading.Event()
+    # CPython list.append 原子（GIL）——多线程 append 无需加锁，别「修」
     errors: list[Exception] = []
 
     def writer() -> None:

@@ -135,7 +135,8 @@ def recover(expected_id: str, error: Exception, ex: Executor,
 
 
 # ---------------------------------------------------------------------------
-# P1 Recovery Engine（设计 9.2 / 20 节，Task 4.1 确定性半边）
+# P1 Recovery Engine（设计 9.2；ExperienceStore 预留位旧稿「20 节」现为
+# P2 设计 7 节，Task 4.1 确定性半边）
 #
 # 与上方 P0 `recover()` 的关系：P0 函数保留至 Task 4.2——LLM 校验链迁入
 # RecoveryEngine 后由引擎接管，P0 verify_stage8 回归路径随之切换（记账见
@@ -359,7 +360,8 @@ class RecoveryEngine:
                         stages.append({"stage": "run_memo",
                                        "outcome": f"{type(e).__name__}"})
 
-        # --- ExperienceStore（20 节预留位：reconciliation 后、LLM 前；P1 恒 []） ---
+        # --- ExperienceStore（P2 设计 7 节；P1 旧稿「20 节」——reconciliation
+        #     后、LLM 前；占位恒 []，Task 2.4 接真 Store） ---
         if ctx.element_id:
             exp = self.experience_store.lookup(
                 ctx.app_build, ctx.screen_id or "", ctx.element_id)

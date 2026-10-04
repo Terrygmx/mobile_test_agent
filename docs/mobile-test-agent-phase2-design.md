@@ -331,6 +331,12 @@ class ExperienceStore(Protocol):
 
 `CandidateSeed` 必须携带 `seed_run_id / seed_step_id / seed_recovery_review_id`（E5），缺任何一项拒绝创建。
 
+> **修订记录（Task 2.1 实现后回填，2026-10-04）**：`lookup` 对 **REJECTED
+> 状态的 Experience 由 Store 层排除**（人工判定「不可用」的策略不再被
+> 消费路径看见；行仍在库，`list()` 审计视角全量可见）。§5.1 的
+> `rank_experiences` 因此只对**可用候选**排序——「逐个尝试全部候选」的
+> 设计语义自本条起收窄为「全部可用候选」。REJECTED 仍留在库里供审计。
+
 ### 7.2 单写者（E9）
 
 ```text
