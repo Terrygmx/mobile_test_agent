@@ -169,3 +169,32 @@ runs=102 / recoveries=50 / reviews=1 / seed_ready=1（原 0）。
 - **P3-5**：测试死 walrus 表达式清理；并发读者 errors.append 无锁
   （CPython 原子）加注释防「好心修复」。
 - 实测：pytest 842 passed。
+
+---
+
+## Task 2.2 完成记录（P2-04 Runtime Guard 共享实现 E1，2026-10-04）
+
+- **交付**：experience/runtime_guard.py——`guard_candidate` 共享校验链
+  （E1 红线：LLM 候选校验与 Experience Guard 的**唯一规则体**）+
+  `GuardResult`（frozen，outcome/reason/record_as_sample）+ `RuntimeContext`
+  + `experience_runtime_guard`（设计 5 节入口）+ `compute_effective_risk`
+  （E2：executor.policy.effective_risk 的 re-export，单一真值源）+
+  `GUARD_REASON_TO_LLM_FAILURE` 映射（recovery 消费）。
+- **4.7 矩阵落成 record_as_sample**：SCREEN_UNKNOWN/SCREEN_MISMATCH/
+  RISK_BLOCKED/SECURITY_BLOCKED → 不计样本（「不适用/不被允许」≠「用了
+  但错了」）；TARGET_NOT_FOUND/AMBIGUOUS/TYPE_MISMATCH → 计失败；EXECUTE
+  → 计样本。风险 None 按最高处理（fail-closed，9.3-4 同源）。
+- **平行实现删除**：agent/recovery._llm_stage 的手工 count/type/screen/
+  risk/guard 五段（~60 行）替换为一次 `guard_candidate` 调用 + reason
+  映射；agent/risk.py 整文件删除（candidate_risk_allowed 的语义由链内
+  risk 分支承接）；链序按设计 5 节改为 screen 先于设备操作（未登记
+  fail-closed 不再消耗一次 find）。
+- **E1 红线测试（双向）**：7 场景（EXECUTE/NOT_FOUND/AMBIGUOUS/
+  TYPE_MISMATCH/SCREEN_MISMATCH/UNREGISTERED/RISK_BLOCKED）× 两路径
+  （recovery._llm_stage 全链 vs experience_runtime_guard）——
+  (outcome, reason, record_as_sample) 逐位一致 + failure_type 映射断言。
+  红线测试当场抓到并修复一个重构缺陷：validate 段曾被 append 两次
+  （拒绝路径 miss 再补一条无 outcome 的同段）——现全路径恰好一次。
+- **接线**：agent/recovery.py import 直连 experience.runtime_guard；
+  agent/context.py 的 re-export 维持（Task 2.1 已做）。
+- 实测：pytest 863 passed（+21：runtime_guard 17 + 红线 7 − 删除 3）。

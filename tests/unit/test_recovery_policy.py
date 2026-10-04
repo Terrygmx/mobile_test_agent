@@ -14,7 +14,6 @@ from agent.policy import (
     admitted_actions,
 )
 from agent.recovery import RecoveryEngine, RunMemo
-from agent.risk import candidate_risk_allowed
 from executor.policy import FailurePhase, Idempotency
 from testcase.schema import Risk
 
@@ -256,15 +255,6 @@ def test_engine_run_memo_consumes_saved_strategy():
 
 
 # --- 风险门控（9.3 第 4 行确定性部分） ---
-
-
-def test_candidate_risk_only_low_allowed():
-    assert candidate_risk_allowed(Risk.LOW) is True
-    assert candidate_risk_allowed(Risk.MEDIUM) is False
-    assert candidate_risk_allowed(Risk.HIGH) is False
-    assert candidate_risk_allowed(Risk.CRITICAL) is False
-    # 风险未知（候选无 metadata）不放行——fail-closed
-    assert candidate_risk_allowed(None) is False
 
 
 # --- 结果模型 ---

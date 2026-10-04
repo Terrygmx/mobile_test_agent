@@ -159,7 +159,10 @@ from agent.policy import (           # noqa: E402
     RecoveryConfig,
     admitted_actions,
 )
-from agent.risk import candidate_risk_allowed   # noqa: E402
+from experience.runtime_guard import (  # noqa: E402
+    GUARD_REASON_TO_LLM_FAILURE,
+    guard_candidate,
+)
 from llm.budget import BudgetConfig, LLMBudget  # noqa: E402
 from llm.parser import parse_llm_output         # noqa: E402
 from llm.prompt import build_recovery_prompt, redact_ui_tree  # noqa: E402
@@ -333,7 +336,7 @@ class RecoveryEngine:
                                            recon["candidates_in_runtime"]})
                 # 确定性候选自动执行是设计 stretch（9.2 可选）——P1 不自动
                 # 执行运行时候选：候选元素无 metadata，risk 未知按最高处理
-                # （agent/risk.candidate_risk_allowed）。候选留给 LLM。
+                # （experience.runtime_guard 的 fail-closed 链）。候选留给 LLM。
 
         # --- RUN_MEMO（9.4：同 run 复用，reconciliation 后、LLM 前） ---
         # 命中后必须按 memo 保存的**恢复策略**重找（ctx.find_with）——
@@ -486,67 +489,55 @@ class RecoveryEngine:
         stages.append({"stage": "llm", "outcome": "candidate",
                        "target": candidate, "confidence": conf})
 
-        # 9.3-1 数量：恰一
-        try:
-            found = ctx.find_with((candidate,))
-        except Exception as e:  # noqa: BLE001 — ElementNotFound 等
-            return miss("LLM_TARGET_NOT_FOUND",
-                        {"stage": "validate", "check": "count",
-                         "outcome": f"{type(e).__name__}"})
-        try:
-            element = _single_element(found)
-        except LookupError:
-            return miss("LLM_TARGET_AMBIGUOUS",
-                        {"stage": "validate", "check": "count",
-                         "outcome": "ambiguous"})
-
-        # 9.3-2 类型：候选类型 == 期望类型（XCUIElementTypeButton↔button）
-        expected_type = (ctx.expected_type or "").strip()
-        runtime_type = ""
-        get_attr = getattr(element, "get_attribute", None)
-        if callable(get_attr):
-            runtime_type = get_attr("type") or ""
-        if expected_type:
-            norm = lambda t: str(t or "").replace("XCUIElementType", "").lower()  # noqa: E731
-            if not runtime_type or norm(runtime_type) != norm(expected_type):
-                return miss("LLM_TARGET_TYPE_MISMATCH",
-                            {"stage": "validate", "check": "type",
-                             "expected": expected_type,
-                             "runtime": runtime_type or "unknown"})
-
-        # 9.3-3 Screen：候选必须登记在当前屏（fail-closed：登记不到=无法证明）
+        # P2-04（E1）：校验链收口到 experience.runtime_guard 共享实现——
+        # 本函数不再维护第二套规则（red-line：同一输入与 Experience Guard
+        # 结论逐位一致）。
+        # Screen（9.3-3）先于设备操作：纯 Repository 比对 + 候选 risk 读取
+        #（fail-closed：未登记 = candidate_screen=None）。
         current_screen_id = (screen_res.screen if screen_res
                              and screen_res.screen else ctx.screen_id) or ""
+        candidate_screen = risk = None
+        eff = None
         try:
             eff = self.repo.resolve(candidate["value"], build=ctx.app_build)
-        except Exception:  # noqa: BLE001 — UnknownReference 等
-            return miss("LLM_TARGET_SCREEN_MISMATCH",
-                        {"stage": "validate", "check": "screen",
-                         "outcome": "candidate_unregistered"})
-        if not current_screen_id or eff.screen != current_screen_id:
-            return miss("LLM_TARGET_SCREEN_MISMATCH",
-                        {"stage": "validate", "check": "screen",
-                         "outcome": eff.screen or "unknown",
-                         "current": current_screen_id})
+            candidate_screen, risk = eff.screen, eff.risk
+        except Exception:  # noqa: BLE001 — UnknownReference 等 → 未登记
+            pass
+        found_box: list = []
 
-        # 9.3-4 risk：候选 effective_risk == LOW 且 Guard 通过
-        if not candidate_risk_allowed(eff.risk):
-            return miss("LLM_RISK_BLOCKED",
-                        {"stage": "validate", "check": "risk",
-                         "risk": getattr(getattr(eff, "risk", None),
-                                         "name", None)})
-        if self.guard is not None:
+        def _find():
+            found = ctx.find_with((candidate,))
+            found_box.clear()
+            found_box.extend(found if isinstance(found, (list, tuple))
+                             else [found])
+            return found_box
+
+        def _policy_check() -> None:
             from executor.guard import GuardContext
-            try:
-                self.guard.check(GuardContext(
-                    risk=eff.risk, screen_id=eff.screen,
-                    element_id=eff.id, action=parsed.action or "tap"))
-            except Exception as e:  # noqa: BLE001 — GuardViolation → 10.1
-                if type(e).__name__ == "GuardViolation":
-                    return miss("SECURITY_BLOCKED",
-                                {"stage": "validate", "check": "guard",
-                                 "outcome": str(getattr(e, "reason", e))})
-                raise
+            self.guard.check(GuardContext(
+                risk=eff.risk, screen_id=eff.screen,
+                element_id=eff.id, action=parsed.action or "tap"))
+
+        result = guard_candidate(
+            current_screen=current_screen_id or None,
+            candidate_screen=candidate_screen,
+            find=_find,
+            expected_type=ctx.expected_type,
+            effective_risk=risk,
+            policy_check=(self.guard is not None and eff is not None
+                          and _policy_check or None),
+            confidence=conf,
+            min_confidence=min_conf)
+        validate_entry = {"stage": "validate", "outcome": result.outcome,
+                          "reason": result.reason,
+                          "record_as_sample": result.record_as_sample}
+        if result.outcome != "EXECUTE":
+            # miss 负责追加终态段——validate 段全路径恰好入栈一次
+            #（E1 红线测试钉住：trace 的 validate 段必须带 outcome）
+            return miss(GUARD_REASON_TO_LLM_FAILURE.get(
+                            result.reason, ctx.failure_type), validate_entry)
+        stages.append(validate_entry)
+        element = found_box[0]
 
         # 全链通过：动作步执行（redispatch 用**原步骤的值**——LLM 编造的
         # 输入内容永不采纳）；aux 步骤不执行，返回策略给管线做覆盖重跑。
