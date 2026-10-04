@@ -213,6 +213,11 @@ def resolve_deferred_sample(rec: RecoveryResult, *, succeeded: bool,
     为什么不让调用方直接改 payload：那样「写什么样本」的决策就散到管线里
     了，正是 4.7 单点纪律要避免的。调用方只说「成没成」，翻译留在本模块。
     返回回填的样本数（0 = 没有待定样本，调用方无需在意）。
+
+    同时回填 §11.1 的 `experience_execution` **事件**（`pending_observation`
+    那条）：样本与事件记的是同一次观测，没有道理一边回填、一边停在「不可
+    观测」。回填后 `execution` 反映**最终观测到的**终态（aux 的
+    `not_dispatched` 只是引擎侧的事实，最终结果由调用方那次重跑决定）。
     """
     filled = 0
     for sample in (rec.detail or {}).get("experience_runs") or []:
@@ -222,6 +227,17 @@ def resolve_deferred_sample(rec: RecoveryResult, *, succeeded: bool,
         if not succeeded:
             sample["guard_reason"] = failure_reason or "AUX_RERUN_FAILED"
         filled += 1
+    # §11.1 的 experience_execution 事件**同款回填**：aux 命中时引擎把
+    # `execution="not_dispatched"` 记进去、`result` 留空，调用方观测后在这里
+    # 补上真实终态。两边都记同一件事，就不该一边回填、一边停在「不可观测」。
+    for ev in (rec.detail or {}).get("experience_events") or []:
+        detail = ev.get("detail") or {}
+        if not detail.pop("pending_observation", False):
+            continue
+        detail["execution"] = "SUCCESS" if succeeded else "FAILURE"
+        detail["result"] = recovered_kind("experience") if succeeded else None
+        if not succeeded:
+            detail["reason"] = failure_reason or "AUX_RERUN_FAILED"
     return filled
 
 
@@ -359,6 +375,9 @@ class RecoveryEngine:
         # 样本都是要计入失败率的真观测，只挂在「已恢复」的结果上等于把它们
         # 丢掉（E11 的失败口径被吞掉，成功率会系统性偏高）。
         samples: list[dict] = []
+        # §11.1 的 recovery 期事件，同样由引擎产出 payload、管线落库
+        # （与 4.7 样本同款分工：引擎掌握「发生了什么」，管线补 run/tc id）。
+        events: list[dict] = []
 
         # --- POSTCONDITION_CHECK（H7：非幂等 POST_DISPATCH 的唯一出口；
         #     幂等动作也先查——postcondition 成立即无需重发，矩阵 #18） ---
@@ -490,7 +509,7 @@ class RecoveryEngine:
         # --- Experience Store（P2 设计 5.1 / 7.1：reconciliation 后、LLM 前。
         #     命中即免 LLM 调用——设计 3.1「LLM Budget 不变；Experience 命中
         #     时根本不消耗 Budget」） ---
-        exp_result = self._try_experiences(ctx, stages, samples,
+        exp_result = self._try_experiences(ctx, stages, samples, events,
                                            screen_res, page_red)
         if exp_result is not None:
             return exp_result
@@ -498,30 +517,40 @@ class RecoveryEngine:
         # --- LLM（9.2 第 8 步；--no-llm / 未配置 → disabled 如实可见） ---
         if self.llm is None:
             stages.append({"stage": "llm", "outcome": "disabled"})
-            return self._unrecovered(ctx, stages, samples, "no_llm_engine")
+            return self._unrecovered(ctx, stages, samples, events,
+                                     "no_llm_engine")
         return self._llm_stage(ctx, stages, screen_res, recon, page_red,
-                              samples)
+                               samples, events)
 
     @staticmethod
-    def _with_samples(detail: dict, samples: list[dict]) -> dict:
-        """把 4.7 样本挂进结论 detail（有才挂——纯 LLM 的 run 不该凭空多出
-        一个空键，报告读起来会像「查了经验库但没记样本」）。"""
+    def _attach(detail: dict, samples: list[dict],
+                events: list[dict]) -> dict:
+        """把 4.7 样本与 §11.1 事件挂进结论 detail。
+
+        **有才挂**——纯 LLM 的 run 不该凭空多出一个空键，报告读起来会像
+        「查了经验库但没记样本/没发事件」。两者合成一个入口而不是各写一份：
+        漏挂一处就是「同一类结论有时带事件有时不带」。
+        """
         if samples:
             detail["experience_runs"] = samples
+        if events:
+            detail["experience_events"] = events
         return detail
 
     def _unrecovered(self, ctx: RecoveryContext, stages: list,
-                     samples: list[dict], reason: str) -> RecoveryResult:
+                     samples: list[dict], events: list[dict],
+                     reason: str) -> RecoveryResult:
         """未恢复结论的统一构造（维持原症状 + 可观测的停在哪一步）。"""
         return RecoveryResult(
             recovered=False, failure_type=ctx.failure_type,
-            detail=self._with_samples({"stages": stages, "recovery": reason},
-                                      samples))
+            detail=self._attach({"stages": stages, "recovery": reason},
+                                samples, events))
 
     # --- Experience 消费（设计 5.1 try_experiences；Task 2.4） ---
 
     def _try_experiences(self, ctx: RecoveryContext, stages: list,
-                         samples: list[dict], screen_res, page_red: str | None
+                         samples: list[dict], events: list[dict],
+                         screen_res, page_red: str | None
                          ) -> RecoveryResult | None:
         """设计 5.1 主循环：lookup → 逐候选 Guard（4.7 决定是否记样本）→
         EXECUTE 则执行 + postcondition → 成功返回 `kind="experience"`；
@@ -566,8 +595,14 @@ class RecoveryEngine:
             stages.append({"stage": "experience",
                            "outcome": f"lookup_error:{type(e).__name__}"})
             return None
+        self._emit(events, "experience_lookup",
+                   app_id=ctx.app_id, screen_id=ctx.screen_id,
+                   target_id=ctx.element_id, candidates=len(candidates))
         if not candidates:
             stages.append({"stage": "experience", "outcome": "miss"})
+            self._emit(events, "experience_miss",
+                       app_id=ctx.app_id, screen_id=ctx.screen_id,
+                       target_id=ctx.element_id)
             return None
         stages.append({"stage": "experience", "outcome": "hit",
                        "count": len(candidates)})
@@ -576,7 +611,8 @@ class RecoveryEngine:
         fingerprint = screen_fingerprint(page_red)
         for exp in candidates:
             hit = self._try_one_experience(
-                ctx, exp, stages, current_screen_id, fingerprint, samples)
+                ctx, exp, stages, current_screen_id, fingerprint, samples,
+                events)
             if hit is not None:
                 return hit
         stages.append({"stage": "experience", "outcome": "exhausted",
@@ -586,7 +622,8 @@ class RecoveryEngine:
     def _try_one_experience(self, ctx: RecoveryContext, exp, stages: list,
                             current_screen_id: str | None,
                             fingerprint: str | None,
-                            samples: list[dict]) -> RecoveryResult | None:
+                            samples: list[dict],
+                            events: list[dict]) -> RecoveryResult | None:
         """单个候选：Guard → 4.7 样本 → EXECUTE 则执行 + postcondition。
 
         返回 RecoveryResult = 本候选救回来了；None = 换下一个候选
@@ -616,9 +653,30 @@ class RecoveryEngine:
                  "record_as_sample": gres.record_as_sample,
                  "screen_fingerprint_match": fp_match,
                  "uniqueness_count": adapter.last_count}
+        # §11.1 的 experience_hit：**每条候选被评估**发一条（字段对齐设计
+        # 示例的 detail），不是「整个 lookup 只发一条」——多候选逐个尝试正是
+        # 5.1 的核心行为，合并成一条就看不见「第一条为什么被换掉」。
+        self._emit(events, "experience_hit",
+                   experience_id=exp.experience_id,
+                   status_before=exp.status.value,
+                   screen_match=current_screen_id == exp.screen_id,
+                   screen_fingerprint_match=fp_match,
+                   build_in_validated_set=ctx.app_build in (
+                       exp.validated_builds or []),
+                   uniqueness_count=adapter.last_count,
+                   type_match=self._type_match(gres, ctx),
+                   effective_risk=getattr(ctx.effective_risk, "name", None),
+                   outcome=gres.outcome, reason=gres.reason)
 
         if gres.outcome != "EXECUTE":
             stages.append(entry)
+            if gres.outcome == "BLOCK":
+                # 只有 BLOCK 才是「拦」（MISS 是「此刻不适用」，由上面的
+                # experience_hit 的 outcome/reason 如实表达）。事件名如实。
+                self._emit(events, "experience_guard_block",
+                           experience_id=exp.experience_id,
+                           reason=gres.reason,
+                           record_as_sample=gres.record_as_sample)
             if gres.record_as_sample:
                 # 4.7 第 2/3 行：唯一性/类型失败是「用了但错了」→ 失败样本
                 self._queue_sample(samples, ctx, exp, gres, adapter,
@@ -667,6 +725,11 @@ class RecoveryEngine:
                 execution = "UNKNOWN"      # 观测不到 → 不写样本、不声称恢复
         entry["execution"] = execution
         stages.append(entry)
+        self._emit(events, "experience_execution",
+                   experience_id=exp.experience_id,
+                   execution=execution,
+                   uniqueness_count=adapter.last_count,
+                   **self._execution_result_fields(execution))
 
         if execution == "SUCCESS":
             self._queue_sample(samples, ctx, exp, gres, adapter,
@@ -678,22 +741,65 @@ class RecoveryEngine:
         if execution in ("FAILURE", "UNKNOWN"):
             # FAILURE：本候选没用 → 换下一个（设计 5.1 的 continue）
             # UNKNOWN：观测不到结果 → 不声称恢复（不猜）
-            return None        # SUCCESS / not_dispatched（aux 交调用方重跑）→ 本候选救回来了
+            return None
+        # SUCCESS / not_dispatched（aux 交调用方重跑）→ 本候选救回来了
         return self._recovered(
             "experience",
-            {"stages": stages,
-             "experience_id": exp.experience_id,
-             "candidate": experience_locator(exp)[0],
-             "screen": exp.screen_id,
-             # 9.5 补丁导出 / recoveries 行需要：候选类型 = Guard 已**验证过**
-             # 的运行时类型（== ctx.expected_type）。期望类型未知时留 None——
-             # 后续 review accept 会 fail-loud 拒绝建种子（宁缺勿猜）。
-             "candidate_type": ctx.expected_type,
-             "screen_fingerprint_match": fp_match,
-             # 4.7 样本（不含 step_id——恢复发生在 record_step 之前，
-             # steps.id 那时还不存在；由管线在 record_step 之后补真 id）
-             "experience_runs": samples},
+            self._attach(
+                {"stages": stages,
+                 "experience_id": exp.experience_id,
+                 "candidate": experience_locator(exp)[0],
+                 "screen": exp.screen_id,
+                 # 9.5 补丁导出 / recoveries 行需要：候选类型 = Guard 已
+                 # **验证过**的运行时类型（== ctx.expected_type）。期望类型
+                 # 未知时留 None——后续 review accept 会 fail-loud 拒绝建种子
+                 # （宁缺勿猜）。
+                 "candidate_type": ctx.expected_type,
+                 "screen_fingerprint_match": fp_match},
+                # 4.7 样本（不含 step_id——恢复发生在 record_step 之前，
+                # steps.id 那时还不存在；由管线在 record_step 之后补真 id）
+                samples, events),
             experience_locator(exp)[0])
+
+    @staticmethod
+    def _emit(events: list[dict], event_type: str, **detail) -> None:
+        """§11.1 事件 payload 的**唯一**构造点（事件名 + detail）。
+
+        与 4.7 样本同款分工：引擎产出 payload，管线落库——trace 写入需要
+        run_id/tc_run_id，而引擎不持有 TraceStore（9.1 隔离纪律）。
+        事件名不在这里校验：`tracer.storage.record_experience_event` 是
+        `EXPERIENCE_EVENT_TYPES` 的 fail-loud 闸门，两处都判等于两套规则。
+        """
+        events.append({"event_type": event_type, "detail": detail})
+
+    @staticmethod
+    def _execution_result_fields(execution: str) -> dict:
+        """`experience_execution` 的 `result` 字段（设计 §11.1 示例的口径）。
+
+        - `SUCCESS` → §10 的机制分类 `RECOVERED_EXPERIENCE`；
+        - `not_dispatched`（aux 无 dispatch 语义）→ **结果此刻不可观测**，
+          标 `pending_observation`，由调用方观测后经 `resolve_deferred_sample`
+          回填（与 4.7 待定样本同一机制——两边都记，就不该一边猜一边不猜）；
+        - `FAILURE` / `UNKNOWN` → 没有恢复分类可报，留 None（不谎报）。
+        """
+        if execution == "SUCCESS":
+            return {"result": recovered_kind("experience")}
+        if execution == "not_dispatched":
+            return {"result": None, "pending_observation": True}
+        return {"result": None}
+
+    @staticmethod
+    def _type_match(gres, ctx: RecoveryContext) -> bool | None:
+        """类型校验的观测（4.7 样本与 §11.1 事件共用一份推导）。
+
+        `None` = 没走到类型校验（NOT_FOUND/AMBIGUOUS）或期望类型未知
+        （校验被跳过）——不谎报 True。
+        """
+        if gres.reason == "TYPE_MISMATCH":
+            return False
+        if gres.outcome == "EXECUTE":
+            return True if ctx.expected_type else None
+        return None
 
     @staticmethod
     def _queue_sample(samples: list, ctx: RecoveryContext, exp, gres,
@@ -720,13 +826,9 @@ class RecoveryEngine:
                            "outcome": "no_run_id",
                            "experience_id": exp.experience_id})
             return
-        if gres.reason == "TYPE_MISMATCH":
-            type_match: bool | None = False
-        elif gres.outcome == "EXECUTE":
-            # 类型校验跑过并通过（期望类型未知时校验被跳过 → None，不谎报）
-            type_match = True if ctx.expected_type else None
-        else:
-            type_match = None      # 没走到类型校验（NOT_FOUND/AMBIGUOUS）
+        # 与 §11.1 事件共用同一份推导（`_type_match`）——同一观测在两处各写
+        # 一遍必然某天分叉，而报告会把两处的差异读成「数据不一致」。
+        type_match = RecoveryEngine._type_match(gres, ctx)
         samples.append({
             "experience_id": exp.experience_id,
             "run_id": ctx.run_id,
@@ -779,8 +881,10 @@ class RecoveryEngine:
     def _llm_stage(self, ctx: RecoveryContext, stages: list,
                    screen_res, recon: dict | None,
                    page_red: str | None,
-                   samples: list[dict] | None = None) -> RecoveryResult:
+                   samples: list[dict] | None = None,
+                   events: list[dict] | None = None) -> RecoveryResult:
         samples = samples if samples is not None else []
+        events = events if events is not None else []
 
         def miss(failure_type: str, stage: dict,
                  count_failure: bool = True) -> RecoveryResult:
@@ -791,8 +895,9 @@ class RecoveryEngine:
                 self.budget.record_failure()
             return RecoveryResult(
                 recovered=False, failure_type=failure_type,
-                detail=self._with_samples(
-                    {"stages": stages, "recovery": "llm_missed"}, samples))
+                detail=self._attach(
+                    {"stages": stages, "recovery": "llm_missed"},
+                    samples, events))
 
         if page_red is None:
             return miss(ctx.failure_type, {"stage": "llm",
@@ -926,13 +1031,13 @@ class RecoveryEngine:
                                         f"{str(e)[:120]}"})
         result = self._recovered(
             "llm",
-            self._with_samples(
+            self._attach(
                 {"stages": stages, "candidate": candidate,
                  "confidence": conf,
                  # 9.5 补丁导出需要：候选登记屏 + 类型（无则导出 fail-loud）
                  "screen": current_screen_id,
                  "candidate_type": getattr(eff, "type", None)},
-                samples),
+                samples, events),
             candidate)
         # ⑦（9.4）：LLM 校验通过后写 RUN_MEMO——同 run 同漂移免重复调用
         if ctx.element_id:

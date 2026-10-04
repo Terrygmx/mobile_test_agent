@@ -208,7 +208,7 @@ def load_case(text: str):
 def run_matrix(tmp_path, case_yaml, *, ex=None, repo=None, recovery=None,
                cases=None, guard=None, ds=None, lifecycle=None,
                failure_policy="ABORT_SUITE", env=None, bundle_id=None,
-               app_id=None):
+               app_id=None, app_build=None):
     """矩阵行装配：run_all 全链（lint 不在此——矩阵行的 YAML 都先保证
     schema 可解析；lint 语义行 #23 单独走 mta lint）。
 
@@ -220,15 +220,19 @@ def run_matrix(tmp_path, case_yaml, *, ex=None, repo=None, recovery=None,
     `app_id`：Experience Store 主键第一段（Task 2.4）。缺省跟 `bundle_id`
     ——生产 `mta run` 也是这么接的（同一个 --bundle-id）。要测「app_id
     缺失」的行显式给 `app_id=""`。
+    `app_build`：12.5/E7 的 build id（Task 2.4 终审 P3-4）。缺省 None =
+    走 `SessionPipeline` 的默认（"local"），历史行为不变；要测「真实 build
+    贯通 validated_builds」的行显式给（如 `app_build="1026"`）。
     """
     store = TraceStore(tmp_path / "trace.db")
     store.start_run("run_matrix", app_bundle_id=bundle_id)
     sdir = tmp_path / "suites"
     sdir.mkdir(exist_ok=True)
     (sdir / "matrix.yaml").write_text(case_yaml, encoding="utf-8")
+    pipe_kw = {} if app_build is None else {"app_build": app_build}
     pipe = SessionPipeline(suites_root=sdir, store=store, recovery=recovery,
                            app_id=(bundle_id or "") if app_id is None
-                           else app_id)
+                           else app_id, **pipe_kw)
     pipe.deps = PipelineDeps(env=env, repo=repo)
     ds = ds or FakeDS()
     ex = ex or FakeExecutor()

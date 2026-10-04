@@ -223,6 +223,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_app_build(args: argparse.Namespace) -> str:
+    """本次 run 的 build id（12.5 / E7 的 `validated_builds` 用它）。
+
+    **单一真值源**：12.3 metadata 的顶层 `build` 字段（`mta repo generate
+    --build` 写下的构建身份），经 `source.build_identity.metadata_identity`
+    读取——不自己解析 JSON（那是第二套读取逻辑）。
+
+    读不到就退回 `DEFAULT_APP_BUILD`（"local"），**不 fail-loud**：
+    `--fake-driver`、单元测试、没跑过 `repo generate` 的场景没有 metadata
+    是常态，退回即既有行为。build id 缺失不该拦住一次 run——它不是安全
+    判据，只是 E7 集合的一个元素。
+    """
+    from cli.pipeline import DEFAULT_APP_BUILD
+    from source import build_identity as bi
+
+    meta_path = (Path(args.metadata) if getattr(args, "metadata", None)
+                 else Path(getattr(args, "generated", None)
+                           or "repository/generated/local")
+                 / "source_metadata.json")
+    try:
+        return bi.metadata_identity(meta_path).build or DEFAULT_APP_BUILD
+    except Exception:  # noqa: BLE001 — 读不到/坏 JSON 都退回默认
+        return DEFAULT_APP_BUILD
+
+
 def _load_repository(args: argparse.Namespace) -> Repository:
     overrides = getattr(args, "overrides", None)
     generated = getattr(args, "generated", None)
@@ -298,7 +323,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     from testcase.lint import lint as lint_cases, max_severity
 
     pipeline = SessionPipeline(suites_root=args.suites_root, secrets=secrets,
-                               app_id=args.bundle_id or "")
+                               app_id=args.bundle_id or "",
+                               app_build=_resolve_app_build(args))
     try:
         cases = pipeline.discover(suite=args.suite, tag=args.tag,
                                   case=args.case)

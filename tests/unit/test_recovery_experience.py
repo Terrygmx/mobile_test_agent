@@ -499,12 +499,21 @@ def test_screen_recognition_failure_falls_back_to_registered_screen(store):
 
 
 def test_missing_run_id_writes_no_sample(store):
-    """无追溯链（run_id=None）→ 不落库：样本行没有归属 run 等于伪造证据。"""
+    """无追溯链（run_id=None）→ 不落库：样本行没有归属 run 等于伪造证据。
+
+    键**缺席**而不是空列表：`_attach` 的「有才挂」口径对两条路径统一
+    （此前「已恢复」路径恒带空 `experience_runs`、「未恢复」路径不带，
+    同一件事两种形状）。管线消费侧本来就是
+    `(detail or {}).get("experience_runs") or []`，两种都吃。
+    """
     _seed(store)
     ctx, dispatched = _ctx(run_id=None, find_all=lambda loc: [El()])
     r = _engine(store).recover(ctx)
     assert r.recovered and len(dispatched) == 1
-    assert r.detail.get("experience_runs") == []
+    assert r.detail.get("experience_runs") in (None, [])
+    assert {"stage": "experience_sample", "outcome": "no_run_id",
+            "experience_id": store.list()[0].experience_id} in r.detail["stages"], \
+        "不落库不是静默跳过——留痕（review_p2_task24_final P3-3 同款纪律）"
 
 
 def test_execution_failure_is_failure_sample(store):
@@ -655,3 +664,262 @@ def test_payload_is_json_serializable(store):
     ctx, _ = _ctx(find_all=lambda loc: [El()])
     r = _engine(store).recover(ctx)
     json.dumps(r.detail)
+
+
+
+# --- 6c. §11.1 的 recovery 期事件（Task 2.4 终审：事件从半接改全接） --------
+
+
+def _events(r):
+    return r.detail.get("experience_events") or []
+
+
+def _event_types(r):
+    return [e["event_type"] for e in _events(r)]
+
+
+def test_event_names_are_the_design_11_1_vocabulary(store):
+    """引擎发的事件名必须**逐个**在 `EXPERIENCE_EVENT_TYPES` 里。
+
+    这条不是「测实现细节」：`record_experience_event` 对不在集合里的名字
+    fail-loud 抛错——引擎侧写错一个字，落库那一刻整例崩掉。这里把两侧的
+    词汇表钉在一起（与 4.7 样本的字段名同一类保护）。
+    """
+    from tracer.storage import EXPERIENCE_EVENT_TYPES
+
+    _seed(store)
+    ctx, _ = _ctx(find_all=lambda loc: [El()])
+    r = _engine(store).recover(ctx)
+
+    assert _event_types(r), "命中路径必须发事件"
+    unknown = set(_event_types(r)) - EXPERIENCE_EVENT_TYPES
+    assert not unknown, f"引擎发了设计词汇表外的事件名：{sorted(unknown)}"
+
+
+def test_hit_path_emits_lookup_hit_execution(store):
+    """命中并执行成功 → lookup / hit / execution 三条，字段对齐 §11.1 示例。"""
+    _seed(store)
+    ctx, dispatched = _ctx(find_all=lambda loc: [El()])
+    r = _engine(store).recover(ctx)
+
+    assert r.recovered and len(dispatched) == 1
+    assert _event_types(r) == ["experience_lookup", "experience_hit",
+                              "experience_execution"]
+    lookup = _events(r)[0]["detail"]
+    assert lookup == {"app_id": APP, "screen_id": "HomeView",
+                      "target_id": "login_button", "candidates": 1}
+    hit = _events(r)[1]["detail"]
+    assert hit["experience_id"] and hit["status_before"] == "CANDIDATE"
+    assert hit["screen_match"] is True and hit["uniqueness_count"] == 1
+    assert hit["type_match"] is True and hit["effective_risk"] == "LOW"
+    assert hit["build_in_validated_set"] is False, \
+        "还没记过成功样本 → 本 build 不在 validated 集合里（§11.1 字段）"
+    assert hit["outcome"] == "EXECUTE"
+    exe = _events(r)[2]["detail"]
+    assert exe["execution"] == "SUCCESS"
+    assert exe["result"] == "RECOVERED_EXPERIENCE", "§11.1 示例的 result 口径"
+
+
+def test_miss_path_emits_lookup_then_miss(store):
+    """空库 → lookup（候选 0）+ miss；**不发 hit/execution**（没有候选）。"""
+    ctx, _ = _ctx(find_all=lambda loc: [El()])
+    r = _engine(store).recover(ctx)
+
+    assert not r.recovered
+    assert _event_types(r) == ["experience_lookup", "experience_miss"]
+    assert _events(r)[0]["detail"]["candidates"] == 0
+
+
+def test_guard_block_emits_guard_block_event_without_sample(store):
+    """Guard BLOCK（0 匹配）→ 有 `experience_guard_block` 事件、**没有样本**。
+
+    4.7：唯一性失败计样本，风险拦截不计——但**事件与样本不同生共死**：
+    只看样本会以为「压根没查过」，而 trace 上必须看得见「查了、拦了、为什么」。
+    """
+    _seed(store, value="never_there")
+    ctx, _ = _ctx(find_all=lambda loc: [])
+    r = _engine(store).recover(ctx)
+
+    assert not r.recovered
+    assert _event_types(r) == ["experience_lookup", "experience_hit",
+                              "experience_guard_block"]
+    assert _events(r)[2]["detail"]["reason"] == "TARGET_NOT_FOUND"
+    assert _events(r)[2]["detail"]["record_as_sample"] is True
+    [sample] = r.detail["experience_runs"]
+    assert sample["result"] == "FAILURE", "唯一性失败是「用了但错了」→ 计样本"
+
+
+def test_risk_blocked_emits_event_without_sample(store):
+    """风险拦截：`record_as_sample=False`（4.7 第 4 行）——事件照发，样本不记。"""
+    _seed(store)
+    ctx, _ = _ctx(effective_risk=Risk.HIGH, find_all=lambda loc: [El()])
+    r = _engine(store).recover(ctx)
+
+    assert not r.recovered
+    blocked = next(e for e in _events(r)
+                   if e["event_type"] == "experience_guard_block")
+    assert blocked["detail"]["reason"] == "RISK_BLOCKED"
+    assert blocked["detail"]["record_as_sample"] is False
+    assert r.detail.get("experience_runs") in (None, [])
+
+
+def test_aux_execution_event_backfilled_with_observed_outcome(store):
+    """aux 的 execution 事件先标待定，调用方回填后反映**观测到的**终态。"""
+    _seed(store)
+    ctx, _ = _ctx(action=None, redispatch=None, find_all=lambda loc: [El()])
+    r = _engine(store).recover(ctx)
+
+    exe = next(e for e in _events(r)
+               if e["event_type"] == "experience_execution")["detail"]
+    assert exe["execution"] == "not_dispatched"
+    assert exe["result"] is None and exe["pending_observation"] is True
+
+    resolve_deferred_sample(r, succeeded=False,
+                            failure_reason="AUX_RERUN_FAILED")
+    assert exe["execution"] == "FAILURE" and exe["result"] is None
+    assert exe["reason"] == "AUX_RERUN_FAILED"
+    assert "pending_observation" not in exe
+
+
+def test_no_store_and_incomplete_key_emit_no_events(store):
+    """没查库就不发事件——事件是「发生过什么」的记录，不是「想过什么」。"""
+    ctx, _ = _ctx(app_id="", find_all=lambda loc: [El()])
+    r = _engine(store).recover(ctx)
+    assert _events(r) == []
+
+
+def test_events_are_json_serializable(store):
+    """事件 payload 会进 `rec.detail`（→ steps.detail_json），必须可序列化。"""
+    _seed(store)
+    ctx, _ = _ctx(find_all=lambda loc: [El()])
+    r = _engine(store).recover(ctx)
+    json.dumps(r.detail["experience_events"])
+
+
+# --- 6c. §11.1 的 recovery 期事件（Task 2.4 终审：事件从半接改全接） --------
+
+
+def _events(r):
+    return r.detail.get("experience_events") or []
+
+
+def _event_types(r):
+    return [e["event_type"] for e in _events(r)]
+
+
+def test_event_names_are_the_design_11_1_vocabulary(store):
+    """引擎发的事件名必须**逐个**在 `EXPERIENCE_EVENT_TYPES` 里。
+
+    这条不是「测实现细节」：`record_experience_event` 对不在集合里的名字
+    fail-loud 抛错——引擎侧写错一个字，落库那一刻整例崩掉。这里把两侧的
+    词汇表钉在一起（与 4.7 样本的字段名同一类保护）。
+    """
+    from tracer.storage import EXPERIENCE_EVENT_TYPES
+
+    _seed(store)
+    ctx, _ = _ctx(find_all=lambda loc: [El()])
+    r = _engine(store).recover(ctx)
+
+    assert _event_types(r), "命中路径必须发事件"
+    unknown = set(_event_types(r)) - EXPERIENCE_EVENT_TYPES
+    assert not unknown, f"引擎发了设计词汇表外的事件名：{sorted(unknown)}"
+
+
+def test_hit_path_emits_lookup_hit_execution(store):
+    """命中并执行成功 → lookup / hit / execution 三条，字段对齐 §11.1 示例。"""
+    _seed(store)
+    ctx, dispatched = _ctx(find_all=lambda loc: [El()])
+    r = _engine(store).recover(ctx)
+
+    assert r.recovered and len(dispatched) == 1
+    assert _event_types(r) == ["experience_lookup", "experience_hit",
+                              "experience_execution"]
+    lookup = _events(r)[0]["detail"]
+    assert lookup == {"app_id": APP, "screen_id": "HomeView",
+                      "target_id": "login_button", "candidates": 1}
+    hit = _events(r)[1]["detail"]
+    assert hit["experience_id"] and hit["status_before"] == "CANDIDATE"
+    assert hit["screen_match"] is True and hit["uniqueness_count"] == 1
+    assert hit["type_match"] is True and hit["effective_risk"] == "LOW"
+    assert hit["build_in_validated_set"] is False, \
+        "还没记过成功样本 → 本 build 不在 validated 集合里（§11.1 字段）"
+    assert hit["outcome"] == "EXECUTE"
+    exe = _events(r)[2]["detail"]
+    assert exe["execution"] == "SUCCESS"
+    assert exe["result"] == "RECOVERED_EXPERIENCE", "§11.1 示例的 result 口径"
+
+
+def test_miss_path_emits_lookup_then_miss(store):
+    """空库 → lookup（候选 0）+ miss；**不发 hit/execution**（没有候选）。"""
+    ctx, _ = _ctx(find_all=lambda loc: [El()])
+    r = _engine(store).recover(ctx)
+
+    assert not r.recovered
+    assert _event_types(r) == ["experience_lookup", "experience_miss"]
+    assert _events(r)[0]["detail"]["candidates"] == 0
+
+
+def test_guard_block_emits_guard_block_event_without_sample(store):
+    """Guard BLOCK（0 匹配）→ 有 `experience_guard_block` 事件、**没有样本**。
+
+    4.7：唯一性失败计样本，风险拦截不计——但**事件与样本不同生共死**：
+    只看样本会以为「压根没查过」，而 trace 上必须看得见「查了、拦了、为什么」。
+    """
+    _seed(store, value="never_there")
+    ctx, _ = _ctx(find_all=lambda loc: [])
+    r = _engine(store).recover(ctx)
+
+    assert not r.recovered
+    assert _event_types(r) == ["experience_lookup", "experience_hit",
+                              "experience_guard_block"]
+    assert _events(r)[2]["detail"]["reason"] == "TARGET_NOT_FOUND"
+    assert _events(r)[2]["detail"]["record_as_sample"] is True
+    [sample] = r.detail["experience_runs"]
+    assert sample["result"] == "FAILURE", "唯一性失败是「用了但错了」→ 计样本"
+
+
+def test_risk_blocked_emits_event_without_sample(store):
+    """风险拦截：`record_as_sample=False`（4.7 第 4 行）——事件照发，样本不记。"""
+    _seed(store)
+    ctx, _ = _ctx(effective_risk=Risk.HIGH, find_all=lambda loc: [El()])
+    r = _engine(store).recover(ctx)
+
+    assert not r.recovered
+    blocked = next(e for e in _events(r)
+                   if e["event_type"] == "experience_guard_block")
+    assert blocked["detail"]["reason"] == "RISK_BLOCKED"
+    assert blocked["detail"]["record_as_sample"] is False
+    assert r.detail.get("experience_runs") in (None, [])
+
+
+def test_aux_execution_event_backfilled_with_observed_outcome(store):
+    """aux 的 execution 事件先标待定，调用方回填后反映**观测到的**终态。"""
+    _seed(store)
+    ctx, _ = _ctx(action=None, redispatch=None, find_all=lambda loc: [El()])
+    r = _engine(store).recover(ctx)
+
+    exe = next(e for e in _events(r)
+               if e["event_type"] == "experience_execution")["detail"]
+    assert exe["execution"] == "not_dispatched"
+    assert exe["result"] is None and exe["pending_observation"] is True
+
+    resolve_deferred_sample(r, succeeded=False,
+                            failure_reason="AUX_RERUN_FAILED")
+    assert exe["execution"] == "FAILURE" and exe["result"] is None
+    assert exe["reason"] == "AUX_RERUN_FAILED"
+    assert "pending_observation" not in exe
+
+
+def test_no_store_and_incomplete_key_emit_no_events(store):
+    """没查库就不发事件——事件是「发生过什么」的记录，不是「想过什么」。"""
+    ctx, _ = _ctx(app_id="", find_all=lambda loc: [El()])
+    r = _engine(store).recover(ctx)
+    assert _events(r) == []
+
+
+def test_events_are_json_serializable(store):
+    """事件 payload 会进 `rec.detail`（→ steps.detail_json），必须可序列化。"""
+    _seed(store)
+    ctx, _ = _ctx(find_all=lambda loc: [El()])
+    r = _engine(store).recover(ctx)
+    json.dumps(r.detail["experience_events"])

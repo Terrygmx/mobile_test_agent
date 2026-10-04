@@ -33,6 +33,12 @@ from testcase.schema import ActionStep, AssertionStep, TestCase, WaitSpec, WaitS
 
 __all__ = ["SessionPipeline", "PipelineDeps", "make_postcondition_checker"]
 
+# 12.5/E7：build id 的兜底值。仅在**读不到**构建身份时使用（`--fake-driver`、
+# 单元测试、没跑过 `mta repo generate` 的场景）；真实 run 走 metadata 的
+# `build` 字段（`cli.main._resolve_app_build`）。放在这里而不是 main：它是
+# 管线的默认值，而 main 反向 import 管线会成环。
+DEFAULT_APP_BUILD = "local"
+
 # App/driver 级动作（6.2 action 里的三种非元素动作）：不走 7.1 的
 # find/perform 元素管线。launch/terminate 归 AppSession，back 归 driver，
 # swipe 归 Executor——旧 runner（testcase_runner._do_*）同款分流。
@@ -110,7 +116,8 @@ class SessionPipeline:
 
     def __init__(self, suites_root: Path | str | None, *,
                  store=None, deps: PipelineDeps | None = None,
-                 recovery=None, secrets=None, app_id: str = ""):
+                 recovery=None, secrets=None, app_id: str = "",
+                 app_build: str = DEFAULT_APP_BUILD):
         self.suites_root = Path(suites_root) if suites_root else None
         self.store = store
         self.deps = deps
@@ -122,6 +129,13 @@ class SessionPipeline:
         # 本次 run 不消费经验（--fake-driver / 未给 --bundle-id 时如实如此，
         # 引擎会记 incomplete_key 而不是猜键）。
         self.app_id = app_id
+        # 12.5/E7：本次 run 的**真实** build id。E7 的 `validated_builds` 是
+        # 「哪些构建验证过这条经验」的集合——恒为字面量 "local" 会让集合语义
+        # 退化（跨 build 有效性判断失去意义，Task 2.4 终审 P3-4）。
+        # 同一个值也喂给 `repo.resolve(build=...)`：那是 M3 的
+        # `generated/<build>/` 选择器，虽然现在解析器忽略它，但两个概念
+        # 本就是「哪一次构建」，不该各写一份。
+        self.app_build = app_build
         # review_m4_task43 P2-1：`${VAR}` 分派前经 SecretProvider 解析
         # （14.4「变量解析在 Runner 层完成」的落点拍板 = 管线 ctx 装配处，
         # StepRunner 保持纯值执行）。None = 不解析（直接构造的测试不受影响）。
@@ -285,7 +299,7 @@ class SessionPipeline:
                             # 14.2 大写枚举）；LLM 恢复建 PENDING review。
                             self._write_recovery_row(
                                 step_row_id, outcome.element_id or "", rec)
-                            self._write_experience_runs(step_row_id, rec)
+                            self._write_experience_artifacts(step_row_id, rec)
                             recovered_kinds.append(step_recovered)
                             recovered_labels.append(
                                 recovered_kind(step_recovered))
@@ -295,7 +309,7 @@ class SessionPipeline:
                             # （唯一性/类型/执行失败）不因「步骤最终 FAIL」而
                             # 作废——E11 的口径是「用了但错了就记账」，不是
                             # 「救活了才记账」。
-                            self._write_experience_runs(step_row_id, rec)
+                            self._write_experience_artifacts(step_row_id, rec)
                         rec = None
                         if not outcome.ok:
                             # 8.1/8.4：Guard 拦截是安全策略终态——用例
@@ -353,7 +367,7 @@ class SessionPipeline:
                                     failure_type=_map_exception(e)[1],
                                     detail={"error": str(e)})
                                 # 同动作步：未恢复的 Guard 失败样本照样落库
-                                self._write_experience_runs(aux_row, rec)
+                                self._write_experience_artifacts(aux_row, rec)
                                 raise
                             self._recovered_locators[
                                 self._ref_key(step.wait_for.target)] = \
@@ -404,7 +418,7 @@ class SessionPipeline:
                                     failure_type=_map_exception(e)[1],
                                     detail={"error": str(e)})
                                 # 同动作步：未恢复的 Guard 失败样本照样落库
-                                self._write_experience_runs(aux_row, rec)
+                                self._write_experience_artifacts(aux_row, rec)
                                 raise
                             self._recovered_locators[
                                 self._ref_key(step.assertion.target)] = \
@@ -616,7 +630,7 @@ class SessionPipeline:
             page_source=(getattr(ex, "page_source", None)
                          if ex is not None else None),
             postcondition_check=post_fn,
-            testcase_id=tc.id, attempt=attempt, app_build="local",
+            testcase_id=tc.id, attempt=attempt, app_build=self.app_build,
             app_id=self.app_id, run_id=run_id,
             step_index=step_ctx.step_index)
 
@@ -724,7 +738,7 @@ class SessionPipeline:
         strategies: tuple = tuple()
         if ref is not None and getattr(ref, "type", "element") == "element":
             if self.deps and self.deps.repo is not None:
-                eff = self.deps.repo.resolve(ref, build="local")
+                eff = self.deps.repo.resolve(ref, build=self.app_build)
                 # element_id 必须是解析后的裸 id（eff.id）——ref.id 是容器
                 # 前缀引用（LoginView.username_field），源 metadata 里只有
                 # 裸 id；带着前缀进恢复上下文，reconcile 会把「源里有、
@@ -809,7 +823,7 @@ class SessionPipeline:
             candidate_target=(rec.strategy or {}).get("value"),
             candidate_type=rec.detail.get("candidate_type"),
             screen=rec.detail.get("screen"),
-            app_build="local", result="RECOVERED", accepted=True)
+            app_build=self.app_build, result="RECOVERED", accepted=True)
         if rec.kind == "llm":
             self.store.create_review(rec_id)
 
@@ -832,7 +846,7 @@ class SessionPipeline:
                                 "recovery": rec.detail}),
             step_index=idx, status="RECOVERED")
         self._write_recovery_row(step_row_id, target_id, rec, context)
-        self._write_experience_runs(step_row_id, rec)
+        self._write_experience_artifacts(step_row_id, rec)
         return label
 
     def _aux_rerun_failed(self, lifecycle, idx: int, step_type: str,
@@ -868,10 +882,19 @@ class SessionPipeline:
                     "recovery_kind": rec.kind,
                     "recovery_context": "aux_rerun_failed",
                     "recovery": rec.detail})
-        self._write_experience_runs(row, rec)
+        self._write_experience_artifacts(row, rec)
 
-    def _write_experience_runs(self, step_row_id: int | None, rec) -> None:
-        """4.7 样本落库（设计 5.1 的 record_run_if_needed / record_execution_result）。
+    def _write_experience_artifacts(self, step_row_id: int | None, rec) -> None:
+        """Experience 侧的两类落库产物：4.7 样本 + §11.1 事件。
+
+        **为什么合成一个入口**：两者总是同时产生（同一次候选评估），分成两个
+        函数就必然出现「某处只调了一个」——那正是「同一类结论有时带事件有时
+        不带」的来源。样本用 `step_row_id`（steps.id），事件用 `run_id` +
+        `tc_run_id`（`infra_events` 的外键），两个 id 空间各自独立，不互相
+        冒充。
+
+        --- 4.7 样本（设计 5.1 的 record_run_if_needed /
+        record_execution_result）---
 
         **分工**（Task 2.4 决策）：引擎判定「写什么」（`record_as_sample` 的
         E11 口径 + 执行结果），管线补 `steps.id`——恢复发生在
@@ -888,9 +911,37 @@ class SessionPipeline:
         samples = ((rec.detail or {}) if rec is not None else {}).get(
             "experience_runs") or []
         if exp_store is None or not step_row_id or not samples:
+            # 样本与事件**不是**同生共死：MISS / Guard BLOCK / 风险拦截都
+            # 「有事件、无样本」（4.7 明确不计样本）。所以早退前先把事件写了，
+            # 否则 trace 上会丢掉「查过、拦过」这类最该看见的观测。
+            self._write_experience_events(rec)
             return
         from experience import record_sample_runs
         record_sample_runs(exp_store, samples, step_id=step_row_id)
+        self._write_experience_events(rec)
+
+    def _write_experience_events(self, rec) -> None:
+        """§11.1 的 recovery 期事件落库（引擎产出 payload，管线补 run/tc id）。
+
+        落点是 trace.db 的 `infra_events`（该库唯一事件流，设计 §11.1
+        「追加到 P1 的 Trace，不新建独立存储体系」）。事件名经
+        `record_experience_event` 的 `EXPERIENCE_EVENT_TYPES` fail-loud 闸门
+        校验——引擎侧不重复判一次（两处都判 = 两套规则）。
+
+        `run_id` 取 `self._run_id`（`run_all` 设置；也是样本 payload 里那个
+        run_id，两边同源）。`tc_run_id` 取 lifecycle 游标——用例未开始时为
+        None，事件照记（run 级追溯仍成立）。
+        """
+        if self.store is None or rec is None:
+            return
+        events = (rec.detail or {}).get("experience_events") or []
+        if not events:
+            return
+        tc_run_id = getattr(self._lifecycle, "tc_run_id", None)
+        for ev in events:
+            self.store.record_experience_event(
+                ev["event_type"], run_id=self._run_id,
+                tc_run_id=tc_run_id, detail=ev.get("detail"))
 
     def _screen_wait_failure(self, runner, wait_spec, exc) -> str | None:
         """screen 目标 wait 超时的终态分类（13.2；矩阵 #11/#12 vs #13）。
@@ -914,7 +965,8 @@ class SessionPipeline:
                 or not callable(getattr(ex, "page_source", None)):
             return None
         try:
-            target_registered = repo.resolve(wait_spec.target, build="local")
+            target_registered = repo.resolve(wait_spec.target,
+                                             build=self.app_build)
         except Exception:  # noqa: BLE001 — 目标屏未登记 → 退化形态不分类
             return None
         try:
@@ -956,7 +1008,7 @@ class SessionPipeline:
         repo = self.deps.repo if self.deps else None
         if repo is not None and ref_id:
             try:
-                eff = repo.resolve(target_ref, build="local")
+                eff = repo.resolve(target_ref, build=self.app_build)
                 eff_screen = eff.screen
                 eff_type = getattr(eff, "type", None)
                 # Task 2.4 接线地雷 ④：effective_risk 必须是 Risk 枚举——
@@ -993,7 +1045,7 @@ class SessionPipeline:
             redispatch=None,                  # 只验证不执行（H7 精神）
             page_source=(getattr(ex, "page_source", None)
                          if ex is not None else None),
-            testcase_id=tc.id, attempt=attempt, app_build="local",
+            testcase_id=tc.id, attempt=attempt, app_build=self.app_build,
             app_id=self.app_id, run_id=run_id, step_index=idx)
         return self.recovery.recover(ctx)
 
@@ -1010,7 +1062,8 @@ class SessionPipeline:
             if override:
                 return [dict(s) for s in override]
             if self.deps and self.deps.repo is not None:
-                eff = self.deps.repo.resolve(target_ref, build="local")
+                eff = self.deps.repo.resolve(target_ref,
+                                             build=self.app_build)
                 if hasattr(eff, "marker"):
                     return [{"type": "accessibility_id", "value": eff.marker}]
                 return [{"type": s.type, "value": s.value}

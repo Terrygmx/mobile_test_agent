@@ -957,3 +957,77 @@ def test_env_kind_recorded_in_runs(tmp_path, monkeypatch):
     row = sqlite3.connect(db).execute(
         "SELECT env_kind FROM runs ORDER BY rowid DESC LIMIT 1").fetchone()
     assert row[0] == "production"
+
+
+def _ns(**kw):
+    """`_resolve_app_build` 的最小 Namespace（只关心 metadata/generated）。"""
+    import argparse
+    return argparse.Namespace(**kw)
+
+
+def test_resolve_app_build_reads_metadata_build(tmp_path):
+    """12.5/E7：build id 从 12.3 metadata 的 `build` 字段读（单一真值源）。"""
+    from cli.main import _resolve_app_build
+
+    meta = tmp_path / "source_metadata.json"
+    meta.write_text('{"build": "1026", "git_commit": "abc1234"}',
+                    encoding="utf-8")
+    assert _resolve_app_build(_ns(metadata=str(meta))) == "1026"
+
+
+def test_resolve_app_build_falls_back_without_metadata(tmp_path):
+    """读不到 metadata → 退回 "local"，**不 fail-loud**（fake-driver / 单测
+    没有 metadata 是常态；build id 不是安全判据，不该拦住一次 run）。"""
+    from cli.main import _resolve_app_build
+    from cli.pipeline import DEFAULT_APP_BUILD
+
+    assert _resolve_app_build(
+        _ns(metadata=None, generated=str(tmp_path / "nope"))) \
+        == DEFAULT_APP_BUILD
+
+
+def test_resolve_app_build_falls_back_on_bad_json(tmp_path):
+    """坏 JSON 同样退回默认——不把「构建身份读坏了」升级成 run 失败。"""
+    from cli.main import _resolve_app_build
+    from cli.pipeline import DEFAULT_APP_BUILD
+
+    meta = tmp_path / "source_metadata.json"
+    meta.write_text("{not json", encoding="utf-8")
+    assert _resolve_app_build(_ns(metadata=str(meta))) == DEFAULT_APP_BUILD
+
+
+def _ns(**kw):
+    """`_resolve_app_build` 的最小 Namespace（只关心 metadata/generated）。"""
+    import argparse
+    return argparse.Namespace(**kw)
+
+
+def test_resolve_app_build_reads_metadata_build(tmp_path):
+    """12.5/E7：build id 从 12.3 metadata 的 `build` 字段读（单一真值源）。"""
+    from cli.main import _resolve_app_build
+
+    meta = tmp_path / "source_metadata.json"
+    meta.write_text('{"build": "1026", "git_commit": "abc1234"}',
+                    encoding="utf-8")
+    assert _resolve_app_build(_ns(metadata=str(meta))) == "1026"
+
+
+def test_resolve_app_build_falls_back_without_metadata(tmp_path):
+    """读不到 metadata → 退回 "local"，**不 fail-loud**（fake-driver / 单测
+    没有 metadata 是常态；build id 不是安全判据，不该拦住一次 run）。"""
+    from cli.main import _resolve_app_build
+    from cli.pipeline import DEFAULT_APP_BUILD
+
+    assert _resolve_app_build(
+        _ns(metadata=None, generated=str(tmp_path / "nope"))) \
+        == DEFAULT_APP_BUILD
+
+
+def test_resolve_app_build_falls_back_on_bad_json(tmp_path):
+    """坏 JSON 同样退回默认——不把「构建身份读坏了」升级成 run 失败。"""
+    from cli.main import _resolve_app_build
+    from cli.pipeline import DEFAULT_APP_BUILD
+
+    meta = tmp_path / "source_metadata.json"
+    meta.write_text("{not json", encoding="utf-8")
+    assert _resolve_app_build(_ns(metadata=str(meta))) == DEFAULT_APP_BUILD

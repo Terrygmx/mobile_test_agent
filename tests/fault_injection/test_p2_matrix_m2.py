@@ -484,6 +484,102 @@ def test_p2_15_aux_rerun_failure_records_failure_sample(tmp_path):
     assert after.validated_builds == [], "E7：失败样本绝不追加 validated_builds"
 
 
+# --- E7 的 build 集合：真实 build id 贯通（终审 P3-4） ----------------------
+
+
+def test_p2_e7_real_build_id_flows_into_validated_builds(tmp_path):
+    """E7 的 `validated_builds` 必须是**真实 build id** 的集合，不是字面量。
+
+    此前 pipeline 三处硬编码 `app_build="local"`（继承 P1），于是
+    `validated_builds` 恒为 `["local"]` ——集合语义退化，跨 build 有效性判断
+    失去意义（终审 P3-4）。修法：`SessionPipeline.app_build` 由 CLI 从 12.3
+    metadata 的 `build` 字段解析（读不到才退回 "local"）。
+
+    本行用 1026 模拟「另一台构建上的 run」：样本与 validated_builds 都必须
+    记 1026。
+    """
+    store = SQLiteExperienceStore(tmp_path / "experience.db")
+    exp = _seed(store)
+    ex = DriftExecutor(page_source=HOME_PAGE)
+
+    run, _, _, _ = run_matrix(
+        tmp_path, _case("build", TAP), ex=ex, repo=drift_repo(tmp_path),
+        recovery=_recovery(tmp_path, store=store), bundle_id=APP,
+        app_build="1026")
+
+    assert run.results[0].status == "RECOVERED"
+    [run_row] = _exp_runs(tmp_path, exp.experience_id)
+    assert run_row["app_build"] == "1026"
+    after = store.lookup(APP, "HomeView", "login_button")[0]
+    assert after.validated_builds == ["1026"], \
+        "E7：validated_builds 记真实 build，不是硬编码的 'local'"
+
+
+# --- §11.1 事件落库（终审：事件从半接改全接） ------------------------------
+
+
+def _infra_events(trace, event_type):
+    rows = trace.conn.execute(
+        "SELECT run_id, testcase_run_id, action_taken, detail_json"
+        " FROM infra_events WHERE event_type=? ORDER BY id",
+        (event_type,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def test_p2_experience_events_land_in_infra_events(tmp_path):
+    """§11.1：recovery 期事件落 trace.db 的 `infra_events`（该库唯一事件流）。
+
+    带 run_id + tc_run_id（引擎不持有 TraceStore，run/tc id 由管线补——与
+    4.7 样本同一分工）；`action_taken` 留空，不污染 P1 稳定性报告的
+    `action_taken='RESTART_WDA'` 判据。
+    """
+    import json as _json
+
+    store = SQLiteExperienceStore(tmp_path / "experience.db")
+    _seed(store)
+    ex = DriftExecutor(page_source=HOME_PAGE)
+
+    run, trace, _, _ = run_matrix(
+        tmp_path, _case("evt", TAP), ex=ex, repo=drift_repo(tmp_path),
+        recovery=_recovery(tmp_path, store=store), bundle_id=APP)
+
+    assert run.results[0].status == "RECOVERED"
+    tc_rows = trace.conn.execute(
+        "SELECT id FROM testcase_runs ORDER BY id").fetchall()
+    for etype in ("experience_lookup", "experience_hit",
+                  "experience_execution"):
+        rows = _infra_events(trace, etype)
+        assert len(rows) == 1, f"{etype} 应恰好一条，实得 {len(rows)}"
+        assert rows[0]["run_id"] == "run_matrix"
+        assert rows[0]["testcase_run_id"] == tc_rows[0]["id"], \
+            "事件要挂到 testcase_run 上（管线补的 tc_run_id）"
+        assert rows[0]["action_taken"] is None, \
+            "留空——否则污染 P1 稳定性报告的 WDA 指标过滤"
+    hit = _json.loads(_infra_events(trace, "experience_hit")[0]["detail_json"])
+    assert hit["outcome"] == "EXECUTE" and hit["status_before"] == "CANDIDATE"
+
+
+def test_p2_miss_emits_events_even_without_samples(tmp_path):
+    """空库：只有事件、没有样本——事件与样本**不同生共死**。
+
+    只看 `experience_runs` 会把「查了没有」读成「压根没查」。
+    """
+    store = SQLiteExperienceStore(tmp_path / "experience.db")   # 空库
+    ex = DriftExecutor(page_source=HOME_PAGE)
+
+    run_matrix(tmp_path, _case("evt2", TAP), ex=ex,
+               repo=drift_repo(tmp_path), recovery=_recovery(tmp_path,
+                                                             store=store),
+               bundle_id=APP)
+    conn = __import__("sqlite3").connect(tmp_path / "trace.db")
+    try:
+        kinds = [r[0] for r in conn.execute(
+            "SELECT event_type FROM infra_events ORDER BY id").fetchall()]
+    finally:
+        conn.close()
+    assert kinds == ["experience_lookup", "experience_miss"]
+
+
 # --- 空库 / 未接库：P1 行为保留（回归底线） --------------------------------
 
 
