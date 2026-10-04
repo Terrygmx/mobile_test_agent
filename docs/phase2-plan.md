@@ -221,6 +221,19 @@ M1 审计/Schema(1.5d) ─► M2 Store/Guard(4d) ─► M3 验证/降级(3d) ─
 
 ### Task 4.1: P2-09 — promoter
 
+> **⚠️ 接线前置（review_p2_task23 P3-4 显性化，2026-10-04）**：Task 2.3 起
+> Candidate 的 `strategy.origin = "experience"`，而
+> `repository/loader.py:28` 的 `ORIGINS = ("source", "manual")` **尚不含该值**
+> （loader 第 179 行按白名单校验 → 命中即 raise）。Task 2.3 无路径把
+> Candidate.strategy 喂给 loader，故不构成拦截；但本任务的 promote 要把它
+> 写进 overrides 并被 loader 消费——**`ORIGINS` 扩 `"experience"` 必须与
+> 写入同批落地**，否则一上线就 fail-loud。
+>
+> **另（review_p2_task23 P3-7）**：Experience 不携带 element type
+> （recovery 行的 `candidate_type`，只用于 H15 补丁与 Guard 类型校验）。
+> 若 Promotion 需要写「完整 override」（type 字段），本任务需回查 recovery
+> 行或另行存储——设计 9.2 未提，落地前先定。
+
 **Objective:** 设计 9.1–9.3 / 9.5：Proposal 生成 → 人工 Accept → 写 overrides（origin: experience）→ Git commit。
 
 **Files:**

@@ -57,6 +57,8 @@ class ExperienceStore(Protocol):
 
     def create_candidate(self, seed: CandidateSeed) -> Experience: ...
 
+    def find_by_seed_review(self, review_id: int) -> list[Experience]: ...
+
     def record_run(self, experience_id: str, run: ExperienceRun) -> None: ...
 
     def record_success_build(self, experience_id: str, app_build: str) -> None: ...
@@ -191,6 +193,25 @@ class SQLiteExperienceStore:
                 " AND target_id=? AND status != 'REJECTED'"
                 " ORDER BY updated_at DESC, rowid DESC",
                 (app_id, screen_id, target_id)).fetchall()
+            return [self._exp_from_row(r) for r in rows]
+        finally:
+            conn.close()
+
+    def find_by_seed_review(self, review_id: int) -> list[Experience]:
+        """按**种子 review** 直查（含 REJECTED）——E5 幂等判据的专用查询。
+
+        为什么不能用 `lookup` 兼任（review_p2_task23 P3-3）：`lookup` 有意
+        不返回 REJECTED（设计 7.1 修订），于是「同 review 已种过」会退化成
+        「恰好还能读见」的涌现属性——置 REJECTED 后再 seed 就会静默多出一行。
+        这里**直查不过滤**，把「REJECTED 是否算已种」的语义判断交还消费方
+        （`agent.review` 显式排除 REJECTED：人工判过不可用的策略再 ACCEPT
+        一次，本就该重新走一遍学习，不算重复）。
+        """
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM experiences WHERE seed_recovery_review_id=?"
+                " ORDER BY created_at ASC, rowid ASC", (review_id,)).fetchall()
             return [self._exp_from_row(r) for r in rows]
         finally:
             conn.close()

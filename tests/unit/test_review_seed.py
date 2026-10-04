@@ -16,6 +16,10 @@
    （infra_events，该库唯一的事件流），带 seed_run_id + experience_id。
 6. **P1 行为保留**：不传 experience_store 时 `decide_review` 与 P1 完全
    一致（只改状态、不碰 experience 库）。
+7. **评审修订（review_p2_task23）**：ACCEPT 两个消费入口的前置条件合一校验
+   且先于状态变更（P3-2）；幂等按种子 review 直查并显式排除 REJECTED
+   （P3-3）；`mta review reseed` 补种半状态（P3-1）；失败路径不留空库文件
+   （P3-6 惰性构造）。
 """
 
 from __future__ import annotations
@@ -219,3 +223,102 @@ def test_cli_accept_dangling_chain_exit3(chain, capsys):
     assert code == 3
     assert "REVIEW ERROR" in capsys.readouterr().out
     assert chain["trace"].get_review(2)["review_status"] == "PENDING"
+
+
+# --- 8. 评审修订（review_p2_task23）：P3-1 / P3-2 / P3-3 / P3-6 ---
+
+
+def test_accept_requires_patch_fields_too(chain):
+    """P3-2：ACCEPT 的**两个消费入口**前置条件合一校验，且发生在状态变更前。
+
+    曾各自为政：seed 必填集不含 candidate_type，export 必填集含——于是
+    candidate_type 缺失时 seed 放行（状态落 ACCEPT、Candidate 入库），紧接着
+    export 抛错 → 补丁再也导不出来。现在一次跑完、失败零副作用。
+    """
+    chain["trace"].conn.execute(
+        "UPDATE recoveries SET candidate_type=NULL WHERE id=1")
+    chain["trace"].conn.commit()
+    with pytest.raises(ReviewError) as exc:
+        decide_review(chain["trace"], 1, "ACCEPT", "terry",
+                      experience_store=chain["exp"])
+    assert "candidate_type" in str(exc.value)
+    assert chain["trace"].get_review(1)["review_status"] == "PENDING"
+    assert chain["exp"].list() == []
+
+
+def test_seed_idempotency_excludes_rejected(chain):
+    """P3-3：幂等按种子 review **直查**并显式排除 REJECTED。
+
+    判据不再依赖 `lookup` 的过滤（那是「恰好还能读见」的涌现属性）：
+    REJECTED 不算已种——人工判过不可用的策略再 ACCEPT 一次就是重新学习。
+    """
+    decide_review(chain["trace"], 1, "ACCEPT", "terry",
+                  experience_store=chain["exp"])
+    first = chain["exp"].list()[0]
+    again = seed_candidate(chain["trace"], chain["exp"], 1)
+    assert again.experience_id == first.experience_id
+    assert len(chain["exp"].list()) == 1
+
+    chain["exp"].update_status(first.experience_id,
+                               ExperienceStatus.REJECTED, "MANUAL")
+    # REJECTED 不入 lookup（设计 7.1 修订），但 list() 审计视角全量可见
+    assert chain["exp"].lookup("com.phaset0.logindemo", "LoginView",
+                               "username_field") == []
+    assert [e.status for e in chain["exp"].list()] == [
+        ExperienceStatus.REJECTED]
+    second = seed_candidate(chain["trace"], chain["exp"], 1)
+    assert second.experience_id != first.experience_id
+    assert len(chain["exp"].find_by_seed_review(1)) == 2
+    assert sorted(e.status.value for e in chain["exp"].list()) == [
+        "CANDIDATE", "REJECTED"]
+
+
+def test_cli_reseed_completes_half_state(chain, capsys):
+    """P3-1：`create_candidate` 曾失败/未触发留下的半状态有产品出口。
+
+    场景即现存真实数据：review 在 Task 2.3 之前已 ACCEPT（无 Candidate）。
+    """
+    decide_review(chain["trace"], 1, "ACCEPT", "terry")     # P1 路径，不建
+    assert chain["exp"].list() == []
+
+    code = main(["review", "reseed", "1", "--db", str(chain["trace_db"]),
+                 "--exp-db", str(chain["exp_db"])])
+    assert code == 0
+    rows = SQLiteExperienceStore(chain["exp_db"]).list()
+    assert len(rows) == 1 and rows[0].seed_recovery_review_id == 1
+
+    # 幂等：再补一次不新增
+    assert main(["review", "reseed", "1", "--db", str(chain["trace_db"]),
+                 "--exp-db", str(chain["exp_db"])]) == 0
+    assert len(SQLiteExperienceStore(chain["exp_db"]).list()) == 1
+
+
+def test_reseed_requires_accept(chain, capsys):
+    """reseed 不是绕过 E5 的后门：PENDING 的 review 补不了种。"""
+    code = main(["review", "reseed", "1", "--db", str(chain["trace_db"]),
+                 "--exp-db", str(chain["exp_db"])])
+    assert code == 3
+    assert chain["exp"].list() == []
+
+
+def test_failed_accept_leaves_no_experience_db(chain, tmp_path, capsys):
+    """P3-6：校验失败的 accept 不得在磁盘上留下空库文件（惰性构造）。
+
+    旧实现在 `decide_review` 之前就构造 store（触发 migrate 建库），失败
+    路径也产生新文件——「失败却产生新文件」违反最小副作用。
+    """
+    fresh = tmp_path / "never_created.db"
+    code = main(["review", "accept", "2", "--db", str(chain["trace_db"]),
+                 "--exp-db", str(fresh), "--reviewer", "terry"])
+    assert code == 3
+    assert not fresh.exists()
+
+
+def test_accept_creates_experience_db_when_valid(chain, tmp_path):
+    """反向：校验通过时惰性构造照常落库（惰性不等于不建）。"""
+    fresh = tmp_path / "created.db"
+    code = main(["review", "accept", "1", "--db", str(chain["trace_db"]),
+                 "--exp-db", str(fresh), "--reviewer", "terry"])
+    assert code == 0
+    assert fresh.exists()
+    assert len(SQLiteExperienceStore(fresh).list()) == 1

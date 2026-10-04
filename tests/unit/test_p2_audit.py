@@ -233,6 +233,7 @@ def test_render_markdown_app_id_and_pairs(audit_db):
 
 def test_main_json_export(audit_db, tmp_path, capsys):
     """P3-2：--out 同时落机器可读 JSON（M2 Task 2.3 消费）。"""
+
     import json
 
     db = tmp_path / "audit.db"
@@ -249,3 +250,24 @@ def test_main_json_export(audit_db, tmp_path, capsys):
     data = json.loads(jpath.read_text())
     assert "seedable_accepts" in data and "screen_target_pairs" in data
     assert data["seedable_accepts"][0]["app_id"] == "com.demo.app"
+
+
+def test_script_runs_directly_by_path(tmp_path):
+    """P2-1（review_p2_task23）：脚本**直跑**（脚本路径，非 `-m`）必须可用。
+
+    `p2_seed_recoveries.sh` 收尾打印的复核命令、以及 Task 1.1 review 记录的
+    实跑方式，都是「`python scripts/p2_audit_recoveries.py …`」这一形态；包
+    路径导入（本文件其余用例）天然测不到这条调用面。
+    """
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[2]
+    db = tmp_path / "empty.db"
+    TraceStore(db)                       # 建出真实 schema 的空库
+    proc = subprocess.run(
+        [sys.executable, str(repo_root / "scripts" / "p2_audit_recoveries.py"),
+         "--db", str(db)],
+        cwd=str(repo_root), capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert "P2 Trace 审计" in proc.stdout

@@ -15,7 +15,13 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from tracer.storage import SEED_SELECT
+# 本脚本的既有调用惯例是**直跑**（`python scripts/p2_audit_recoveries.py …`
+# ——p2_seed_recoveries.sh 收尾打印的复核命令、review_p2_task11 记录的实跑
+# 方式都是这个形态）。直跑时 sys.path[0]=scripts/，包内导入会
+# ModuleNotFoundError（review_p2_task23 P2-1 实锤），故显式补仓根。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tracer.storage import SEED_SELECT  # noqa: E402  (需在 sys.path 补根之后)
 
 DEFAULT_DB = "out/trace.db"
 

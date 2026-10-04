@@ -11,17 +11,21 @@
   "seedable_accepts": [
     {
       "seed_recovery_review_id": 1,
+      "review_status": "ACCEPT",
+      "reviewer": "terrygmx",
+      "reviewed_at": "2026-10-03T14:57:13Z",
+      "note": "p2-seed round=1 scenario=username_field->username_field_v2 run_id=run_e049fb5e",
+      "recovery_id": 50,
+      "kind": "LLM",
       "seed_step_id": 246,
       "seed_run_id": "run_e049fb5e",
+      "seed_tc_run_id": 90,
       "app_id": "com.phaset0.logindemo",
       "screen": "LoginView",
       "target_id": "username_field",
       "candidate_target": "username_field_v2",
       "candidate_type": "button",
       "app_build": "local",
-      "kind": "LLM",
-      "reviewer": "terrygmx",
-      "reviewed_at": "2026-10-03T14:57:13Z",
       "seed_ready": true
     }
   ],

@@ -249,7 +249,11 @@ runs=102 / recoveries=50 / reviews=1 / seed_ready=1（原 0）。
   `action_taken` 留空。
 - **去重复**：`TraceStore.get_review_seed()` 与审计脚本的 `seedable_accepts`
   共用 `tracer.storage.SEED_SELECT`（同一 join 两处维护必然漂移——P2-04
-  「两套校验合一」同款纪律）；审计脚本改为消费该片段，签名与输出列不变。
+  「两套校验合一」同款纪律）；审计脚本改为消费该片段，函数签名与
+  **markdown 列**不变。**限定修正（review_p2_task23 P3-5）**：json 产物
+  增 4 键（`note` / `recovery_id` / `review_status` / `seed_tc_run_id`）
+  ——初版记录写成「输出列不变」只对 markdown 成立，已刷新
+  `docs/p2_data_audit.json`。
 - **决策记录**：`Experience.strategy.origin = "experience"`——P2 9.2 已把
   experience 纳入 origin 词汇（Task 4.1 扩 `loader.ORIGINS`）；本策略非
   人工手写（manual）也非源码生成（source）。Task 4.1 落地前它只存于
@@ -270,4 +274,52 @@ runs=102 / recoveries=50 / reviews=1 / seed_ready=1（原 0）。
   `seed_candidate(trace_store, experience_store, 1)` 单独补种，或跑新一轮
   drift 产出新的 PENDING review 后 accept。
 - 实测：pytest 874 passed（+10：test_review_seed.py 10 项）。
+
+---
+
+## Task 2.3 评审修订记录（review_p2_task23 收口，2026-10-04）
+
+评审结论「有条件通过」，1×P2 + 7×P3 全部收口：
+
+- **P2-1（必修）审计脚本调用面回归**：Task 2.3 给脚本加了
+  `from tracer.storage import SEED_SELECT`，而本脚本的既有惯例是**直跑**
+  （`python scripts/p2_audit_recoveries.py …`——`p2_seed_recoveries.sh` 收尾
+  打印的复核命令、Task 1.1 review 记录的实跑方式都是这个形态）；直跑时
+  `sys.path[0]=scripts/` → `ModuleNotFoundError`。修：脚本顶部
+  `sys.path.insert(0, parents[1])` 补仓根，保留直跑惯例（不去改 shell 脚本
+  与文档的既有命令）。测试侧补 `test_script_runs_directly_by_path`
+  （subprocess 直跑断言 exit 0）——原有用例走包路径导入，天然测不到这条面。
+- **P3-1 半状态无产品出口**：`create_candidate` 自身失败时 review 已落
+  ACCEPT、Candidate 0 条，二次 accept 被「不可二次决策」挡死，唯一出路是
+  直呼 `seed_candidate()`（无 CLI）。修：新增 `mta review reseed <id>`
+  ——补种已 ACCEPT 的 review（幂等，已存在的 Candidate 直接返回）。
+  这同时是现存真实数据（review #1 在 Task 2.3 之前就已 ACCEPT）的补种通道。
+- **P3-2 两个消费闸门字段集不一致**：`_resolve_seed_fields` 与
+  `export_overrides_patch` 各持一套必填集，seed 放行而 export 拒绝时状态已
+  改、补丁再也导不出来。修：合并为**单一闸门** `validate_accept()`（种子
+  字段 `_SEED_REQUIRED` + 补丁字段 `_PATCH_REQUIRED`），在状态变更**之前**
+  一次跑完、零副作用；`export_overrides_patch` 改为消费同一常量，不再各写
+  一套规则（P2-04 合一纪律的延续）。
+- **P3-3 幂等是「过滤读的涌现属性」**：判重走 `lookup`（有意不返回
+  REJECTED），置 REJECTED 后再 seed 会静默多出一行。修：Store 新增
+  `find_by_seed_review()` **直查不过滤**，消费方（`_seed_from_row`）**显式**
+  排除 REJECTED——「REJECTED 不算已种、可重新学习」从此是写明的语义，不是
+  读见的巧合。
+- **P3-4 `origin="experience"` 不在 `loader.ORIGINS`**：当前无路径喂给
+  loader，不构成拦截；但 Task 4.1 的 promote 必须与 `ORIGINS` 扩值同批落地。
+  已作为**接线前置**写进 plan Task 4.1（与 Task 2.4 的三条接线地雷并列）。
+- **P3-5 审计 json 未重生成**：已重跑刷新 `docs/p2_data_audit.json`
+  （自动生成段与 markdown 头部逐行比对一致，仅 json 增 4 键）；完成记录里
+  的「输出列不变」已限定为「markdown 列不变」。
+- **P3-6 失败路径留下空 `experience.db`**：旧实现先构造 store（触发
+  migrate 建库）再校验。修：CLI 改用 `_LazyExperienceStore` 代理，构造推迟
+  到首次真正使用（校验已通过）——失败路径不落文件，成功路径照常落库
+  （两个方向都有测试钉住）。
+- **P3-7 杂项**：①`_resolve_seed_fields` 重复调用 → 重构为「取行一次 +
+  校验一次」，`decide_review` 与 `_seed_from_row` 共用同一行，不再重复查库；
+  ②`seed_step_id == 0` 冗余分支删除，语义并入必填项说明文案；
+  ③Experience 不带 element type（`candidate_type`）——Promotion 若需写完整
+  override 要回查 recovery 行，已随 P3-4 一并记入 plan Task 4.1。
+- 实测：pytest 881 passed（+7：修订项测试；test_review_seed.py 10 → 17）。
+
 

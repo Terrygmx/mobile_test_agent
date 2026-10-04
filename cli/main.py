@@ -184,6 +184,14 @@ def build_parser() -> argparse.ArgumentParser:
                          default=str(DEFAULT_EXPERIENCE_DB),
                          help="Experience 库路径（ACCEPT 触发 create_candidate；"
                               "默认 out/experience.db）")
+    rev_res = rev_sub.add_parser(
+        "reseed",
+        help="补种：已 ACCEPT 但没建出 Candidate 的 review → create_candidate"
+             "（E5；P3-1 的产品出口——create_candidate 曾失败时唯一出路）")
+    rev_res.add_argument("review_id", type=int)
+    rev_res.add_argument("--db", metavar="PATH", default="out/trace.db")
+    rev_res.add_argument("--exp-db", metavar="PATH",
+                         default=str(DEFAULT_EXPERIENCE_DB))
     rev_rej = rev_sub.add_parser("reject", help="拒绝恢复")
     rev_rej.add_argument("review_id", type=int)
     rev_rej.add_argument("--db", metavar="PATH", default="out/trace.db")
@@ -743,19 +751,40 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+class _LazyExperienceStore:
+    """惰性 Experience Store（review_p2_task23 P3-6）。
+
+    `review accept` 的 exp store 若在校验之前构造，种子链不全的失败路径也会
+    在磁盘上留下一个空库文件——「失败却产生新文件」违反最小副作用。本代理
+    把构造推迟到**首次真正使用**（即校验已通过、要写 Candidate 时）。
+
+    只转发属性访问，不缓存接口形状：Store 加方法无需改本类。
+    """
+
+    def __init__(self, db_path):
+        self._db_path = db_path
+        self._impl = None
+
+    def __getattr__(self, name):
+        if self._impl is None:
+            from experience import SQLiteExperienceStore
+            self._impl = SQLiteExperienceStore(self._db_path)
+        return getattr(self._impl, name)
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     """9.5 人工确认流程。accept 导出补丁（stdout 或 --out），任何路径都不
     写 repository/overrides（H15）。
 
     P2（设计 8.1 / E5）：accept 同时是 Experience Candidate 的**唯一入口**
-    ——状态流转后立刻 `create_candidate`（种子字段不齐则 fail-loud、状态
-    不变、退出码 3，绝不静默跳过）。
+    ——状态流转后立刻 `create_candidate`（ACCEPT 的全部消费前置条件在状态
+    变更前一次校验，不齐则 fail-loud、状态不变、退出码 3）；`reseed` 是
+    「已 ACCEPT 但没建出 Candidate」的补种出口（P3-1）。
     """
     import getpass
 
     from agent.review import ReviewError, decide_review, \
-        export_overrides_patch, list_reviews
-    from experience import SQLiteExperienceStore
+        export_overrides_patch, list_reviews, seed_candidate
     from tracer.storage import TraceStore
 
     store = TraceStore(args.db)
@@ -775,7 +804,7 @@ def cmd_review(args: argparse.Namespace) -> int:
                     print(f"    note: {r['note']}")
             return 0
         if args.review_cmd == "accept":
-            exp_store = SQLiteExperienceStore(args.exp_db)
+            exp_store = _LazyExperienceStore(args.exp_db)
             candidate = decide_review(store, args.review_id, "ACCEPT",
                                       reviewer, args.note,
                                       experience_store=exp_store)
@@ -796,6 +825,18 @@ def cmd_review(args: argparse.Namespace) -> int:
                 print(patch, end="")
                 print(f"# review: #{args.review_id} ACCEPT（补丁见上；"
                       "人工合入 Repository——H15）")
+            return 0
+        if args.review_cmd == "reseed":
+            exp_store = _LazyExperienceStore(args.exp_db)
+            candidate = seed_candidate(store, exp_store, args.review_id)
+            print(f"experience: Candidate {candidate.experience_id} "
+                  f"[{candidate.status.value}] "
+                  f"app={candidate.app_id} screen={candidate.screen_id} "
+                  f"target={candidate.target_id} "
+                  f"strategy={candidate.strategy.value} "
+                  f"(seed review #{candidate.seed_recovery_review_id})")
+            print(f"review: #{args.review_id} 补种完成（已 ACCEPT；"
+                  "幂等——已存在的 Candidate 直接返回）")
             return 0
         if args.review_cmd == "reject":
             decide_review(store, args.review_id, "REJECT", reviewer,

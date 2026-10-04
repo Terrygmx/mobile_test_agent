@@ -23,11 +23,11 @@ import io
 
 import yaml
 
-from experience.models import CandidateSeed, Experience
+from experience.models import CandidateSeed, Experience, ExperienceStatus
 from repository.loader import LocatorStrategy
 
 __all__ = ["list_reviews", "decide_review", "export_overrides_patch",
-           "seed_candidate", "ReviewError"]
+           "validate_accept", "seed_candidate", "ReviewError"]
 
 
 class ReviewError(RuntimeError):
@@ -40,60 +40,91 @@ def list_reviews(store, status: str | None = "PENDING") -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def _resolve_seed_fields(store, review_id: int) -> dict:
-    """E5 种子字段的「取 + 校验」——缺任一必填项即 ReviewError，**不改状态**。
+# ACCEPT 两个消费入口的必填字段集（review_p2_task23 P3-2 合一闸门的真值源）
+_SEED_REQUIRED = {
+    "app_id": "runs.app_bundle_id（Candidate 主键第一段；mta run 需 --bundle-id）",
+    "seed_run_id": "追溯链 run_id",
+    "seed_step_id": "追溯链 steps.id（0/None = P0 悬空写入形态）",
+    "screen": "恢复行 screen",
+    "target_id": "恢复行 expected_target",
+    "candidate_target": "恢复行 candidate_target（定位策略值）",
+}
+_PATCH_REQUIRED = {
+    "candidate_target": "补丁定位策略值（12.2 不许猜值）",
+    "screen": "补丁目标屏",
+    "candidate_type": "补丁元素类型（screen/type/value 缺一即猜值）",
+}
 
-    追溯链断裂（P0 遗留 `step_id=0` / 关联不到 steps）在这里被挡下，与
-    Task 1.1 审计的 `seed_ready=False` 同一判据：审计暴露缺口，消费方
-    拒绝消费，两侧都不许静默跳过（E5）。
+
+def _require_fields(row: dict, review_id: int, required: dict,
+                    gate: str) -> None:
+    """必填集校验（fail-loud，缺项逐条列出——不静默跳过）。"""
+    missing = [f"{k} ← {why}" for k, why in required.items()
+               if not row.get(k)]
+    if missing:
+        raise ReviewError(
+            f"review {review_id} 的 recovery 行不满足 {gate} 前置条件: "
+            + "; ".join(missing))
+
+
+def validate_accept(store, review_id: int) -> dict:
+    """ACCEPT 的**全部消费前置条件**，一次跑完、零副作用（P2-04 合一纪律）。
+
+    ACCEPT 有两个消费入口，各自有必填集：
+      ① 建 Candidate（E5 / 设计 8.1）：种子三件套 + app_id/screen/target/候选值；
+      ② 导出 overrides 补丁（9.5 / H15）：candidate_target/screen/candidate_type。
+    两套曾各管各的（review_p2_task23 P3-2 实锤：seed 放行、export 拒绝 →
+    状态已改 ACCEPT 而补丁再也导不出来）。这里合并为**单一闸门**，在状态
+    变更之前一次跑完——失败即零副作用。
+
+    追溯链断裂（P0 遗留 `step_id=0` / 关联不到 steps）与 Task 1.1 审计的
+    `seed_ready=False` 同一判据：审计暴露缺口，消费方拒绝消费。
     """
     row = store.get_review_seed(review_id)
     if row is None:
         raise ReviewError(f"review {review_id} 不存在")
-    required = {
-        "app_id": "runs.app_bundle_id（Candidate 主键第一段；mta run 需 "
-                  "--bundle-id）",
-        "seed_run_id": "追溯链 run_id",
-        "seed_step_id": "追溯链 steps.id",
-        "screen": "恢复行 screen",
-        "target_id": "恢复行 expected_target",
-        "candidate_target": "恢复行 candidate_target（定位策略值）",
-    }
-    missing = [f"{k} ← {why}" for k, why in required.items()
-               if not row.get(k)]
-    if row.get("seed_step_id") == 0:
-        missing.append("seed_step_id ← steps.id（0 是 P0 悬空写入形态）")
-    if missing:
-        raise ReviewError(
-            f"review {review_id} 的 recovery 行种子字段不齐——E5 拒绝建 "
-            f"Candidate: " + "; ".join(missing))
+    _require_fields(row, review_id, _SEED_REQUIRED, "E5 种子")
+    _require_fields(row, review_id, _PATCH_REQUIRED, "overrides 补丁（H15）")
     return row
 
 
 def seed_candidate(store, experience_store, review_id: int) -> Experience:
     """设计 8.1 / E5：ACCEPT → Experience Candidate 的唯一入口。
 
-    幂等：同一 review 已产生过 Experience（CANDIDATE/VERIFIED/DEGRADED）
-    → 返回既有行，不重复建（重放、重复触发安全）。REJECTED 的行 `lookup`
-    看不见（Store 层语义，设计 7.1 修订记录）——人工判过「不可用」的策略
-    再被 ACCEPT 一次，本就该重新走一遍学习，不视为重复。
+    也供 `mta review reseed` 补种「已 ACCEPT 但没建出 Candidate」的 review
+    （review_p2_task23 P3-1：`create_candidate` 自身失败曾留下无出口的半状态）。
     """
-    row = _resolve_seed_fields(store, review_id)
+    row = store.get_review_seed(review_id)
+    if row is None:
+        raise ReviewError(f"review {review_id} 不存在")
     if row["review_status"] != "ACCEPT":
         raise ReviewError(
             f"review {review_id} 状态为 {row['review_status']}——只有 ACCEPT "
             f"允许做 Candidate 种子（E5）")
-    for existing in experience_store.lookup(
-            row["app_id"], row["screen"], row["target_id"]):
-        if existing.seed_recovery_review_id == review_id:
+    return _seed_from_row(store, experience_store, review_id, row)
+
+
+def _seed_from_row(store, experience_store, review_id: int,
+                   row: dict) -> Experience:
+    """种子字段已校验的行 → Candidate（幂等 + trace 事件）。
+
+    幂等按 `find_by_seed_review` **直查**并显式排除 REJECTED——不靠
+    `lookup` 的过滤当判据（review_p2_task23 P3-3：那样「同 review 已种过」
+    会退化成「恰好还能读见」，置 REJECTED 后再 seed 会静默多出一行）。
+    REJECTED 不算已种：人工判过「不可用」的策略再被 ACCEPT 一次，本就该
+    重新走一遍学习。
+    """
+    _require_fields(row, review_id, _SEED_REQUIRED, "E5 种子")
+    for existing in experience_store.find_by_seed_review(review_id):
+        if existing.status is not ExperienceStatus.REJECTED:
             return existing
 
     # strategy 复用 P1 LocatorStrategy（单一真值源）；类型固定
     # accessibility_id（LLM 候选给的是 accessibility identifier 值），
-    # origin="experience"——P2 9.2 已把 experience 纳入 origin 词汇（Task 4.1
-    # 扩 loader.ORIGINS）；本策略非人工手写（manual）也非源码生成（source）。
-    # 在 Task 4.1 落地前它只存于 experience.db、不经 Repository loader
-    # （其 ORIGINS 校验不含 experience），不构成拦截。
+    # origin="experience"——P2 9.2 已把 experience 纳入 origin 词汇。
+    # ⚠️ Task 4.1 债（review_p2_task23 P3-4）：loader.ORIGINS 目前只有
+    # (source, manual)，Promotion 写 overrides 前必须先扩，否则一上线
+    # fail-loud。已记入 plan Task 4.1。
     seed = CandidateSeed(
         review_id=review_id,
         recovery_id=row["recovery_id"],
@@ -132,10 +163,10 @@ def decide_review(store, review_id: int, decision: str, reviewer: str,
                   experience_store=None) -> Experience | None:
     """PENDING → ACCEPT/REJECT 流转（reviewer 落库，审计依据）。
 
-    `experience_store` 非空且 decision=ACCEPT 时（设计 8.1 / E5）：**先校验
-    种子字段 → 再改状态 → 最后 create_candidate**。顺序不可颠倒——种子不齐
-    时若已落 ACCEPT，二次 accept 会被「不可二次决策」挡住，Candidate 就
-    永远建不出来（fail-loud 必须发生在状态变更之前）。
+    ACCEPT 的顺序是**先校验（两个消费入口的全部前置条件，一次跑完）→ 改状态
+    → 建 Candidate**。顺序不可颠倒——前置条件不满足时若已落 ACCEPT，二次
+    accept 会被「不可二次决策」挡住，Candidate 就永远建不出来（fail-loud
+    必须发生在状态变更之前）。行只取一次，校验与建库共用（不重复查库）。
 
     返回 ACCEPT 且带 experience_store 时新建/命中的 Candidate，其余情况
     None（旧调用方忽略返回值即可，行为不变）。
@@ -151,11 +182,12 @@ def decide_review(store, review_id: int, decision: str, reviewer: str,
     if row["review_status"] != "PENDING":
         raise ReviewError(
             f"review {review_id} 已是 {row['review_status']}（不可二次决策）")
-    if decision == "ACCEPT" and experience_store is not None:
-        _resolve_seed_fields(store, review_id)      # 先校验，不改状态
+    seed_row = None
+    if decision == "ACCEPT":
+        seed_row = validate_accept(store, review_id)   # 前置：零副作用
     store.decide_review(review_id, decision, reviewer, note)
     if decision == "ACCEPT" and experience_store is not None:
-        return seed_candidate(store, experience_store, review_id)
+        return _seed_from_row(store, experience_store, review_id, seed_row)
     return None
 
 
@@ -164,7 +196,8 @@ def export_overrides_patch(store, review_id: int,
     """ACCEPT 的恢复 → overrides 补丁文本（YAML，单元素）。
 
     H15：**返回文本**，写不写盘由调用方决定；CLI 默认 stdout、--out 落盘，
-    任何路径都不触碰 repository/overrides。
+    任何路径都不触碰 repository/overrides。必填集与 `validate_accept` 同源
+    （`_PATCH_REQUIRED`）——同一条 ACCEPT 的两个消费入口不各持一套规则。
     """
     row = store.get_review(review_id)
     if row is None:
@@ -173,11 +206,7 @@ def export_overrides_patch(store, review_id: int,
         raise ReviewError(
             f"review {review_id} 状态为 {row['review_status']}——只有 ACCEPT "
             f"允许导出（9.5）")
-    for field in ("candidate_target", "screen", "candidate_type"):
-        if not row.get(field):
-            raise ReviewError(
-                f"review {review_id} 的 recovery 行缺 {field}——补丁需要"
-                f"完整定位信息（screen/type/value），缺了就是猜值（12.2）")
+    _require_fields(row, review_id, _PATCH_REQUIRED, "overrides 补丁（H15）")
     element = {
         "schema_version": "1.0",
         "kind": "element",
