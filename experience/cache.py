@@ -18,12 +18,14 @@
 
 cache_key 的五元组**不含 app_build**（设计 7.3 公式原样）——新 build
 不触发失效风暴，某条 Experience 在新 build 下还能不能用，交给
-validated_builds（E7）语义自然消化。⚠️ **当前 Guard 链没有任何 build
-检查步骤**（review_p2_task33 P3-2 定档挂账）：实际行为是「不检查、
-EXECUTE 照常、成功后追 build 记账」（E7）——docstring 曾把「Guard
-BLOCK 记失败样本」当成既有机制，那是错的（照做会在每次 build 变化后
-给每条 Experience 首用记失败样本，污染 E6 滑动窗口）。裁决机制三选一
-已挂账到 plan Task 4.3 接线前置，拍板前**不得**按旧措辞自行实现。
+`validated_builds`（E7）的**记录语义**消化。⚠️ **这不是「Guard 会检查
+build」**（review_p2_task33 P3-2 的三选一已拍板为 **(a) 不检查**，决议记在
+设计 §7.3 修订记录）：Guard 链**没有也不该有** build 检查步骤，实际机制是
+「E1 每次使用都走完整 Guard + E7 执行成功才追 build」——新 build 的首次
+使用天然就是一次完整验证（矩阵 #6）。
+早先的 docstring 把「Guard BLOCK 记失败样本」当成既有机制，**那是错的**：
+照它实现会在每次 build 变化后给每条 Experience 的首用记失败样本，污染
+E6 滑动窗口与成功率，且 4.7 表里没有这一行的位置。
 `clear()` 是显式运维动作，没有自动钩子。
 
 ## 对 7.3 公式的两处登记细化

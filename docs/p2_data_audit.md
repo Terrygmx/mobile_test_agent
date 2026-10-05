@@ -809,3 +809,104 @@ Files 清单只含 verifier/sweeper，不在 `agent/recovery.py` 或 `cli/pipeli
 里改接线。
 
 - 实测：pytest **997 passed**（+48：test_verifier 31 + test_sweeper 17）。
+
+---
+
+## Task 4.3 完成记录（P2 指标：Experience Resolution Rate，设计 17，2026-10-05）
+
+**Objective**：核心指标可观测（G10：随运行次数上升）。
+
+本任务是 M4 最后一项，且带着 plan Task 3.3「接线定档」留下的**两条前置**：
+① 缓存接线（归 Task 4.3）；② `validated_builds` 裁决机制三选一必须先拍板。
+两条都已清（见下）。
+
+### A. 接线前置①：`validated_builds` 裁决机制拍板 = (a) 不检查
+
+三选一（review_p2_task33 P3-2 挂账）的结论是 **(a)**，理由从矩阵 #6 自身推出来：
+
+- **矩阵 #6 的预期是「不直接信任，需走一次完整 Guard+执行验证，成功后追加
+  1026」**。(b)（检查 + BLOCK 不计样本）把 `validated_builds` 从**记录**变成
+  **硬闸门**——集合里没有当前 build 就不能执行，于是「走一次完整验证」永远无法
+  发生（首次使用即被拦），集合永远学不到新 build，成为死锁。而且「因 build 不在
+  集合而拦」既不是 §4.7 的 MISS 语义也不是 FAILURE 语义，4.7 表里没有它的位置；
+  强行加一行会让每次 build 变化后每条 Experience 首用都记失败样本，污染 E6 滑动
+  窗口与成功率。(c)（放行不追记）直接违反 E7 原文「集合只在动作真正执行成功后
+  才追加当前 build」。
+- **(a) 下 §7.3 的「自然裁决」由 E1 + E7 组合实现**：E1 保证每次使用（不论
+  CANDIDATE / VERIFIED）都重新走完整 Runtime Guard；E7 保证执行成功才追 build。
+  新 build 上的首次使用天然就是一次完整验证——正是矩阵 #6。
+- 落地：设计 §7.3 追加**修订记录**（三选一的理由写全）；`experience/cache.py`
+  docstring 改准（删掉「Guard BLOCK 记失败样本」的旧措辞——那是错的）；plan
+  Task 3.3 的定档条目改为「已拍板」，并写明**接线时不得新增 build 检查步骤**。
+
+### B. 接线前置②：Recovery Cache 接进引擎
+
+- `RecoveryEngine(cache=...)`；`cli/main.py` 每次 `mta run` 新建一个
+  `RecoveryCache()`（run 级生命周期：缓存不是权威数据，进程重启即空）。
+- key = `cache_key(app_id, screen_id, element_id, failure_type, fingerprint)`；
+  指纹计算**上移**到 lookup 之前（它是 key 的分量，纯函数、位置无关）。
+- **两条红线**（plan 原文）：
+  ① 命中与未命中**共用同一段**逐候选 Guard + 记账代码——缓存只省 Store 的磁盘
+  lookup；测试用「缓存里有候选但这次 Guard 判 0 匹配」证明命中照样过 Guard 并
+  照常记 FAILURE 样本；
+  ② 缓存存的是 **ranker 的输入候选集**，排序仍在 `rank_experiences` 里发生；
+  测试比较「命中缓存 vs 直接查库」时**第一条被评估的候选 id** 一致。
+- 空列表**不入缓存**（review_p2_task33 P3-1 的黑洞论证）：负缓存会让 Store 侧
+  后增的候选在本进程内永久失明且无任何报错；测试断言「空库 miss 后新增候选，
+  同进程内立刻可见」。
+- **可观测面**：`experience_lookup` 事件新增 `source`（cache|store）与
+  `latency_ms`——延迟梯度指标要能分辨这两段。缓存命中**也发**该事件（它同样是
+  「解析出了候选集」）；Task 2.4 的「没查库不发事件」指 `no_store` /
+  `incomplete_key` 那类**根本没尝试**，语义不冲突（已同步注释与测试）。
+- `cache=None`（不传）时行为与接线前**逐位一致**——有专门测试钉住「无缓存 =
+  每次真查库」，防止隐式缓存。
+
+### C. 指标聚合（纯函数）+ 报告段
+
+- 新增 `report/experience_metrics.py`（**偏离 plan Files 清单**：plan 说改
+  `report/html.py`。指标聚合是纯函数、渲染是字符串拼接，塞进 270 行的
+  `html.py` 会混淆两个职责；拆成独立模块，`html.py` 只注入一段）。
+  - `compute_experience_metrics(...)`：**纯函数**，输入是「已经取出来的行」
+    （steps 的 detail / `experience_*` 事件 / Experience 列表 / 状态事件），
+    不读库不看时钟（E13 精神）。
+  - `collect_experience_metrics(...)`：本模块唯一的 I/O 区，只搬数据不判定。
+  - `render_experience_metrics_section(...)`：HTML 片段。
+- `report/html.py`：`render_run_report(..., experience_metrics=None)`；不传则
+  不带指标段（保持「纯函数、不读库」H18）。
+- `cli/main.py`：`_collect_metrics_if_any(args, pipeline)`——**库文件不存在就
+  不构造 Store**（那说明本次 run 从没碰过经验库），避免「报告顺手把空库建出来」
+  的最小副作用问题（review_p2_task23 P3-6 同款纪律）。
+- `report/junit.py` 的「明细带 `recovered_kind`」**Task 2.4 已落地**（system-out
+  里的 `recovered_kind=`），本次只补一条钉子测试，不重复实现。
+
+### 口径决策（三处必须写清的）
+
+1. **分母 = 全部 Recovery Attempts，取 trace `steps` 的恢复标记，不取事件数。**
+   `experience_lookup` 只覆盖「真的查了库」的尝试；`no_store` / `incomplete_key`
+   / `no_page_source` / `no_find_all` 四类**根本没尝试**（Task 2.4 明文不发
+   事件），拿事件当分母会**系统性高估**命中率。分子同为步骤级
+   （`recovered_kind == RECOVERED_EXPERIENCE`），两边同源同单位。
+   → **对 plan「数据源为 trace `experience_*` 事件 + experience 库」的扩展**：
+   扩到 trace 的 `steps`（同一个库），理由是事件表在语义上无法表达「没查库的
+   attempt」。
+2. **revert 后的「预期恢复」与真回归要分得开**（review_p2_task42 建议动作 #2）：
+   Promotion 被 `git revert` 后，被转正的策略不在 find 链上，每次 run 都稳定
+   多走一次恢复——这不是新回归。可判定信号：`promoted=True` 且本期仍有**成功的**
+   `experience_execution`（说明其策略没在 find 链生效）。单列
+   `promoted_but_recovering` 计数，并在报告里**注明这是推断**（启发式，非事实）。
+3. **延迟梯度只报能测的段**：`cache` / `store` 取 `experience_lookup.latency_ms`
+   按 source 分组；`llm` 取新增的 `llm_call` stage 的 `latency_ms`（只测
+   `complete()` 本身，与 cache/store 的单次操作同量级才谈得上梯度）。
+   `deterministic`（纯进程内，无 I/O 未单独计时）与 `promoted`（P1 find 链上的
+   普通 Locator，耗时在 `steps.latency_ms` 整步里，与恢复期内部单次操作不同
+   量级）**标 N/A 并写明原因，不填 0**——填 0 会被读成「快到测不出」，那是另一
+   种谎。无分母的比率一律渲染 **N/A**，不是 0.0%。
+
+### 实测
+
+- 全量 pytest **1111 passed**（Task 4.3 新增 32 项：`test_report_experience_metrics.py`
+  24 + `test_recovery_cache_wiring.py` 8）。
+- Gate M2 真机复跑全绿（12 项判据、G1 18 passed）——缓存接线是生产路径改动，
+  必须过真机回归。
+  （首跑因网关连续 3 次 `LLM_PROVIDER_ERROR` + 后续 `wait ProfileView` 超时红，
+  复跑即绿；与 2026-10-04 那次同签名，属环境抖动。）

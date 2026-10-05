@@ -326,6 +326,22 @@ def _resolve_app_build(args: argparse.Namespace) -> str:
         return DEFAULT_APP_BUILD
 
 
+def _collect_metrics_if_any(args: argparse.Namespace, pipeline):
+    """报告用的 Experience 指标（Task 4.3 / 设计 17）。
+
+    **库文件不存在就不构造 Store**：那说明本次 run 从没碰过经验库（引擎连
+    `lookup` 都没发过），此时没有任何东西可报，而构造 Store 会在磁盘上留下
+    一个空库文件——「失败却产生新文件」同款的最小副作用纪律
+    （review_p2_task23 P3-6）。返回 None 时报告不带指标段。
+    """
+    if not Path(args.exp_db).exists():
+        return None
+    from report.experience_metrics import collect_experience_metrics
+    return collect_experience_metrics(
+        trace_db=args.db,
+        experience_store=pipeline.recovery.experience_store)
+
+
 def _load_repository(args: argparse.Namespace) -> Repository:
     overrides = getattr(args, "overrides", None)
     generated = getattr(args, "generated", None)
@@ -427,9 +443,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         from llm.provider import LLMProvider
         llm = LLMProvider()
         budget = LLMBudget()
-    pipeline.recovery = RecoveryEngine(repo=repo, llm=llm, budget=budget,
-                                       experience_store=_LazyExperienceStore(
-                                           args.exp_db))
+    # Task 4.3 缓存接线（设计 7.3 / plan Task 3.3 接线定档）：进程内 LRU，
+    # run 级生命周期（每个 `mta run` 一个新实例，跨 run 不共享——缓存不是
+    # 权威数据，进程重启即空）。命中只省 Store 的磁盘 lookup，Guard 与记账
+    # 走同一条代码（E1 延伸）；`validated_builds` 的裁决机制已拍板为「不检查」
+    # （设计 §7.3 修订记录），接线不得新增 build 检查步骤。
+    from experience.cache import RecoveryCache
+    pipeline.recovery = RecoveryEngine(
+        repo=repo, llm=llm, budget=budget, cache=RecoveryCache(),
+        experience_store=_LazyExperienceStore(args.exp_db))
     issues = lint_cases(cases, repo, secrets)
     for i in issues:
         prefix = "ERROR" if i.severity is Severity.ERROR else "WARN "
@@ -626,7 +648,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             executed_steps=lifecycle.steps_recorded,
             wda_restarts=0,
             # 10.5：熔断首页告警
-            llm_broken=(budget.broken if budget is not None else False))
+            llm_broken=(budget.broken if budget is not None else False),
+            # Task 4.3 / 设计 17：Experience 指标段（见 _collect_metrics_if_any）
+            experience_metrics=_collect_metrics_if_any(args, pipeline))
         print(f"html: {args.html}")
 
     for r in run.results:

@@ -191,7 +191,7 @@ M1 审计/Schema(1.5d) ─► M2 Store/Guard(4d) ─► M3 验证/降级(3d) ─
 ### Task 3.3: P2-08 — Recovery Cache
 
 > **⚠️ 接线定档（2026-10-05，Task 3.3 实现时登记；review_p2_task33 P3-2 补充裁决定档项；任务号勘误 4.2→4.3）**：本任务只交付 `experience/cache.py` 模块（plan Files 清单如此），`_try_experiences` 的接线**归 Task 4.3**（指标任务）——其指标需求「lookup/cache/LLM 延迟梯度」要求缓存真实进入执行路径才有数据可测。接线时的两条红线：① 命中路径与未命中路径必须共用同一段 Guard+记账代码（E1：缓存只省 Store 磁盘 lookup，不省 Guard）；② 缓存不得改变 ranker 的输入集语义（缓存的是 ranker 的输入候选集，不是排序结果的应用裁决）。`RecoveryCache.get/put` 均为深拷贝，引擎侧拿到的是副本，记账突变不会污染缓存。
-> **③ validated_builds 裁决机制必须先拍板**（review_p2_task33 P3-2，M3/M4 之间唯一的语义悬案）：设计 7.3 说「交给 Guard 的 validated_builds 检查自然裁决」，但当前 `guard_candidate` 链**没有任何 build 检查步骤**（Task 2.2 设计里也没有），实际行为是「不检查、EXECUTE 照常、成功后追 build」（E7 记账语义）。三选一：(a) 不检查——维持现状，E7 只记账，改掉 cache.py docstring 的「Guard BLOCK」措辞；(b) 检查 + BLOCK 不计样本——需 4.7 表加一行（否则每次 build 变化后每条 Experience 首用都记失败样本，直接污染 E6 滑动窗口与成功率）；(c) 检查 + 放行不追记。拍板后回填设计 §7.3 修订记录并同步 cache.py docstring——接线者不得按 docstring 字面自行实现「BLOCK 记失败样本」。
+> **③ validated_builds 裁决机制——已于 2026-10-05（Task 4.3 接线前）拍板为 (a) 不检查**（review_p2_task33 P3-2 挂账项的收口）：`validated_builds` 是**记录**不是**闸门**——E1 保证每次使用都走完整 Guard、E7 保证执行成功才追 build，二者组合即 §7.3 想表达的「自然裁决」（矩阵 #6：新 build 首用天然是一次完整验证）。(b) 硬 BLOCK 会让矩阵 #6 的「需走完整 Guard+执行验证」永远无法发生（首用即被拦，集合永远学不到新 build），且该 reason 在 4.7 表里没有位置；(c) 不追记违反 E7 原文。决议已回填设计 §7.3 修订记录并同步 `cache.py` docstring，**接线时不得新增 build 检查步骤**。
 
 **Objective:** 设计 7.3：进程内 LRU，命中仍强制走 Guard（E1 延伸：缓存不允许绕过安全校验）。
 

@@ -376,6 +376,29 @@ cache_key = sha256(f"{app_id}|{screen_id}|{target_id}|{failure_type}|{screen_fin
 - 缓存命中依然必须经过 5 节的 Runtime Guard（E1 的延伸，不允许缓存绕过安全校验）。
 - P2 用进程内 LRU 即可，不引入 Redis；缓存失效策略：`app_build` 变化时不整体清空，而是让 Guard 的 `validated_builds` 检查自然决定是否需要重新执行验证。
 
+#### 7.3 修订记录（2026-10-05，Task 4.3 接线前拍板）
+
+**议题**：上一条「交给 Guard 的 `validated_builds` 检查自然裁决」措辞含混——Guard 链里
+**没有也不该有** build 检查步骤（review_p2_task33 P3-2 把三选一挂账到本任务接线前拍板）。
+现拍板为 **(a) 不检查**，并把措辞改准：
+
+- **实际机制**：`validated_builds` 是**记录**，不是**闸门**。E1 已保证每次使用
+  （不论 CANDIDATE / VERIFIED）都重新走完整 Runtime Guard；E7 保证「动作真正执行成功
+  才追加当前 build」。所谓「自然裁决」就是这两条的组合：新 build 上的**首次使用**天然
+  就是一次完整验证（Guard + 执行），成功即入集合——这正是矩阵 #6 的预期
+  「不直接信任，需走一次完整 Guard+执行验证，成功后追加 1026」。
+- **为什么不选 (b)（检查 + BLOCK 不计样本）**：它把记录变成硬闸门——集合里没有当前
+  build 就**不能执行**，于是矩阵 #6 的「需走一次完整 Guard+执行验证」永远无法发生
+  （第一次就被拦），`validated_builds` 变成永远学不到新 build 的死锁。而且「因 build
+  不在集合而拦」既不是「此 Experience 不适用」（§4.7 的 MISS 语义）也不是「用了但
+  错了」（FAILURE 语义），4.7 表里没有它的位置——强行加一行会让每次 build 变化后每条
+  Experience 首用都记失败样本，污染 E6 滑动窗口与成功率。
+- **为什么不选 (c)（检查 + 放行不追记）**：违反 E7 原文「集合只在动作真正执行成功后才
+  追加当前 build」——执行成功却不追记，等于把已验证的 build 从集合里藏起来，下一个
+  使用者又得重新「怀疑」它。
+- **落地影响**：`experience/cache.py` 的 docstring 按此改准（删掉「Guard BLOCK 记失败
+  样本」的旧措辞——那是错的）；引擎接线时**不得**新增 build 检查步骤。
+
 ---
 
 ## 8. Candidate 的产生与过期

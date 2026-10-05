@@ -46,11 +46,16 @@ def render_run_report(
     unexecuted: list[str] | None = None,
     abort_reason: str | None = None,
     llm_broken: bool = False,
+    experience_metrics=None,
 ) -> str:
     """14.5 首页。字段：Total / PASS / RECOVERED / FAIL / INFRA / ENV /
     BLOCKED、LLM 调用数、耗时、LLM Invocation Rate、WDA 重启次数。
 
     Invocation Rate = LLM recovery calls / 已执行 steps（14.7 指标表）。
+
+    `experience_metrics`（Task 4.3 / 设计 17）：`report.experience_metrics`
+    的 `ExperienceMetrics`，由调用方采集后注入——本模块保持「纯函数、不读库」
+    （H18），采集归 `collect_experience_metrics`。
     """
     s = run.summary
     counts = s.counts
@@ -110,6 +115,13 @@ def render_run_report(
         unexec_html = (f'<section class="unexecuted"><h2>未执行用例'
                        f'（套件中止{reason}）</h2><ul>{items}</ul></section>')
 
+    metrics_html = ""
+    if experience_metrics is not None:
+        from report.experience_metrics import (
+            render_experience_metrics_section,
+        )
+        metrics_html = render_experience_metrics_section(experience_metrics)
+
     title = f"mta run 报告 — {run.run_id}"
     return f"""<!doctype html>
 <html lang="zh"><head><meta charset="utf-8">
@@ -136,6 +148,12 @@ th, td {{ border: 1px solid #ddd; padding: 6px 10px; text-align: left;
 .st-error {{ background: #fdd8b5; }}
 .st-skip {{ background: #e2e3e5; }}
 .unexecuted {{ margin-top: 24px; color: #a15c00; }}
+.exp-metrics {{ margin-top: 28px; }}
+.exp-metrics h2 {{ font-size: 17px; }}
+.exp-metrics .note {{ color: #666; font-size: 12px; line-height: 1.6; }}
+.c-exp-verified {{ border-color: #2f855a; background: #eaf7ef; }}
+.c-exp-degraded {{ border-color: #e6a817; background: #fff8e6; }}
+.c-exp-rejected {{ border-color: #999; background: #f2f2f2; }}
 </style></head><body>
 <h1>{_esc(title)}</h1>
 <p>run_id: <code>{_esc(run.run_id)}</code>
@@ -149,6 +167,7 @@ th, td {{ border: 1px solid #ddd; padding: 6px 10px; text-align: left;
 {''.join(rows) or '<tr><td colspan="8">（无用例执行）</td></tr>'}
 </tbody></table>
 {unexec_html}
+{metrics_html}
 </body></html>"""
 
 

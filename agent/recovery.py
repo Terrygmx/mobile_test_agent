@@ -152,6 +152,7 @@ from agent.context import (          # noqa: E402
 # 直接 import 单一真值源（context.py 只 re-export 兼容旧路径）。
 # P1 的 EmptyExperienceStore 占位已在 Task 2.4 退役（旧签名 build≠app_id）。
 from experience.store import ExperienceStore   # noqa: E402
+from experience.cache import RecoveryCache, cache_key  # noqa: E402
 from experience.ranker import rank_experiences   # noqa: E402
 from agent.policy import (           # noqa: E402
     RecoveryAction,
@@ -282,6 +283,7 @@ class RecoveryEngine:
                  llm=None,
                  budget: LLMBudget | None = None,
                  guard=None,
+                 cache: RecoveryCache | None = None,
                  sleep=time.sleep) -> None:
         self.config = config or RecoveryConfig()
         self.repo = repo
@@ -295,6 +297,10 @@ class RecoveryEngine:
         self.llm = llm
         self.budget = budget
         self.guard = guard
+        # Task 4.3：Recovery Cache（设计 7.3）。None = 不启用缓存——此时
+        # 每次恢复都真查 Store，行为与接线前**逐位一致**（缓存是加速层，
+        # 不是语义层：命中与否不改变任何 Guard 判定与记账）。
+        self.cache = cache
         self._sleep = sleep
 
     @staticmethod
@@ -640,16 +646,47 @@ class RecoveryEngine:
             # 写成假失败样本（4.7 里 NOT_FOUND 是要计入失败率的）。宁可不查。
             stages.append({"stage": "experience", "outcome": "no_find_all"})
             return None
-        try:
-            candidates = self.experience_store.lookup(
-                ctx.app_id, ctx.screen_id or "", ctx.element_id)
-        except Exception as e:  # noqa: BLE001 — 读库故障不伪装成「没有经验」
-            stages.append({"stage": "experience",
-                           "outcome": f"lookup_error:{type(e).__name__}"})
-            return None
+        # 指纹上移到 lookup 之前：它是 cache_key 的一个分量（设计 7.3 公式），
+        # 而 cache_key 要在查库**之前**算出来。纯函数、无副作用，位置无关。
+        fingerprint = screen_fingerprint(page_red)
+        # Task 4.3 缓存接线（设计 7.3 / plan Task 3.3 接线定档）。两条红线：
+        #   ① 命中与未命中**共用下面同一段**逐候选 Guard + 记账代码——缓存
+        #      只省掉 Store 的那次磁盘 lookup，不省任何校验（E1 延伸）；
+        #   ② 缓存存的是 **ranker 的输入候选集**，排序仍在下面 `rank_experiences`
+        #      里发生——缓存不改变候选集语义（红线②）。
+        key = (cache_key(ctx.app_id, ctx.screen_id, ctx.element_id,
+                         ctx.failure_type, fingerprint)
+               if self.cache is not None else None)
+        cached = None
+        if self.cache is not None:
+            t_cache = time.monotonic()
+            cached = self.cache.get(key)
+            cache_ms = int((time.monotonic() - t_cache) * 1000)
+        if cached is not None:
+            candidates, source, lookup_ms = cached, "cache", cache_ms
+        else:
+            try:
+                t_store = time.monotonic()
+                candidates = self.experience_store.lookup(
+                    ctx.app_id, ctx.screen_id or "", ctx.element_id)
+                lookup_ms = int((time.monotonic() - t_store) * 1000)
+            except Exception as e:  # noqa: BLE001 — 读库故障不伪装成「没有经验」
+                stages.append({"stage": "experience",
+                               "outcome": f"lookup_error:{type(e).__name__}"})
+                return None
+            source = "store"
+            # 空列表**不缓存**（review_p2_task33 P3-1 的黑洞论证）：负缓存会让
+            # Store 侧后增的候选在本进程内永久失明，且没有任何报错。
+            if candidates and key is not None:
+                self.cache.put(key, candidates)
+        # `source` 让「延迟梯度」指标（设计 17）能分辨 cache 与 store 两段；
+        # 缓存命中**也发**本事件——它同样是「解析出了候选集」，只是来源不同。
+        # （Task 2.4 的「没查库不发事件」指 no_store / incomplete_key 那类
+        # **根本没尝试**，与本处语义不冲突。）
         self._emit(events, "experience_lookup",
                    app_id=ctx.app_id, screen_id=ctx.screen_id,
-                   target_id=ctx.element_id, candidates=len(candidates))
+                   target_id=ctx.element_id, candidates=len(candidates),
+                   source=source, latency_ms=lookup_ms)
         if not candidates:
             stages.append({"stage": "experience", "outcome": "miss"})
             self._emit(events, "experience_miss",
@@ -657,10 +694,9 @@ class RecoveryEngine:
                        target_id=ctx.element_id)
             return None
         stages.append({"stage": "experience", "outcome": "hit",
-                       "count": len(candidates)})
+                       "count": len(candidates), "source": source})
 
         current_screen_id = self._current_screen_id(screen_res, ctx)
-        fingerprint = screen_fingerprint(page_red)
         for exp in rank_experiences(candidates):
             hit = self._try_one_experience(
                 ctx, exp, stages, current_screen_id, fingerprint, samples,
@@ -989,11 +1025,20 @@ class RecoveryEngine:
                  else ctx.screen_id) or ""),
             page_source=untrusted)
         try:
+            t_llm = time.monotonic()
             raw = self.llm.complete(prompt, timeout=timeout)
         except Exception as e:  # noqa: BLE001 — provider 故障如实分类
+            stages.append({"stage": "llm_call", "outcome": "error",
+                           "latency_ms": int((time.monotonic() - t_llm) * 1000)})
             return miss("LLM_PROVIDER_ERROR",
                         {"stage": "llm", "outcome": "LLM_PROVIDER_ERROR",
                          "error": f"{type(e).__name__}: {e}"})
+        # Task 4.3：LLM 调用的实测耗时单独成一条 stage——设计 17 的
+        # 「lookup/cache/LLM 延迟梯度」需要一个**可比**的 LLM 段数字。
+        # 只测 `complete()` 本身（不含 prompt 组装/解析），与 cache/store 的
+        # 单次操作耗时同量级，才谈得上梯度。
+        stages.append({"stage": "llm_call", "outcome": "ok",
+                       "latency_ms": int((time.monotonic() - t_llm) * 1000)})
 
         parsed = parse_llm_output(raw)
         if parsed.ignored_fields:

@@ -725,8 +725,13 @@ def test_hit_path_emits_lookup_hit_execution(store):
     assert _event_types(r) == ["experience_lookup", "experience_hit",
                                "experience_execution"]
     lookup = _events(r)[0]["detail"]
-    assert lookup == {"app_id": APP, "screen_id": "HomeView",
-                      "target_id": "login_button", "candidates": 1}
+    assert {k: lookup[k] for k in ("app_id", "screen_id", "target_id",
+                                   "candidates")} == {
+        "app_id": APP, "screen_id": "HomeView", "target_id": "login_button",
+        "candidates": 1}
+    # Task 4.3：lookup 事件带来源与耗时（延迟梯度指标要能分辨 cache/store）
+    assert lookup["source"] == "store", "未启用缓存 → 来源是 store"
+    assert isinstance(lookup["latency_ms"], int) and lookup["latency_ms"] >= 0
     hit = _events(r)[1]["detail"]
     assert hit["experience_id"] and hit["status_before"] == "CANDIDATE"
     assert hit["screen_match"] is True and hit["uniqueness_count"] == 1
