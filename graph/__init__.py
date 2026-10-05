@@ -37,8 +37,9 @@ from graph.storage import (
     build_and_store,
 )
 
-# 与 experience 侧 DEFAULT_EXPERIENCE_DB 同款单点定义：CLI 的 --graph-db
-# 默认值直接 import，两处字面量必漂移。
+# 与 experience 侧 DEFAULT_EXPERIENCE_DB 同款单点定义。⚠️ **当前零消费者**：
+# `mta graph`（含 `--graph-db`）是 Task 5.3 的交付物——本常量是**预留的单点**，
+# 届时 CLI 直接 import，避免两处字面量漂移。
 DEFAULT_GRAPH_DB = Path("out/graph.db")
 
 __all__ = [

@@ -247,8 +247,13 @@ def test_consecutive_same_screen_does_not_create_self_loop():
     assert g.transitions == (), "但不该有 HomeView → HomeView 的自环"
 
 
-def test_recovery_and_wait_on_the_same_step_dedupe():
-    """同一步同时给出两类证据 → 节点只 +1，evidence 记两类。"""
+def test_recovery_and_wait_on_the_same_step_count_as_one_visit():
+    """同一步对同一屏的两类证据 = **一次访问**（evidence 记两类）。
+
+    `visit_count` 是**访问次数**不是「观测条数」（review_p2_task51 P3-2 定死）：
+    人只到了一次，只是被两条途径看到。早先的实现每类证据各 +1，同一步同屏会记
+    成 2 次——语义未定义，且 `summary()["visits"]` 会被读成访问量。
+    """
     step = TraceStep(
         testcase_run_id=1, step_index=0, step_type="wait_for",
         target_id="screen:LoginView", status="SUCCESS",
@@ -258,10 +263,29 @@ def test_recovery_and_wait_on_the_same_step_dedupe():
     g = build_runtime_graph([step])
 
     assert len(g.nodes) == 1
-    assert g.node("LoginView").visit_count == 2, \
-        "两条观测都算访问（证据不同）"
+    assert g.node("LoginView").visit_count == 1, "一次访问，不是两条证据"
     assert set(g.node("LoginView").evidence) == {"wait_screen",
                                                 "recovery_observed"}
+
+
+def test_one_step_two_different_screens_prefers_wait_screen():
+    """一步观测到两个**不同**屏 → 以 `wait_screen` 为准，且不产伪转移。
+
+    人不可能同时站在两个屏上；`wait_screen` 是被 wait 引擎**校验过**的那个。
+    不收口的话会生成一条 `trigger` 为空的 `A→B` 伪转移——它既进不了 §12.2 的
+    CHANGED（无从连接），也不是真实导航（review_p2_task51 P3-3）。
+    """
+    step = TraceStep(
+        testcase_run_id=1, step_index=0, step_type="wait_for",
+        target_id="screen:HomeView", status="SUCCESS",
+        detail={"recovery": {"stages": [
+            {"stage": "screen", "outcome": "FOUND", "screen": "LoginView"}]}},
+        observed_at="2026-10-05T10:00:00Z")
+    g = build_runtime_graph([step])
+
+    assert g.screens == ("HomeView",), "wait_screen 胜出"
+    assert g.transitions == (), "不产 trigger 为空的伪转移"
+    assert g.node("HomeView").visit_count == 1
 
 
 # --- 纯谓词 -----------------------------------------------------------------
@@ -427,3 +451,46 @@ def test_summary_counts_without_recomputing(tmp_path):
     assert s["visits"] == 3
     assert s["screens"] == ["HomeView", "LoginView", "ProfileView"]
     assert s["app_build"] == BUILD
+
+
+def test_upsert_source_graph_does_not_clear_runtime_rows(tmp_path):
+    """P2-1 钉子：先写 runtime 图、再写 source 图 → **runtime 行仍在**。
+
+    早先 `upsert_graph` 的两条 DELETE 把 `source_of` 硬编码成常量 `RUNTIME`，
+    与自身 docstring 承诺的「按 `(app_id, app_build, source_of)` 整体替换」
+    矛盾——写声明面会**静默清空**观察面（探针实测 runtime 2→0）。
+
+    为什么现在必须钉住：Task 5.2 的交付物正是 source 图，而 `RuntimeGraph` 与
+    `ScreenNode.source_of` 本就是为两个来源设计的同结构值，复用
+    `upsert_graph` 是最自然的落法——不修就踩雷。
+    """
+    gdb = tmp_path / "graph.db"
+    store = GraphStore(gdb)
+    store.upsert_graph(build_and_store(_trace(tmp_path), gdb))
+    assert len(store.load_graph(APP, BUILD, RUNTIME).nodes) == 3
+
+    from graph.models import SOURCE, RuntimeGraph, ScreenNode
+    store.upsert_graph(RuntimeGraph(
+        app_id=APP, app_build=BUILD, source_of=SOURCE,
+        nodes=(ScreenNode(screen_id="DeclaredView", source_of=SOURCE,
+                          evidence=("source_declared",)),)))
+
+    assert len(store.load_graph(APP, BUILD, RUNTIME).nodes) == 3, \
+        "写 source 图不得动 runtime 行"
+    assert store.load_graph(APP, BUILD, SOURCE).screens == ("DeclaredView",)
+
+
+def test_runtime_graph_rejects_mixed_source_of():
+    """图级 source_of 与行级不一致 → fail-loud（混来源会写错替换范围）。"""
+    from graph.models import RUNTIME, SOURCE, RuntimeGraph, ScreenNode
+    with pytest.raises(ValueError, match="不一致"):
+        RuntimeGraph(app_id=APP, app_build=BUILD, source_of=RUNTIME,
+                     nodes=(ScreenNode(screen_id="X", source_of=SOURCE),))
+
+
+def test_load_graph_carries_the_scope_source_of(tmp_path):
+    """读回的图带上自己的 source_of（不是恒 RUNTIME）。"""
+    from graph.models import SOURCE
+    gdb = tmp_path / "graph.db"
+    GraphStore(gdb)
+    assert GraphStore(gdb).load_graph(APP, "9999", SOURCE).source_of == SOURCE

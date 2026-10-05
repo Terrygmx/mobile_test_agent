@@ -1236,3 +1236,83 @@ docstring 互相指认。
   得 3 节点 2 转移——`LoginView`（`recovery_observed`）→`HomeView`
   （`tap:login_button` 触发）→`ProfileView`（`tap:go_profile` 触发），与用例实际
   路径一致。
+
+---
+
+## Task 5.1 评审修订记录（review_p2_task51 收口，2026-10-05）
+
+评审「有条件通过」，1×P2 + 3×P3 + 两条文档小修。**P2-1 被明确要求「在开 Task 5.2
+之前修」**——5.2 的交付物正是 source 图，而 `upsert_graph` 的 docstring 主动写着
+「按 `(app_id, app_build, source_of)` 整体替换」，等于邀请复用；不修就踩雷。
+
+### P2-1 `upsert_graph` 的 DELETE 硬编码 `source_of=RUNTIME` → 写 source 图会静默清空 runtime 图
+
+- 症状：两条 DELETE 把 `source_of` 写死成常量 `RUNTIME`，与自身 docstring 承诺
+  的「按 source_of 整体替换」矛盾。传入 `source_of=SOURCE` 的图时执行顺序是
+  「先删掉同 scope 的 **runtime** 行 → 再插 source 行」——写**声明面**把**观察面**
+  静默清空（探针实测 runtime 2→0）。这不是「覆盖了另一个范围」，是数据丢失。
+- 修法：**给 `RuntimeGraph` 加图级 `source_of`**（`__post_init__` 校验它与每个
+  节点/转移的 `source_of` 一致），DELETE 用 `graph.source_of`。
+  为什么不用 `nodes[0].source_of`：**空图**也要能回答「我要替换的是哪一面」，
+  靠首节点在空图上会退化成 RUNTIME——那正是本 bug 的根因形态。
+- 探针复现（真 `GraphStore` + 真 SQLite）：写完 runtime（2 节点）→ 再写 source
+  → `runtime=2, source=1`（修复前是 `runtime=0`）；再重写 runtime 幂等，
+  source 面不受影响。补 3 条钉子测试（写 source 不动 runtime / 混来源 fail-loud /
+  `load_graph` 带回自己的 `source_of`）。
+
+### P3-1 测试重复定义（本轮 + 存量，共 5 处）
+
+- 本轮：`test_cli_run.py` 的 2 个新测试各定义两次（4 def / 2 唯一；文件 43 def
+  但 pytest 只收集 38）；`test_graph_builder.py` 的 3 个 P2-1 钉子测试各两次。
+- 存量（**非本次引入**）：`test_resolve_app_build_reads_metadata_build` /
+  `..._falls_back_without_metadata` / `..._falls_back_on_bad_json` 在 `de801ef`
+  时就已是重复名。
+- 这是**同一类缺陷第三次**发生（前两次：`test_report_experience_metrics.py`
+  56 行 ×2、`test_cli_run.py` 的 CLI 块 ×2），根因都是「`cat >>` 追加被重复执行」。
+- 修法：改用 `ast` 定位顶层 `FunctionDef` 并按名字去重（逐字节相同的删一份；
+  不同的保留**后者**——那是 Python 实际生效的那份），连带删掉函数前的装饰器与
+  尾随空行；辅助函数 `_ns` 的重复也一并清掉。
+- **固化体检**：全仓 `tests/**.py` 跑一遍「`def` 名重复」扫描，现在**零重复**
+  （四个重点文件 def 数与唯一数一致：graph 27/27、cli_run 38/38、cache_wiring
+  9/9、experience_metrics 33/33）。
+
+### P3-2 `visit_count` 语义未定义（同一步两类证据记 2 次）
+
+- 症状：同一步对同一屏给出 `wait_screen` + `recovery_observed` 时，每条观测各
+  `+1` → `visit_count=2`；而测试名 `..._dedupe` 与断言（`== 2`）相反。
+- 修法：**把语义定死为「访问次数」**（写进 `ScreenNode` docstring）——人只到了一
+  次，只是被两条途径看到；`observed_screens` 现在把**同一步同一屏**的证据合并成
+  一条（`evidence` 取并集）。测试改名 `..._count_as_one_visit` 并断言 `== 1`。
+
+### P3-3 一步观测到两个**不同**屏 → 凭空生成 `trigger` 为空的伪转移
+
+- 症状：一步同时给出 `wait_screen A` 与 `recovery_observed B`（A≠B）时，`zip`
+  据并排的两条观测产出一条 `A→B` 转移且 `trigger=""`——既进不了 §12.2 的 CHANGED
+  （无从连接），也不是真实导航。
+- 修法：**同一步内多屏时以 `wait_screen` 为准**（人不可能同时站在两个屏上，而
+  `wait_screen` 是被 wait 引擎**校验过**的那一个），其余丢弃；多类恢复证据的
+  退化情形取字典序首个（确定性）。补专测断言「只出 `wait_screen` 那一屏、
+  无伪转移」。
+
+### 文档小修
+
+- `DEFAULT_GRAPH_DB` 的注释改成事实：标注「**当前零消费者**，`mta graph` 是
+  Task 5.3 的交付物——本常量是预留的单点」（原文用现在时，读起来像已经接好）。
+- `read_trace_steps` 与 plan Task 5.3 各补一条**操作提示**：2026-10-05 之前产生的
+  trace 里 `runs.app_build` 是空串，与修复后的新 run 混库会**必然**触发
+  「多个 (app_id, app_build) 范围」fail-loud——CLI help 要写明「显式传
+  `app_build=` 或分库」。这是有意的安全行为，不是 bug。
+
+### 未处理（登记，均为已接受项）
+
+评审 §4 的五条存疑全部为已登记的可接受项：`graph_diffs` 零消费者（Task 5.3 才
+用，plan 要求三表同批冻结）、旧-新 trace 混库 fail-loud（有意的安全行为，已加操作
+提示）、`_min_ts/_max_ts` 的字典序比较假设同格式 UTC（docstring 已声明，实测当前
+成立）、`is_screen_wait` 把 `RECOVERED` 计入成功（语义合理，设计无明文，按实现
+解读）。
+
+### 实测
+
+- 全量 pytest **1150 passed**（Task 5.1 首次交付 1146 → 修订后 +4：3 条 P2-1 钉子
+  + 1 条 P3-3 专测；P3-2 的断言改写不增减数量）。
+- P2-1 探针复现通过（见上）；全仓测试文件重复定义扫描**零命中**。

@@ -41,7 +41,14 @@ EVIDENCE_SOURCE_DECLARED = "source_declared"
 
 @dataclass(frozen=True)
 class ScreenNode:
-    """一个被观测到（或声明）的屏。"""
+    """一个被观测到（或声明）的屏。
+
+    `visit_count` 的语义（review_p2_task51 P3-2 定死）：**访问次数**，不是
+    「观测条数」——同一步内对同一个屏的两类证据（`wait_screen` +
+    `recovery_observed`）只算**一次**访问（人只到了一次），但 `evidence` 会把
+    两类都记下来。把它定义成「观测条数」会让 `summary()["visits"]` 变成
+    「证据条数」的同义词，读者会以为是访问量。
+    """
 
     screen_id: str
     source_of: str = RUNTIME
@@ -83,12 +90,29 @@ class ScreenTransition:
 
 @dataclass(frozen=True)
 class RuntimeGraph:
-    """一次构建的产物：节点 + 转移（都限定在同一个 `(app_id, app_build)` 范围）。"""
+    """一次构建的产物：节点 + 转移（都限定在同一个 `(app_id, app_build)` 范围）。
+
+    `source_of` 是**图级的范围**（`runtime` / `source`），与每个节点自带的
+    `source_of` 是同一个值（`__post_init__` 校验一致）。为什么要图级字段：
+    落库的「按范围整体替换」需要一个**在没有节点时也成立**的来源——空图也得
+    能回答「我要替换的是哪一面」，靠 `nodes[0].source_of` 在空图上会退化成
+    RUNTIME（review_p2_task51 P2-1 的根因就是这个退化）。
+    """
 
     app_id: str = ""
     app_build: str = ""
+    source_of: str = RUNTIME
     nodes: tuple[ScreenNode, ...] = ()
     transitions: tuple[ScreenTransition, ...] = ()
+
+    def __post_init__(self) -> None:
+        # 图级来源与行级来源必须一致：不一致说明构造方在混来源，
+        # 而落库的替换范围按图级字段算——混来源会静默写错范围。
+        for item in (*self.nodes, *self.transitions):
+            if item.source_of != self.source_of:
+                raise ValueError(
+                    f"图级 source_of={self.source_of!r} 与条目 {item!r} 的"
+                    f" source_of={item.source_of!r} 不一致")
 
     def node(self, screen_id: str) -> ScreenNode | None:
         for n in self.nodes:

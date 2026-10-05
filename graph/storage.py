@@ -65,14 +65,17 @@ class GraphStore:
         conn = self._connect()
         try:
             with conn:      # 单事务
+                # 替换范围用**图自身的** source_of，不是常量 RUNTIME
+                # （review_p2_task51 P2-1：硬编码会让写 source 图时先删掉同
+                # scope 的 runtime 行——声明面静默清空观察面）。
                 conn.execute(
                     "DELETE FROM screen_nodes WHERE app_id=? AND app_build=?"
                     " AND source_of=?",
-                    (graph.app_id, graph.app_build, RUNTIME))
+                    (graph.app_id, graph.app_build, graph.source_of))
                 conn.execute(
                     "DELETE FROM screen_transitions WHERE app_id=?"
                     " AND app_build=? AND source_of=?",
-                    (graph.app_id, graph.app_build, RUNTIME))
+                    (graph.app_id, graph.app_build, graph.source_of))
                 conn.executemany(
                     "INSERT INTO screen_nodes (app_id, app_build, screen_id,"
                     " source_of, visit_count, evidence, first_seen, last_seen)"
@@ -111,7 +114,7 @@ class GraphStore:
         finally:
             conn.close()
         return RuntimeGraph(
-            app_id=app_id, app_build=app_build,
+            app_id=app_id, app_build=app_build, source_of=source_of,
             nodes=tuple(
                 ScreenNode(screen_id=r["screen_id"], source_of=r["source_of"],
                            visit_count=r["visit_count"],

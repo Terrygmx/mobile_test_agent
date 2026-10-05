@@ -70,20 +70,39 @@ def is_screen_wait(step: TraceStep) -> bool:
 
 
 def observed_screens(step: TraceStep) -> list[tuple[str, str]]:
-    """这一步给出的屏观测 `[(screen_id, evidence), ...]`（可能为空/多条）。
+    """这一步给出的屏观测 `[(screen_id, evidence), ...]`。
 
-    纯函数、无副作用；两类证据的来源见模块 docstring。失败步骤（status 不在
-    `SUCCESS`/`RECOVERED`）的 `wait_for` 不算——**等待超时意味着没到达**。
+    纯函数、无副作用；两类证据的来源见模块 docstring。三条纪律：
+
+    1. 失败步骤（status 不在 `SUCCESS`/`RECOVERED`）的 `wait_for` 不算——
+       **等待超时意味着没到达**；
+    2. **同一步内同一屏的两类证据合并成一条**（证据取并集）——一次访问不因
+       「被两条途径看到」而变成两次（review_p2_task51 P3-2）；
+    3. **同一步内出现两个不同屏时以 `wait_screen` 为准**，其余丢弃——人不可能
+       同时站在两个屏上，而 `wait_screen` 是**被 wait 引擎校验过**的那一个。
+       不这么收口的话会凭空生成一条 `trigger` 为空的伪转移（review_p2_task51
+       P3-3）：那条转移既进不了 §12.2 的 CHANGED（无从连接），也不是真实导航。
     """
-    out: list[tuple[str, str]] = []
+    merged: dict[str, list[str]] = {}
     if is_screen_wait(step):
-        out.append((step.target_id[len(SCREEN_TARGET_PREFIX):],
-                    EVIDENCE_WAIT_SCREEN))
+        merged.setdefault(step.target_id[len(SCREEN_TARGET_PREFIX):],
+                          []).append(EVIDENCE_WAIT_SCREEN)
     for st in _stages(step.detail):
         if (st.get("stage") == "screen" and st.get("outcome") == "FOUND"
                 and st.get("screen")):
-            out.append((st["screen"], EVIDENCE_RECOVERY_OBSERVED))
-    return out
+            merged.setdefault(st["screen"], []).append(
+                EVIDENCE_RECOVERY_OBSERVED)
+    if not merged:
+        return []
+    if len(merged) > 1:
+        wait = [s for s, evs in merged.items() if EVIDENCE_WAIT_SCREEN in evs]
+        if wait:
+            merged = {wait[0]: merged[wait[0]]}
+        else:       # 只有多类恢复证据（理论上不会出现）→ 取字典序首个，确定性
+            first = sorted(merged)[0]
+            merged = {first: merged[first]}
+    return [(screen, ",".join(sorted(set(evs))))
+            for screen, evs in merged.items()]
 
 
 def _stages(detail: dict | None) -> list[dict]:
@@ -131,8 +150,10 @@ def build_runtime_graph(steps: list[TraceStep], *, app_id: str = "",
         for screen, evidence, at, _ in observations:
             slot = nodes.setdefault(screen, {"count": 0, "evidence": set(),
                                              "first": None, "last": None})
+            # `observations` 已保证「一步一屏一条」（observed_screens 合并过），
+            # 所以这里每条 = 一次**访问**（`visit_count` 的语义见 models）。
             slot["count"] += 1
-            slot["evidence"].add(evidence)
+            slot["evidence"].update(evidence.split(","))
             slot["first"] = _min_ts(slot["first"], at)
             slot["last"] = _max_ts(slot["last"], at)
 
@@ -148,7 +169,7 @@ def build_runtime_graph(steps: list[TraceStep], *, app_id: str = "",
             slot["last"] = _max_ts(slot["last"], at_b or at_a)
 
     return RuntimeGraph(
-        app_id=app_id, app_build=app_build,
+        app_id=app_id, app_build=app_build, source_of=RUNTIME,
         nodes=tuple(
             ScreenNode(screen_id=s, source_of=RUNTIME,
                        visit_count=v["count"],
@@ -190,6 +211,12 @@ def read_trace_steps(trace_db: str | Path, *,
     `app_build=None` 时取库里**全部** run，但要求它们的 `(app_id, app_build)`
     一致——两个 build 的屏混进同一张图是错的（diff 的 base/build 语义会失效），
     所以混了直接 fail-loud 而不是挑一个。
+
+    ⚠️ **操作提示**：2026-10-05 之前产生的 trace（`runs.app_build` 从未被写入，
+    见 `docs/p2_data_audit.md` 的 Task 5.1 记录）该列是**空串**，与修复后的新
+    run（有 build id）混在同一个库里会**必然**触发上面这条 fail-loud。此时要么
+    显式传 `app_build=`，要么把新 run 写到另一个 trace 库——这不是 bug，是
+    「两个范围不许混进一张图」的判定在起作用。
 
     时间取所属 testcase_run 的 `end_time`（缺则 `start_time`）；`steps` 表本身
     没有时间戳（P1 schema 如此），不假装更细。

@@ -317,6 +317,11 @@ M1 审计/Schema(1.5d) ─► M2 Store/Guard(4d) ─► M3 验证/降级(3d) ─
 > 两条路径都记，含两条专测）——本任务直接消费即可，无需再改。
 > 另：`graph.build` 的 `--from-trace` 语义是**trace 全量**（不是单个 run），
 > 图的权威输入即全量，重跑必须幂等（`upsert_graph` 已按范围整体替换）。
+>
+> **⚠️ 操作提示（Task 5.1 实测）**：2026-10-05 之前产生的 trace 里
+> `runs.app_build` 是**空串**（该列当时从未被写入），与修复后的新 run 混在同一个
+> 库会**必然**触发 `read_trace_steps` 的「多个 (app_id, app_build) 范围」fail-loud
+> ——CLI 的 help 要写明：显式传 `app_build=` 或把新 run 写到另一个 trace 库。
 
 **Objective:** 设计 12.2 / 12.3：五类分类 + build-to-build + `mta graph` CLI。
 
