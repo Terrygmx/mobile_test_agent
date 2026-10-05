@@ -210,6 +210,41 @@ def test_approve_merges_into_existing_override_doc(store, repo_root):
     assert store.get_experience(exp_id).promoted is True
 
 
+def test_approve_merge_preserves_hand_written_comments(store, repo_root):
+    """P2-1（review_p2_task42）：并入用**行级手术**——手写 overrides 的
+    头注释与行内注释逐字节保留（注释承载出处/理由/幂等声明，yaml 重
+    序列化会静默抹掉它们，属人的数据丢失）。"""
+    exp_id = _verified(store)
+    lv = repo_root / "repository" / "overrides" / "elements"
+    lv.mkdir(parents=True)
+    before = (
+        "# LoginView 手写元素（M1 起点；改动走人工 review）\n"
+        "# login_button 的 idempotency 声明：H7 非幂等不重试\n"
+        "schema_version: \"1.0\"\n"
+        "kind: element\n"
+        "id: login_button  # 源码 LoginDemoApp.swift:58\n"
+        "screen: HomeView\n"
+        "type: button\n"
+        "strategies:\n"
+        "  - {type: accessibility_id, value: manual_v1, origin: manual}\n")
+    (lv / "HomeView.yaml").write_text(before, encoding="utf-8")
+    p = generate_proposal(store, store.get_experience(exp_id))
+
+    approve_proposal(store, p.proposal_id, repo_root=repo_root)
+
+    after = (lv / "HomeView.yaml").read_text(encoding="utf-8")
+    assert before.splitlines()[0] in after, "头注释保留"
+    assert "H7 非幂等不重试" in after, "行内理由注释保留"
+    assert "源码 LoginDemoApp.swift:58" in after, "id 行内注释保留"
+    import yaml
+    docs = [d for d in yaml.safe_load_all(after) if d]
+    assert len(docs) == 1
+    assert ("experience", "v2") in [(s["origin"], s["value"])
+                                    for s in docs[0]["strategies"]]
+    # 既有字节除插入行外不动（git diff = 纯新增）
+    assert before in after, "原文全文保留（插入式，非重排）"
+
+
 def test_approve_refuses_duplicate_experience_strategy(store, repo_root):
     """同 id 文档已含相同 experience 策略 → 重复 promote，fail-loud
     （不重复追加，proposal 保持 PENDING）。"""
@@ -277,7 +312,7 @@ def test_approve_git_failure_rolls_back_file_write(store, repo_root,
 def test_approve_detects_id_with_trailing_comment(store, repo_root):
     """P3-2（review_p2_task41）：`id: login_button  # 备注` 也要命中同 id
     检查——漏检会追加出同 id 双文档（loader 后者胜，静默覆盖）。定档修订
-    后命中 → **并入**该文档（yaml round-trip 会丢行内注释，git diff 可见）。"""
+    后命中 → **并入**该文档，行内注释逐字节保留（P2-1 手术式插入）。"""
     exp_id = _verified(store)
     lv = repo_root / "repository" / "overrides" / "elements"
     lv.mkdir(parents=True)
@@ -291,12 +326,13 @@ def test_approve_detects_id_with_trailing_comment(store, repo_root):
     approved, sha = approve_proposal(store, p.proposal_id,
                                      repo_root=repo_root)
 
+    text = (lv / "HomeView.yaml").read_text(encoding="utf-8")
     import yaml
-    docs = [d for d in yaml.safe_load_all(
-        (lv / "HomeView.yaml").read_text(encoding="utf-8")) if d]
+    docs = [d for d in yaml.safe_load_all(text) if d]
     assert len(docs) == 1, "注释行没漏检——并入单文档而非追加双 doc"
     assert ("experience", "v2") in [(s["origin"], s["value"])
                                     for s in docs[0]["strategies"]]
+    assert "人工备注" in text, "行内注释保留"
     assert approved.status == "APPROVED"
 
 

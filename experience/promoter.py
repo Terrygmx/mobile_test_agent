@@ -26,6 +26,7 @@
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -141,31 +142,74 @@ def _merge_experience_strategy(target: Path, exp: Experience) -> None:
     并入 = 在该文档的 strategies **链尾**追加一条 origin: experience——
     单文档不产同 id 双 doc（loader 后者胜的静默覆盖不存在了），git diff
     可审计；resolver 的 origin 稳定排序保证它落在尝试链尾（9.2）。
-    已含相同 experience 策略 → 重复 promote，fail-loud。
+
+    **注释保全（review_p2_task42 P2-1）**：写入用**行级手术**（定位 strategies
+    块尾插一行，其余字节不动）——overrides 是「人的策略判断」层（5.1），
+    注释承载出处/理由/幂等声明，整文件 yaml 重序列化会把它们静默抹掉。
+    yaml 解析只用于**只读**的重复检测。解析不了 strategies 块（如 flow
+    风格 `strategies: []`）→ fail-loud，不做静默重序列化。
+
+    已含相同 experience 策略 → 重复 promote，fail-loud；同 id 不同 value
+    的再次 promote 会**再追加一条**——多次漂移转正 = 多条 experience 回落
+    策略并存（合法形态，resolver 排序处理尝试顺序）。
     """
     import yaml
 
-    docs = [d for d in yaml.safe_load_all(
-        target.read_text(encoding="utf-8")) if d]
-    for doc in docs:
+    text = target.read_text(encoding="utf-8")
+    seen = False
+    for doc in yaml.safe_load_all(text):
+        if not doc:
+            continue
         if doc.get("kind") == "element" and doc.get("id") == exp.target_id:
-            strategies = doc.setdefault("strategies", [])
+            seen = True
             if any(s.get("origin") == "experience"
                    and s.get("value") == exp.strategy.value
-                   for s in strategies):
+                   for s in doc.get("strategies", [])):
                 raise ValueError(
                     f"{target} 的 {exp.target_id!r} 已含相同 experience "
                     f"策略（{exp.strategy.value!r}）——疑似重复 promote，"
                     f"不重复追加")
-            strategies.append({"type": exp.strategy.type,
-                               "value": exp.strategy.value,
-                               "origin": "experience"})
-            target.write_text(
-                yaml.safe_dump_all(docs, allow_unicode=True,
-                                   sort_keys=False), encoding="utf-8")
-            return
-    raise ValueError(
-        f"{target} 含 id {exp.target_id!r} 的判定与文档不一致——人工检查")
+    if not seen:
+        raise ValueError(
+            f"{target} 含 id {exp.target_id!r} 的判定与文档不一致——人工检查")
+
+    # --- 行级手术：只插入，不改任何既有字节 ---
+    lines = text.splitlines(keepends=True)
+    id_re = re.compile(rf"^id:\s*{re.escape(exp.target_id)}\b")
+    id_idx = next((i for i, ln in enumerate(lines) if id_re.match(ln)), None)
+    doc_end = next((i for i in range(id_idx + 1, len(lines))
+                    if lines[i].rstrip("\n").rstrip() == "---"), len(lines))
+    strat_idx = next((i for i in range(id_idx, doc_end)
+                      if re.match(r"^strategies:\s*$", lines[i])), None)
+    if strat_idx is None:
+        raise ValueError(
+            f"{target} 的 {exp.target_id!r} 文档未找到块状 strategies: "
+            f"（flow 风格不支持行级手术）——人工检查")
+    first = next((i for i in range(strat_idx + 1, doc_end)
+                  if lines[i].strip() and lines[i].lstrip().startswith("-")),
+                 None)
+    if first is None:
+        raise ValueError(
+            f"{target} 的 {exp.target_id!r} strategies 块为空——人工检查")
+    item_indent = " " * (len(lines[first]) - len(lines[first].lstrip()))
+    end = first + 1
+    k = first + 1
+    while k < doc_end:
+        s = lines[k].rstrip("\n")
+        if not s.strip():
+            k += 1
+            continue
+        if len(s) - len(s.lstrip()) < len(item_indent):
+            break    # 回到文档级键（metadata: 等）——strategies 块结束
+        end = k + 1
+        k += 1
+    insertion = [
+        f"{item_indent}- type: {exp.strategy.type}\n",
+        f"{item_indent}  value: {exp.strategy.value}\n",
+        f"{item_indent}  origin: experience\n",
+    ]
+    new_text = "".join(lines[:end]) + "".join(insertion) + "".join(lines[end:])
+    target.write_text(new_text, encoding="utf-8")
 
 
 def approve_proposal(store: SQLiteExperienceStore, proposal_id: str, *,
