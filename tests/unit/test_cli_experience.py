@@ -269,6 +269,58 @@ def test_revalidate_unknown_id_exit_3(exp_db, capsys):
                  "--fingerprint", "fp"]) == 3
 
 
+def test_revalidate_empty_fingerprint_rejected(exp_db, store, capsys):
+    """P2-1（review_p2_task34）：argparse 的 required 挡不住空串——
+    DEGRADED→VERIFIED 的唯一出口凭证据留痕，零证据显式拒。"""
+    exp_id = _seed(store)
+    store.update_status(exp_id, ExperienceStatus.VERIFIED, "THRESHOLD_MET",
+                        operator="test")
+    store.update_status(exp_id, ExperienceStatus.DEGRADED, "SLIDING_WINDOW",
+                        operator="test")
+    assert main(["experience", "revalidate", exp_id, "--exp-db", exp_db,
+                 "--fingerprint", ""]) == 3
+    assert "必须非空" in capsys.readouterr().out
+    assert store.get_experience(exp_id).status is ExperienceStatus.DEGRADED
+
+
+def test_revalidate_output_discloses_self_reported_evidence(exp_db, store,
+                                                            capsys):
+    """P2-1（review_p2_task34）：输出明示「证据为操作者自报」，
+    evidence-run-id 挂真实 run 时进留痕。"""
+    exp_id = _seed(store)
+    store.update_status(exp_id, ExperienceStatus.VERIFIED, "THRESHOLD_MET",
+                        operator="test")
+    store.update_status(exp_id, ExperienceStatus.DEGRADED, "SLIDING_WINDOW",
+                        operator="test")
+    assert main(["experience", "revalidate", exp_id, "--exp-db", exp_db,
+                 "--fingerprint", "fp_recheck",
+                 "--evidence-run-id", "run_42"]) == 0
+    out = capsys.readouterr().out
+    assert "自报" in out and "run_42" in out
+    events = store.get_state_events(exp_id)
+    assert events[-1].run_id == "run_42", "证据 run 落进状态事件留痕"
+
+
+def test_verify_resolve_falls_back_to_bare_target_id(exp_db, store,
+                                                     tmp_path, capsys):
+    """P3-1（review_p2_task34）：screen 归属分裂（container struct 名 ≠
+    marker 名的 P1 P3-6 家族）——限定名失败回退裸 target_id 再试，
+    不把本该可自动验证的候选静默挡在门外。"""
+    d = tmp_path / "ov2" / "elements"
+    d.mkdir(parents=True)
+    (d / "RenamedScreen.yaml").write_text(
+        OVERRIDES_YAML.replace("screen: VerifyView", "screen: RenamedScreen"),
+        encoding="utf-8")
+    exp_id = _seed(store)               # 经验记在 VerifyView（旧屏名）
+    _runs(store, exp_id, ["SUCCESS"] * 10)
+
+    assert main(["experience", "verify", "--exp-db", exp_db,
+                 "--overrides", str(tmp_path / "ov2")]) == 0
+    out = capsys.readouterr().out
+    assert "THRESHOLD_MET" in out, "裸 target_id 回退解析成功 → 正常判资格"
+    assert store.list(ExperienceStatus.VERIFIED)[0].experience_id == exp_id
+
+
 # --- sweep --------------------------------------------------------------------
 
 

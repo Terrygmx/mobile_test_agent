@@ -263,8 +263,11 @@ def build_parser() -> argparse.ArgumentParser:
     exp_rev.add_argument("experience_id")
     _add_exp_db(exp_rev)
     exp_rev.add_argument("--fingerprint", required=True,
-                         help="重验证时观测到的屏指纹（必填——没有证据的"
+                         help="重验证时观测到的屏指纹（必填非空——没有证据的"
                               "重验证不可留痕）")
+    exp_rev.add_argument("--evidence-run-id", metavar="RUN_ID", default=None,
+                         help="可选：本次重验证对应的 trace run id"
+                              "（把证据挂到真实运行，增强留痕）")
     exp_rev.add_argument("--operator", metavar="NAME", default=None)
 
     exp_sweep = exp_sub.add_parser(
@@ -1026,33 +1029,47 @@ def cmd_experience(args: argparse.Namespace) -> int:
             print("experience verify: no experiences to verify")
             return 0
         repo = None
-        repo_error = None
+        repo_available = True
         try:
             repo = _load_repository(args)
-        except Exception as e:  # noqa: BLE001 — 库不可用 → 全员 fail-closed
-            repo_error = f"{type(e).__name__}: {e}"
+        except Exception:  # noqa: BLE001 — 库不可用 → 全员 fail-closed
+            repo_available = False
         from cli.pipeline import DEFAULT_APP_BUILD
+
+        def _resolve_element(exp):
+            """E4 资格的元素解析（review_p2_task31 P3-7 前置①）。
+
+            先按 `{screen}.{target}` 限定名解析；失败回退**裸 target_id**
+            再试一次（review_p2_task34 P3-1：P1 P3-6 的教训——container
+            struct 名 ≠ marker 名，screen 归属分裂的 App 会被限定名静默
+            挡在门外）。两次都失败才算 ELEMENT_UNRESOLVED（fail-closed）。
+            """
+            try:
+                return repo.resolve(f"{exp.screen_id}.{exp.target_id}",
+                                    build=DEFAULT_APP_BUILD)
+            except Exception:  # noqa: BLE001 — 限定名失败 → 裸名重试
+                return repo.resolve(exp.target_id, build=DEFAULT_APP_BUILD)
+
         counts: dict[str, int] = {}
         applied = 0
         for exp in exps:
             runs = store.get_runs(exp.experience_id)
+            # 三态直传（review_p2_task34 P3-2）：False=不合格（fail-closed）、
+            # None=不适用（非 CANDIDATE 分支不消费）——不压成 bool，
+            # 将来 evaluate 若消费资格（如 revalidate 资格）二者可区分。
             eligible: bool | None = None
             why = "OK"
             if exp.status is ExperienceStatus.CANDIDATE:
-                if repo is None:
-                    eligible, why = False, (repo_error
-                                            or "REPOSITORY_UNAVAILABLE")
+                if not repo_available:
+                    eligible, why = False, "REPOSITORY_UNAVAILABLE"
                 else:
                     try:
-                        element = repo.resolve(
-                            f"{exp.screen_id}.{exp.target_id}",
-                            build=DEFAULT_APP_BUILD)
+                        element = _resolve_element(exp)
                         eligible = eligible_for_auto_verification(element)
-                    except Exception as e:  # noqa: BLE001
-                        eligible, why = False, f"ELEMENT_UNRESOLVED:" \
-                                               f" {type(e).__name__}"
+                    except Exception:  # noqa: BLE001
+                        eligible, why = False, "ELEMENT_UNRESOLVED"
             outcome = evaluate(exp, runs, VerificationPolicy(),
-                               auto_verify_eligible=bool(eligible))
+                               auto_verify_eligible=eligible)
             counts[outcome.reason] = counts.get(outcome.reason, 0) + 1
             extra = (f" eligible={eligible}" + (f" ({why})" if why != "OK"
                                                 else "")) \
@@ -1078,9 +1095,17 @@ def cmd_experience(args: argparse.Namespace) -> int:
             print(f"EXPERIENCE ERROR: no such experience: "
                   f"{args.experience_id}")
             return 3
+        if not (args.fingerprint or "").strip():
+            # P2-1（review_p2_task34）：DEGRADED→VERIFIED 的唯一出口凭
+            # 证据留痕完成，空指纹等于零证据——argparse 的 required 挡不住
+            # 空串，这里显式拒。
+            print("EXPERIENCE ERROR: --fingerprint 必须非空"
+                  "（重验证证据不可为空串）")
+            return 3
         operator = args.operator or getpass.getuser()
         try:
             verifier_revalidate(store, exp, fingerprint=args.fingerprint,
+                                run_id=args.evidence_run_id,
                                 operator=operator)
         except ValueError as e:
             # 3.1 护栏的 CLI 出口（review_p2_task31 P2-1 接线前置②）：
@@ -1096,9 +1121,12 @@ def cmd_experience(args: argparse.Namespace) -> int:
                 print("下一步：已是 VERIFIED，无需重验证"
                       "（显式重验证只用于恢复 DEGRADED）")
             return 3
+        evidence = (f"evidence_run={args.evidence_run_id}, "
+                    if args.evidence_run_id else "")
         print(f"experience revalidate: {exp.experience_id} "
               f"DEGRADED → VERIFIED (reason=REVALIDATED, "
-              f"fingerprint={args.fingerprint}, operator={operator})")
+              f"fingerprint={args.fingerprint}, operator={operator}, "
+              f"{evidence}证据为操作者自报——operator 留痕)")
         return 0
 
     if args.experience_cmd == "sweep":

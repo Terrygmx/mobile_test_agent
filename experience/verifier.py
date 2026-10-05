@@ -183,14 +183,18 @@ def needs_revalidation(exp: Experience, current_fingerprint: str | None) -> bool
 
 def evaluate(exp: Experience, runs: list[ExperienceRun],
              policy: VerificationPolicy, *,
-             auto_verify_eligible: bool) -> VerificationOutcome:
+             auto_verify_eligible: bool | None) -> VerificationOutcome:
     """4.3 状态机：`(当前状态, 完整历史, 策略, 资格) → 决策`。**纯函数**。
 
     `runs` 必须是**完整历史**（升序）。长度与 `exp.sample_count` 不符即
     `ValueError`：传了截断的列表会把「10 个样本」算成「5 个」，门槛判定静默
     失真——这是 fail-loud 而非容忍的场景（调用方本该传 `get_runs(id)` 的全量）。
 
-    `auto_verify_eligible` **必填**：见模块 docstring 偏离 1。
+    `auto_verify_eligible` **必填**：见模块 docstring 偏离 1。三态
+    （review_p2_task34 P3-2）：`True`/`False` = E4 资格判定结果（CANDIDATE
+    分支消费，None 落在 CANDIDATE 上按 False fail-closed）；`None` =
+    **不适用**（非 CANDIDATE 分支不消费资格）——与 False 分开传，将来
+    若其他分支消费资格（如 revalidate 资格）二者可区分。
     """
     if len(runs) != exp.sample_count:
         raise ValueError(

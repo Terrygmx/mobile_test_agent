@@ -217,7 +217,7 @@ M1 审计/Schema(1.5d) ─► M2 Store/Guard(4d) ─► M3 验证/降级(3d) ─
 - Test: `tests/unit/test_cli_experience.py`
 
 **Steps:**
-1. 失败测试：`list --status` 过滤；`verify` 对全部 Candidate 跑 Verifier 并产出决策报告（不自动执行高风险/非幂等升级）；`revalidate` 对 DEGRADED 走一次 Guard+执行并按结果转状态；`sweep` 输出清理清单（只改状态不删证据）。
+1. 失败测试：`list --status` 过滤；`verify` 对全部 Candidate 跑 Verifier 并产出决策报告（不自动执行高风险/非幂等升级）；`revalidate` 对 DEGRADED 转状态——CLI 出口为**人工自报证据留痕**（`--fingerprint` 必填非空 + 可选 `--evidence-run-id` 挂真实 run；输出明示「证据为操作者自报」，review_p2_task34 P2-1）；「Guard+执行」的自动化重验证需设备会话，留待 M4+ 的真机路径（实现时登记的偏离，2026-10-05）；`sweep` 输出清理清单（只改状态不删证据）。
 2. `phase0/verify_p2_m3.py`：完整状态转换演示 + 矩阵 #5–#12 断言（#12 并发写：双线程各 record_run 100 次，计数和 = 200 无丢失——单写者验证；#6 新 build 需完整 Guard+执行成功后才追加）。
 3. Run → PASS → Commit: `feat(p2): mta experience cli (P2-06)` + tag `checkpoint-p2-m3`
 
