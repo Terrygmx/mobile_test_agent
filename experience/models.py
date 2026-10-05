@@ -28,6 +28,7 @@ from repository.loader import LocatorStrategy
 __all__ = [
     "ExperienceStatus", "Experience", "CandidateSeed", "ExperienceRun",
     "StateEvent", "VerificationPolicy", "VerificationDecision",
+    "PromotionProposal",
     "EXPERIENCE_ORIGINS",
 ]
 
@@ -237,3 +238,29 @@ class VerificationDecision(str, Enum):
     DEGRADE = "DEGRADE"
     REJECT = "REJECT"
     NO_CHANGE = "NO_CHANGE"
+
+
+class PromotionProposal(_Strict):
+    """9.3 Promotion Proposal（人工审计载体；Task 4.1 / P2-09）。
+
+    promote 走 proposal 是 9.3 的红线：人工 Promotion 必须留下「谁、基于
+    什么证据、写了什么」的可审计记录，不提供跳过 proposal 的直写入口。
+    `evidence_summary` 是 JSON 字符串（设计 9.3 定的 str）——四要素
+    sample_count / success_rate / distinct_runs / validated_builds，9.5
+    人工路径额外带 override_reason。
+
+    9.4：approve **不改** Experience.status——promoted / promoted_commit
+    是 Experience 行上的独立时间线字段。
+    """
+
+    proposal_id: str
+    experience_id: str
+    diff: str
+    evidence_summary: str
+    status: Literal["PENDING", "APPROVED", "REJECTED"] = "PENDING"
+    manual_override_of_auto_policy: bool = False
+    reviewer: str | None = None
+    decision_note: str | None = None
+    resolved_commit: str | None = None
+    created_at: datetime = Field(default_factory=_utcnow)
+    decided_at: datetime | None = None

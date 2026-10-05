@@ -120,6 +120,26 @@ def _merge_element(
                         f"{s.value!r} shadows source {gen_access[0]!r}"
                     )
 
+    # origin: experience（P2-09）：出现时把链稳定为 manual > source >
+    # experience（**尝试顺序**——experience 排链尾作为回落，不丢弃）。
+    # 只在 experience 真出现时介入：没有它不做任何重排（P1 行为保留，
+    # 现有 manual/source 混排不被打乱）。同名 accessibility_id 与
+    # manual/source 冲突 → 记 warning（不可静默）。
+    if any(s.origin == "experience" for s in strategies):
+        rank = {"manual": 0, "source": 1, "experience": 2}
+        strategies = tuple(sorted(strategies,
+                                  key=lambda s: rank.get(s.origin, 1)))
+        higher = {s.value for s in strategies
+                  if s.type == "accessibility_id"
+                  and rank.get(s.origin, 1) < 2}
+        for s in strategies:
+            if (s.origin == "experience" and s.type == "accessibility_id"
+                    and s.value in higher):
+                warnings.append(
+                    f"experience_strategy_conflict: {element_id} "
+                    f"accessibility_id {s.value!r} 与 manual/source 策略"
+                    f"同名（experience 排链尾，仅作回落）")
+
     meta = dict(other.metadata if other is not None else {})
     meta.update(base.metadata)  # overrides > generated
 

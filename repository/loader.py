@@ -25,8 +25,10 @@ ELEMENT_TYPES = (
 STRATEGY_TYPES = (
     "accessibility_id", "predicate", "class_chain", "xpath", "id",
 )
-ORIGINS = ("source", "manual")
-# V2 预留 origin: experience（5.3），P1 不产生。
+ORIGINS = ("source", "manual", "experience")
+# origin: experience 自 P2-09（Task 4.1）起产生——promoter 把已验证的
+# Experience 策略写进 overrides；resolver 合并时排链尾（尝试顺序 manual
+# > source > experience，review_p2_task23 P3-4 接线前置）。
 MODES = ("replace", "prepend", "append")
 KIND_HINTS = ("page", "modal", "overlay")
 # 5.2 metadata 枚举（R6-3：typo 在 loader 层拦截，不漏到 resolve 时裸 KeyError）
@@ -49,7 +51,7 @@ class DataClass(str, enum.Enum):
 
 
 class LocatorStrategy(BaseModel):
-    """5.2 一条定位策略；每条必须记录 origin（source / manual）。"""
+    """5.2 一条定位策略；每条必须记录 origin（source / manual / experience）。"""
 
     model_config = ConfigDict(extra="forbid")
 

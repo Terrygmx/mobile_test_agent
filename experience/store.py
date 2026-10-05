@@ -42,6 +42,7 @@ from experience.models import (
     Experience,
     ExperienceRun,
     ExperienceStatus,
+    PromotionProposal,
     StateEvent,
 )
 from experience.schema_migrations import migrate
@@ -93,6 +94,19 @@ class ExperienceStore(Protocol):
     def get_experience(self, experience_id: str) -> Experience | None: ...
 
     def get_state_events(self, experience_id: str) -> list[StateEvent]: ...
+
+    def create_promotion_proposal(self, proposal: PromotionProposal) -> PromotionProposal: ...
+
+    def get_promotion_proposal(self, proposal_id: str) -> PromotionProposal | None: ...
+
+    def list_promotion_proposals(self, status: str | None = None) -> list[PromotionProposal]: ...
+
+    def set_promotion_proposal_status(self, proposal_id: str, status: str, *,
+                                      git_commit: str | None = None,
+                                      reviewer: str | None = None,
+                                      decision_note: str | None = None) -> None: ...
+
+    def record_promotion(self, experience_id: str, commit: str) -> None: ...
 
 
 class SQLiteExperienceStore:
@@ -297,6 +311,112 @@ class SQLiteExperienceStore:
             ) for r in rows]
         finally:
             conn.close()
+
+    # --- Promotion Proposal（9.3；表在 002 迁移已建） ---
+
+    @staticmethod
+    def _proposal_from_row(row: sqlite3.Row) -> PromotionProposal:
+        return PromotionProposal(
+            proposal_id=row["proposal_id"],
+            experience_id=row["experience_id"],
+            diff=row["diff_text"],
+            evidence_summary=row["evidence_summary_json"] or "{}",
+            status=row["status"],
+            manual_override_of_auto_policy=bool(
+                row["manual_override_of_auto_policy"]),
+            reviewer=row["reviewer"],
+            decision_note=row["decision_note"],
+            resolved_commit=row["git_commit"],
+            created_at=datetime.fromisoformat(
+                row["created_at"].replace("Z", "+00:00")),
+            decided_at=(datetime.fromisoformat(row["decided_at"]
+                                               .replace("Z", "+00:00"))
+                        if row["decided_at"] else None),
+        )
+
+    def create_promotion_proposal(
+            self, proposal: PromotionProposal) -> PromotionProposal:
+        now = _now()
+        with self._write_tx() as conn:
+            conn.execute(
+                "INSERT INTO promotion_proposals (proposal_id,"
+                " experience_id, diff_text, evidence_summary_json,"
+                " manual_override_of_auto_policy, status, reviewer,"
+                " decision_note, git_commit, created_at, decided_at)"
+                " VALUES (?,?,?,?,?,?,?,?,NULL,?,NULL)",
+                (proposal.proposal_id, proposal.experience_id,
+                 proposal.diff, proposal.evidence_summary,
+                 1 if proposal.manual_override_of_auto_policy else 0,
+                 proposal.status, proposal.reviewer,
+                 proposal.decision_note, now))
+        return proposal
+
+    def get_promotion_proposal(
+            self, proposal_id: str) -> PromotionProposal | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM promotion_proposals WHERE proposal_id=?",
+                (proposal_id,)).fetchone()
+            return self._proposal_from_row(row) if row else None
+        finally:
+            conn.close()
+
+    def list_promotion_proposals(
+            self, status: str | None = None) -> list[PromotionProposal]:
+        conn = self._connect()
+        try:
+            if status is None:
+                rows = conn.execute(
+                    "SELECT * FROM promotion_proposals ORDER BY created_at"
+                    " DESC, rowid DESC").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM promotion_proposals WHERE status=?"
+                    " ORDER BY created_at DESC, rowid DESC",
+                    (status,)).fetchall()
+            return [self._proposal_from_row(r) for r in rows]
+        finally:
+            conn.close()
+
+    def set_promotion_proposal_status(
+            self, proposal_id: str, status: str, *,
+            git_commit: str | None = None,
+            reviewer: str | None = None,
+            decision_note: str | None = None) -> None:
+        with self._write_tx() as conn:
+            cur = conn.execute(
+                "UPDATE promotion_proposals SET status=?, git_commit=?,"
+                " reviewer=COALESCE(?, reviewer),"
+                " decision_note=COALESCE(?, decision_note), decided_at=?"
+                " WHERE proposal_id=?",
+                (status, git_commit, reviewer, decision_note, _now(),
+                 proposal_id))
+            if cur.rowcount == 0:
+                raise ValueError(
+                    f"no such promotion proposal: {proposal_id}")
+
+    def record_promotion(self, experience_id: str, commit: str) -> None:
+        """9.4：promoted / promoted_commit 记账（**不改 status**——两条
+        独立时间线）。留一条 from==to 事件（REVALIDATION_REQUIRED 同款
+        「不改状态但可审计」的表达；to_status 仍是合法状态值，
+        reason 才是 PROMOTED）。"""
+        with self._write_tx() as conn:
+            cur = conn.execute(
+                "UPDATE experiences SET promoted=1, promoted_commit=?,"
+                " updated_at=? WHERE experience_id=?",
+                (commit, _now(), experience_id))
+            if cur.rowcount == 0:
+                raise ValueError(f"no such experience: {experience_id}")
+            status = conn.execute(
+                "SELECT status FROM experiences WHERE experience_id=?",
+                (experience_id,)).fetchone()["status"]
+            conn.execute(
+                "INSERT INTO experience_state_events (experience_id,"
+                " from_status, to_status, reason, run_id, app_build,"
+                " operator, created_at) VALUES (?,?,?,?,NULL,NULL,?,?)",
+                (experience_id, status, status, "PROMOTED", "promoter",
+                 _now()))
 
     # --- 写（E9 单写者） ---
 

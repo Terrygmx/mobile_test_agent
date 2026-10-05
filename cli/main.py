@@ -276,6 +276,28 @@ def build_parser() -> argparse.ArgumentParser:
     exp_sweep.add_argument("--max-idle-days", type=int, default=90,
                            help="闲置天数阈值（默认 90，8.2 设计值）")
 
+    exp_promote = exp_sub.add_parser(
+        "promote", help="Promotion（9.1–9.3）：缺省生成 PENDING proposal"
+                        "（人工审计，不写文件）；--approve 落地 = 写 "
+                        "overrides（origin: experience）+ git commit + "
+                        "promoted 记账。撤销 = git revert（E10）")
+    exp_promote.add_argument("experience_id")
+    _add_exp_db(exp_promote)
+    exp_promote.add_argument("--approve", metavar="PROPOSAL_ID",
+                             default=None,
+                             help="approve 已生成的 proposal（两段式的"
+                                  "第二段；只有 PENDING 可 approve）")
+    exp_promote.add_argument("--manual-override", action="store_true",
+                             help="9.5：非 VERIFIED 的显式人工路径"
+                                  "（必须配 --reason）")
+    exp_promote.add_argument("--reason", metavar="TEXT", default=None,
+                             help="9.5 人工越权理由（必填当 "
+                                  "--manual-override）")
+    exp_promote.add_argument("--repo-root", metavar="DIR", default=".",
+                             help="git 仓库根（overrides 写在 <root>/"
+                                  "repository/overrides/elements/；默认 cwd）")
+    exp_promote.add_argument("--operator", metavar="NAME", default=None)
+
     return parser
 
 
@@ -1139,6 +1161,55 @@ def cmd_experience(args: argparse.Namespace) -> int:
             print(f"swept {sid} → REJECTED(STALE)")
         print(f"experience sweep: {len(swept)} cleaned"
               "（只改状态不删证据——11.2 保留规则）")
+        return 0
+
+    if args.experience_cmd == "promote":
+        # 9.3 两段式：generate（本命令缺省形态，只落 proposal 表）→
+        # 人工 review diff → --approve 落地。人工 promote 必须走 proposal
+        # 审计，没有直写 overrides 的入口（review_p2_task34 建议动作 3）。
+        import getpass
+
+        from experience.promoter import approve_proposal, generate_proposal
+
+        operator = args.operator or getpass.getuser()
+        if args.approve:
+            try:
+                approved, sha = approve_proposal(
+                    store, args.approve, repo_root=Path(args.repo_root),
+                    committer=operator)
+            except (ValueError, RuntimeError) as e:
+                print(f"EXPERIENCE ERROR: {e}")
+                return 3
+            print(f"experience promote: proposal {approved.proposal_id} "
+                  f"APPROVED")
+            print(f"  overrides 已写 + commit {sha}；撤销 = "
+                  f"git revert {sha}（E10，Experience Store 历史不受影响）")
+            print(f"  experience {approved.experience_id} "
+                  f"promoted=True promoted_commit={sha}"
+                  "（status 不变——9.4 两条独立时间线）")
+            return 0
+        exp = store.get_experience(args.experience_id)
+        if exp is None:
+            print(f"EXPERIENCE ERROR: no such experience: "
+                  f"{args.experience_id}")
+            return 3
+        try:
+            proposal = generate_proposal(
+                store, exp, manual_override=args.manual_override,
+                reason=args.reason, reviewer=operator)
+        except ValueError as e:
+            print(f"EXPERIENCE ERROR: {e}")
+            if exp.status is ExperienceStatus.REJECTED:
+                print("下一步：REJECTED 不可 promote——重新走 "
+                      "`mta review accept` 建 Candidate（E5 重新学习）")
+            return 3
+        print(f"experience promote: proposal {proposal.proposal_id} "
+              f"PENDING（9.3 审计——approve 前不写任何文件）")
+        print(f"  evidence: {proposal.evidence_summary}")
+        print("  diff（人工 review）:")
+        print(proposal.diff, end="")
+        print(f"  approve: `mta experience promote {args.experience_id} "
+              f"--approve {proposal.proposal_id} --repo-root <git根>`")
         return 0
 
     print(f"experience: unknown subcommand {args.experience_cmd!r}")

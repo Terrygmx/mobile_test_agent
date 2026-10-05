@@ -23,6 +23,7 @@ from experience.models import (
     VerificationDecision,
     VerificationPolicy,
 )
+from experience.promoter import approve_proposal, generate_proposal
 from experience.ranker import rank_experiences
 from experience.schema_migrations import migrate, current_version
 from experience.store import (
@@ -69,4 +70,6 @@ __all__ = [
     "rank_experiences",
     # Task 3.3：进程内 Recovery Cache（设计 7.3）
     "RecoveryCache", "cache_key",
+    # Task 4.1：Promotion（设计 9.1–9.3/9.5/E10）
+    "generate_proposal", "approve_proposal",
 ]
