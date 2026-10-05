@@ -152,6 +152,7 @@ from agent.context import (          # noqa: E402
 # 直接 import 单一真值源（context.py 只 re-export 兼容旧路径）。
 # P1 的 EmptyExperienceStore 占位已在 Task 2.4 退役（旧签名 build≠app_id）。
 from experience.store import ExperienceStore   # noqa: E402
+from experience.ranker import rank_experiences   # noqa: E402
 from agent.policy import (           # noqa: E402
     RecoveryAction,
     RecoveryConfig,
@@ -607,9 +608,9 @@ class RecoveryEngine:
         EXECUTE 则执行 + postcondition → 成功返回 `kind="experience"`；
         全部候选用尽返回 None（调用方回落 LLM，仍受 P1 Budget 控制）。
 
-        排序：本任务直接用 Store 的 `updated_at DESC`（M3 换入
-        `rank_experiences`——VERIFIED 优先 / success_rate / 最近成功时间）。
-        排序只决定「先试哪条」，不改变每条各自的 Guard 判定。
+        排序：`rank_experiences`（设计 5.1，Task 3.2）——信任档位 VERIFIED >
+        DEGRADED > CANDIDATE > REJECTED，同档先看 success_rate 再看新近度。
+        排序只决定「先试哪条」，不改变每条各自的 Guard 判定（E1）。
 
         每一处「做不了」都留一条 stage，不静默跳过：静默的「有经验库但没
         查」在报告上与「查了没有」不可区分，排障只能靠猜——与 LLM 阶段的
@@ -660,7 +661,7 @@ class RecoveryEngine:
 
         current_screen_id = self._current_screen_id(screen_res, ctx)
         fingerprint = screen_fingerprint(page_red)
-        for exp in candidates:
+        for exp in rank_experiences(candidates):
             hit = self._try_one_experience(
                 ctx, exp, stages, current_screen_id, fingerprint, samples,
                 events, blocks)

@@ -22,6 +22,7 @@ from experience.models import (
     VerificationDecision,
     VerificationPolicy,
 )
+from experience.ranker import rank_experiences
 from experience.schema_migrations import migrate, current_version
 from experience.store import (
     ExperienceStore,
@@ -63,4 +64,6 @@ __all__ = [
     "sliding_window_degrade", "needs_revalidation", "distinct_run_count",
     "success_rate_of", "REVALIDATION_REQUIRED",
     "StalenessPolicy", "is_stale", "sweep_stale_candidates", "STALE_REASON",
+    # Task 3.2：多候选排序（设计 5.1）
+    "rank_experiences",
 ]
