@@ -30,6 +30,31 @@ Runtime Graph 里混进 Source Graph 的信息，设计 12.2 的 diff（runtime 
 `steps` 表**没有时间戳**（P1 schema 如此），所以 `observed_at` 取所属
 `testcase_run` 的 `end_time`（缺则 `start_time`）——可得的最细粒度，不假装更细。
 `first_seen` / `last_seen` 由此而来。
+
+## Source Graph（`source_of='source'`，设计 12.1 的另一半）
+
+```text
+Source Graph ← Source Metadata 的导航信息
+```
+
+**实测结论（2026-10-05，全仓 165 个 `source_metadata.json`）**：当前 metadata
+格式**不含任何导航声明**——没有 nav / transition / goto / navigate / action /
+tap / push / segue 字段（逐关键词扫过）。所以：
+
+- **节点 = metadata 的 `screens`**（顶层声明列表）。它与 Repository 的屏 id 同源
+  ——扫描器为每个条目写一份 `generated/<build>/screens/<id>.yaml`（真机实测
+  10 个屏文件与 `screens` 列表逐项一致）。
+- **转移如实为空**（plan 明文「metadata 无导航声明时如实为空，不推测」，E12）。
+
+⚠️ **不用 `screen_elements[].name`**：那是**元素组名**，与屏 id 不同名——真机
+metadata 里 `screens` 含 `SpikeSheet`/`SpikeTab`，而 `screen_elements[].name`
+含 `SpikeScreenRoot`/`SpikeTabScreen`（后者在 `generated/<build>/elements/` 下、
+**不是**屏）。拿它当节点会让源图与运行时图不同名，diff 全变 ADDED/NOT_OBSERVED。
+
+⚠️ **给 Task 5.3 的提醒**：源图没有转移 ⇒ 转移级的 `CHANGED`/`REMOVED` 在
+「扫描器开始输出导航声明」之前**无数据可判**，diff 实际有数据的是节点级的
+`ADDED` / `NOT_OBSERVED`（矩阵 #16 正是后者）。这是 metadata 格式的能力边界，
+不是实现缺口。
 """
 from __future__ import annotations
 
@@ -39,8 +64,10 @@ from pathlib import Path
 
 from graph.models import (
     EVIDENCE_RECOVERY_OBSERVED,
+    EVIDENCE_SOURCE_DECLARED,
     EVIDENCE_WAIT_SCREEN,
     RUNTIME,
+    SOURCE,
     RuntimeGraph,
     ScreenNode,
     ScreenTransition,
@@ -53,6 +80,9 @@ __all__ = [
     "observed_screens",
     "build_runtime_graph",
     "read_trace_steps",
+    "declared_screens",
+    "build_source_graph",
+    "read_source_metadata",
 ]
 
 SCREEN_TARGET_PREFIX = "screen:"
@@ -198,6 +228,76 @@ def _max_ts(a: str | None, b: str | None) -> str | None:
     if b is None:
         return a
     return max(a, b)
+
+
+# --- Source Graph（metadata 侧，纯函数 + 一个读取入口） --------------------
+
+
+def declared_screens(metadata: dict) -> list[str]:
+    """metadata 声明的屏 id（`screens`），**去重后按字典序**。
+
+    `screens` 键**不存在** → `[]`（该 metadata 对屏一无所知，如实为空）；
+    存在但不是 list / 元素不是非空字符串 → `ValueError`（格式坏了要炸，
+    不要静默产出一张空图——「没声明」与「声明读不出来」是两件事）。
+    """
+    if "screens" not in metadata:
+        return []
+    raw = metadata["screens"]
+    if not isinstance(raw, list):
+        raise ValueError(f"metadata.screens 必须是 list，实得 {type(raw).__name__}")
+    out = []
+    for item in raw:
+        if not isinstance(item, str) or not item:
+            raise ValueError(f"metadata.screens 元素必须是非空字符串，实得 {item!r}")
+        out.append(item)
+    return sorted(set(out))
+
+
+def build_source_graph(metadata: dict, *, app_id: str = "",
+                       app_build: str | None = None) -> RuntimeGraph:
+    """**纯函数**：Source Metadata → Source Graph（`source_of='source'`）。
+
+    - **节点** = `screens`（声明的屏）；`visit_count` 恒 0——它是**访问**次数，
+      而声明面没有「访问」这回事（不为这个字段编一个别的含义）；
+      `evidence=('source_declared',)` 是「这是声明不是观测」的留痕；
+      `first/last_seen` 取 metadata 的 `generated_at`（声明是什么时候生成的）。
+    - **转移** = 空（当前格式无导航声明，见模块 docstring）。
+
+    `app_build` 缺省取 metadata 自己的 `build` 字段——源图的范围应与运行时图
+    对齐（diff 按 build 关联，设计 12.3）。`app_id` 无处可读（metadata 不含
+    bundle id），必须由调用方给（CLI 的 `--bundle-id`）。
+    """
+    if app_build is None:
+        app_build = str(metadata.get("build") or "")
+    generated_at = metadata.get("generated_at")
+    nodes = tuple(
+        ScreenNode(screen_id=s, source_of=SOURCE, visit_count=0,
+                   evidence=(EVIDENCE_SOURCE_DECLARED,),
+                   first_seen=generated_at, last_seen=generated_at)
+        for s in declared_screens(metadata))
+    return RuntimeGraph(app_id=app_id, app_build=str(app_build),
+                        source_of=SOURCE, nodes=nodes, transitions=())
+
+
+def read_source_metadata(path: str | Path) -> dict:
+    """读 `source_metadata.json` → dict。
+
+    文件不存在 / 不是合法 JSON / 顶层不是对象 → 抛错（带路径）。**不吞**：
+    `mta graph build --from-source` 拿到一个坏文件时静默产出空图，会让
+    「声明面没有屏」与「文件读坏了」在报告上长得一样。
+    """
+    import json
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"source metadata 不存在: {p}")
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"source metadata 不是合法 JSON: {p} ({e})") from e
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"source metadata 顶层必须是对象: {p} (实得 {type(data).__name__})")
+    return data
 
 
 # --- trace 读取（本模块唯一的 I/O 区：只搬数据，不做判定） ------------------

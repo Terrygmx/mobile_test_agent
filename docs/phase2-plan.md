@@ -325,6 +325,16 @@ M1 审计/Schema(1.5d) ─► M2 Store/Guard(4d) ─► M3 验证/降级(3d) ─
 
 **Objective:** 设计 12.2 / 12.3：五类分类 + build-to-build + `mta graph` CLI。
 
+> **⚠️ 数据面边界（Task 5.2 实测，2026-10-05）**：**源图的转移是空的**——当前
+> `source_metadata.json` 格式不含任何导航声明（全仓 165 个文件逐关键词扫过，
+> nav/transition/goto/navigate/action/tap/push/segue 全无命中）。因此：
+> - 有数据的是**节点级**分类：`NOT_OBSERVED`（声明有、运行时没到——真机实测
+>   7/10 个屏属此类，矩阵 #16 正是它）与 `ADDED`（运行时到了、声明没有）；
+> - **转移级的 `CHANGED` / `REMOVED` 当前无数据可判**。演示 `CHANGED` 需要先扩
+>   扫描器输出导航声明（**独立立项**），不得在 diff 里编造。
+> 五类判定逻辑仍要全部实现并有单测（用 fixture 构造 source 侧转移），只是真实
+> 数据上只有节点级那两类会出现。
+
 **Files:**
 - Create: `graph/diff.py`；Modify: `cli/main.py`（`graph build [--from-trace] [--from-source]` / `graph diff --build B --base-build A` / `graph show`）
 - Test: `tests/unit/test_graph_diff.py`

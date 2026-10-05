@@ -1316,3 +1316,79 @@ docstring 互相指认。
 - 全量 pytest **1150 passed**（Task 5.1 首次交付 1146 → 修订后 +4：3 条 P2-1 钉子
   + 1 条 P3-3 专测；P3-2 的断言改写不增减数量）。
 - P2-1 探针复现通过（见上）；全仓测试文件重复定义扫描**零命中**。
+
+---
+
+## Task 5.2 完成记录（P2-12 Source Graph，设计 12.1 的另一半，2026-10-05）
+
+**Objective**：从 `source_metadata.json` 构建声明式导航图。
+
+### 交付
+
+- `graph/builder.py`（Modify，plan Files 清单唯一一项）新增：
+  `declared_screens(metadata)`（纯）、`build_source_graph(metadata, *, app_id,
+  app_build=None)`（纯）、`read_source_metadata(path)`（I/O 入口）。
+- `graph/__init__.py`：导出三个新符号。
+- `tests/unit/test_graph_source.py`：18 例。
+
+### 实测结论（决定了本任务的实际形状）
+
+**当前 metadata 格式不含任何导航声明。** 全仓 165 个 `source_metadata.json`
+逐关键词扫过：`nav` / `transition` / `goto` / `navigate` / `action` / `tap` /
+`push` / `segue` **全部无命中**。顶层只有
+`app_version / build / generated_at / git_commit / parser_version /
+screen_elements / screens`。
+
+所以源图的形状是：**节点 = 顶层 `screens`（声明列表）；转移如实为空**
+——正是 plan step 1 明写的「metadata 无导航声明时如实为空，不推测」（E12）。
+
+### 两处必须写清的判断
+
+1. **节点取 `screens`，不取 `screen_elements[].name`。** 二者**不同名**：真机
+   metadata 里 `screens` 含 `SpikeSheet`/`SpikeTab`，而 `screen_elements[].name`
+   含 `SpikeScreenRoot`/`SpikeTabScreen`——后者在 `generated/<build>/elements/`
+   下，是**元素组**不是屏（`screens/` 目录里没有它们）。`screens` 与 Repository
+   的屏 id 同源：扫描器为每个条目写一份 `screens/<id>.yaml`（真机实测 10 个屏
+   文件与 `screens` 列表逐项一致）。拿 `screen_elements[].name` 当节点会让源图与
+   运行时图**不同名**，diff 全变 ADDED/NOT_OBSERVED——有专测钉住这条排除。
+2. **`visit_count` 恒 0、`evidence=('source_declared',)`、`first/last_seen` 取
+   `generated_at`。** `visit_count` 的语义是**访问**次数，声明面没有「访问」这回
+   事——不为这个字段编一个别的含义（比如「元素个数」）；`generated_at` 回答的是
+   「这份声明是什么时候生成的」，是可得且诚实的时间。
+
+### 坏输入不吞（与「如实为空」的边界）
+
+- **`screens` 键不存在** → `[]` + 空图（老/最小 metadata 对屏一无所知，如实为空，
+  **不报错**）；
+- **`screens` 存在但不是 list / 元素非字符串或空** → `ValueError`；
+- **文件不存在 / 非法 JSON / 顶层非对象** → `FileNotFoundError` / `ValueError`。
+  `mta graph build --from-source` 拿到坏文件时静默产出空图，会让「声明面没有屏」
+  与「文件读坏了」在报告上长得一样。
+- **空图也带对的 `source_of=SOURCE`**（Task 5.1 P2-1 的教训：替换范围靠图级字段，
+  空图退化会让另一面被误删）——有专测。
+
+### 真机端到端（源图 vs 运行时图，同一 `(app_id, build)`）
+
+用 Gate M2 的 `generated/local/source_metadata.json` + `trace_run2.db`：
+
+| 面 | 节点 |
+|---|---|
+| 源图（声明） | 10 个：DetailView / HomeView / LoginView / ProfileView / SearchView / SpikeNavDetail / SpikeNavRoot / SpikeSheet / SpikeSheetHost / SpikeTab |
+| 运行时（观测） | 3 个：LoginView / HomeView / ProfileView |
+| **声明有、运行时没到**（→ Task 5.3 的 `NOT_OBSERVED`，矩阵 #16） | 7 个 |
+| 运行时到了、声明没有（→ `ADDED`） | 0 个 |
+
+落库两面互不干扰（`scope` 分别 `('...', '', 'runtime')` 与 `('...', 'local',
+'source')`）——5.1 修的 P2-1 在真 builder 上再次验证。
+
+### ⚠️ 给 Task 5.3 的提醒（写进 builder docstring 与 plan）
+
+**源图没有转移** ⇒ 转移级的 `CHANGED` / `REMOVED` 在「扫描器开始输出导航声明」
+之前**无数据可判**；diff 实际有数据的是节点级的 `ADDED` / `NOT_OBSERVED`（矩阵
+#16 正是后者）。这是 metadata 格式的**能力边界**，不是实现缺口——如果 5.3 硬要
+演示 `CHANGED`，需要先扩扫描器输出导航声明（独立立项），而不是在 diff 里编。
+
+### 实测
+
+- 全量 pytest **1168 passed**（Task 5.2 新增 18）。
+- 全仓测试文件重复定义扫描**零命中**（连续第二次）。

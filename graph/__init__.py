@@ -19,8 +19,11 @@ from pathlib import Path
 
 from graph.builder import (
     build_runtime_graph,
+    build_source_graph,
+    declared_screens,
     is_screen_wait,
     observed_screens,
+    read_source_metadata,
     read_trace_steps,
 )
 from graph.models import (
@@ -49,4 +52,5 @@ __all__ = [
     "GraphStore", "build_and_store",
     "build_runtime_graph", "read_trace_steps", "observed_screens",
     "is_screen_wait",
+    "build_source_graph", "read_source_metadata", "declared_screens",
 ]
