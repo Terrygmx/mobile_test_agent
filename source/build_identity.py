@@ -34,6 +34,16 @@ from pathlib import Path
 
 APP_COMMIT_KEY = "MTA_GIT_COMMIT"
 APP_BUILD_KEY = "MTA_BUILD_ID"
+
+DEFAULT_APP_BUILD = "local"
+"""build id 读不到时的兜底（`mta run` 与源图构建共用）。
+
+**它不是安全判据**（E7 `validated_builds` 的一个元素），所以读不到时退回默认
+而不是 fail-loud；但**兜底值必须只有一处**——运行时侧（pipeline 的 app_build /
+`runs.app_build`）与源图侧（`build_source_graph` 的 scope）各写一份，就会在
+「metadata 没有 build」时分叉成 `"local"` vs `""`，于是 diff 找不到同一 scope
+的两面（review_p2_task52 P3-1 的实测）。
+"""
 # 12.5：CI=true 时 --allow-metadata-mismatch 需要的第二显式开关。
 CI_OVERRIDE_ENV = "MTA_ALLOW_METADATA_MISMATCH_CI"
 
@@ -94,8 +104,13 @@ def override_allowed(allow: bool, env: Mapping[str, str]) -> bool:
     return True
 
 
-def metadata_identity(metadata_path: str | Path) -> AppIdentity:
-    """从 12.3 metadata（顶层扁平 git_commit / build）取身份。"""
+def read_metadata(metadata_path: str | Path) -> dict:
+    """读 12.3 metadata → dict。**全仓唯一的 metadata JSON 解析点**。
+
+    不可读 / 非法 JSON / 顶层非对象 → `BuildIdentityError`（fail-loud，
+    12.2 同源纪律：读不到 ≠ 不存在）。`metadata_identity` 与 CLI 的 build id
+    解析都走它，避免同一种文件被解析三遍、格式一改就漏改一处。
+    """
     path = Path(metadata_path)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -104,6 +119,29 @@ def metadata_identity(metadata_path: str | Path) -> AppIdentity:
             f"metadata 不可读：{path}（{e}）；先 `mta repo generate`") from e
     except json.JSONDecodeError as e:
         raise BuildIdentityError(f"metadata 非 JSON：{path}（{e}）") from e
+    if not isinstance(data, dict):
+        raise BuildIdentityError(
+            f"metadata 顶层必须是对象：{path}（实得 {type(data).__name__}）")
+    return data
+
+
+def resolve_app_build(metadata: Mapping | None) -> str:
+    """**build id 的唯一解析规则**：metadata 的 `build` → 非空白字符串，否则
+    `DEFAULT_APP_BUILD`。
+
+    两个调用面共用它：运行时侧（`mta run` 的 pipeline app_build + `runs.app_build`）
+    与源图侧（`build_source_graph` 的 scope）。两处各写一份兜底 → 兜底值不同 →
+    源图与运行时图 scope 不对齐（review_p2_task52 P3-1）。
+    """
+    build = (metadata or {}).get("build") if metadata else None
+    if isinstance(build, str) and build.strip():
+        return build
+    return DEFAULT_APP_BUILD
+
+
+def metadata_identity(metadata_path: str | Path) -> AppIdentity:
+    """从 12.3 metadata（顶层扁平 git_commit / build）取身份。"""
+    data = read_metadata(metadata_path)
     return AppIdentity(git_commit=data.get("git_commit"), build=data.get("build"))
 
 

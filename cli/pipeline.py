@@ -37,7 +37,11 @@ __all__ = ["SessionPipeline", "PipelineDeps", "make_postcondition_checker"]
 # 单元测试、没跑过 `mta repo generate` 的场景）；真实 run 走 metadata 的
 # `build` 字段（`cli.main._resolve_app_build`）。放在这里而不是 main：它是
 # 管线的默认值，而 main 反向 import 管线会成环。
-DEFAULT_APP_BUILD = "local"
+# build id 的兜底与解析规则都在 `source.build_identity`（单一真值源）——
+# 源图侧（build_source_graph 的 scope）与运行时侧必须用同一份，否则
+# 「metadata 没有 build」时两面 scope 分叉（review_p2_task52 P3-1）。
+# 这里 re-export 是为了既有导入点（cli/main.py、tests）不用改。
+from source.build_identity import DEFAULT_APP_BUILD  # noqa: E402
 
 # App/driver 级动作（6.2 action 里的三种非元素动作）：不走 7.1 的
 # find/perform 元素管线。launch/terminate 归 AppSession，back 归 driver，

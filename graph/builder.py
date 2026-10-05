@@ -37,9 +37,10 @@ Runtime Graph 里混进 Source Graph 的信息，设计 12.2 的 diff（runtime 
 Source Graph ← Source Metadata 的导航信息
 ```
 
-**实测结论（2026-10-05，全仓 165 个 `source_metadata.json`）**：当前 metadata
-格式**不含任何导航声明**——没有 nav / transition / goto / navigate / action /
-tap / push / segue 字段（逐关键词扫过）。所以：
+**实测结论（2026-10-05 扫描，范围＝仓库全量的 `source_metadata.json`，含
+`out/` 下的工作副本；`out/` 每次 run 都会新增副本，故不写具体文件数）**：当前
+metadata 格式**不含任何导航声明**——没有 nav / transition / goto / navigate /
+action / tap / push / segue 字段（逐关键词扫过，零命中）。所以：
 
 - **节点 = metadata 的 `screens`**（顶层声明列表）。它与 Repository 的屏 id 同源
   ——扫描器为每个条目写一份 `generated/<build>/screens/<id>.yaml`（真机实测
@@ -49,7 +50,11 @@ tap / push / segue 字段（逐关键词扫过）。所以：
 ⚠️ **不用 `screen_elements[].name`**：那是**元素组名**，与屏 id 不同名——真机
 metadata 里 `screens` 含 `SpikeSheet`/`SpikeTab`，而 `screen_elements[].name`
 含 `SpikeScreenRoot`/`SpikeTabScreen`（后者在 `generated/<build>/elements/` 下、
-**不是**屏）。拿它当节点会让源图与运行时图不同名，diff 全变 ADDED/NOT_OBSERVED。
+**不是**屏）。拿它当节点会让源图与运行时图**不同名**：真机 10 个名字里 8 个
+相同、2 个错位（`SpikeSheet`/`SpikeTab` 漏掉、`SpikeScreenRoot`/`SpikeTabScreen`
+凭空多出），那 2 对屏在 diff 里会被误报成 NOT_OBSERVED + ADDED。
+（早先这里写的是「diff 全变 ADDED/NOT_OBSERVED」——夸大了，实际只错 2 个。
+决定不变，但理由要准：用一个夸大的后果去支撑一个正确的决定，将来会被当反例。）
 
 ⚠️ **给 Task 5.3 的提醒**：源图没有转移 ⇒ 转移级的 `CHANGED`/`REMOVED` 在
 「扫描器开始输出导航声明」之前**无数据可判**，diff 实际有数据的是节点级的
@@ -247,10 +252,30 @@ def declared_screens(metadata: dict) -> list[str]:
         raise ValueError(f"metadata.screens 必须是 list，实得 {type(raw).__name__}")
     out = []
     for item in raw:
-        if not isinstance(item, str) or not item:
-            raise ValueError(f"metadata.screens 元素必须是非空字符串，实得 {item!r}")
+        # 空白串不是「有名字的屏」（review_p2_task52 P3-4）：判据与措辞
+        # 「非空字符串」严格一致——`"  "` 会成为一个名叫两个空格的节点。
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(
+                f"metadata.screens 元素必须是非空字符串，实得 {item!r}")
         out.append(item)
     return sorted(set(out))
+
+
+def _declared_time(metadata: dict) -> str | None:
+    """`generated_at` 的类型闸门（review_p2_task52 P3-2）。
+
+    不校验的话 `123` 会被 SQLite 的 TEXT 亲和性**静默落库为 `'123'`**，而
+    `['a']`/`{'x':1}` 直到 upsert 时才炸 `ProgrammingError: Error binding
+    parameter`——离现场（build）很远。同一个函数里对 `screens` 严、对
+    `generated_at` 放任，是两套标准。
+    """
+    value = metadata.get("generated_at")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"metadata.generated_at 必须是字符串或 None，实得 {value!r}")
+    return value
 
 
 def build_source_graph(metadata: dict, *, app_id: str = "",
@@ -268,8 +293,12 @@ def build_source_graph(metadata: dict, *, app_id: str = "",
     bundle id），必须由调用方给（CLI 的 `--bundle-id`）。
     """
     if app_build is None:
-        app_build = str(metadata.get("build") or "")
-    generated_at = metadata.get("generated_at")
+        # **与运行时侧同一个解析入口**（`build_identity.resolve_app_build`）：
+        # 源图 scope 必须与运行时图 scope 逐字对齐，否则 diff 找不到同一范围
+        # （review_p2_task52 P3-1）。兜底值也不再是本模块自己的 `""`。
+        from source.build_identity import resolve_app_build
+        app_build = resolve_app_build(metadata)
+    generated_at = _declared_time(metadata)
     nodes = tuple(
         ScreenNode(screen_id=s, source_of=SOURCE, visit_count=0,
                    evidence=(EVIDENCE_SOURCE_DECLARED,),
@@ -286,18 +315,18 @@ def read_source_metadata(path: str | Path) -> dict:
     `mta graph build --from-source` 拿到一个坏文件时静默产出空图，会让
     「声明面没有屏」与「文件读坏了」在报告上长得一样。
     """
-    import json
+    from source.build_identity import BuildIdentityError, read_metadata
+
     p = Path(path)
     if not p.is_file():
+        # 文件不存在给 `FileNotFoundError`（CLI 的输入错误），其余解析错误
+        # 由**全仓唯一的 metadata 解析点**（`build_identity.read_metadata`）
+        # 负责，这里只把异常类型翻成图侧的 `ValueError`——解析逻辑不重复实现。
         raise FileNotFoundError(f"source metadata 不存在: {p}")
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        raise ValueError(f"source metadata 不是合法 JSON: {p} ({e})") from e
-    if not isinstance(data, dict):
-        raise ValueError(
-            f"source metadata 顶层必须是对象: {p} (实得 {type(data).__name__})")
-    return data
+        return read_metadata(p)
+    except BuildIdentityError as e:
+        raise ValueError(f"source metadata 不可用: {e}") from e
 
 
 # --- trace 读取（本模块唯一的 I/O 区：只搬数据，不做判定） ------------------

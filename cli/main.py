@@ -313,7 +313,6 @@ def _resolve_app_build(args: argparse.Namespace) -> str:
     是常态，退回即既有行为。build id 缺失不该拦住一次 run——它不是安全
     判据，只是 E7 集合的一个元素。
     """
-    from cli.pipeline import DEFAULT_APP_BUILD
     from source import build_identity as bi
 
     meta_path = (Path(args.metadata) if getattr(args, "metadata", None)
@@ -321,9 +320,12 @@ def _resolve_app_build(args: argparse.Namespace) -> str:
                            or "repository/generated/local")
                  / "source_metadata.json")
     try:
-        return bi.metadata_identity(meta_path).build or DEFAULT_APP_BUILD
+        # 解析规则与兜底都在 `build_identity.resolve_app_build`（单一入口）
+        # ——源图侧（`build_source_graph`）用的是同一个函数，两面 scope 因此
+        # 由构造保证一致（review_p2_task52 P3-1）。
+        return bi.resolve_app_build(bi.read_metadata(meta_path))
     except Exception:  # noqa: BLE001 — 读不到/坏 JSON 都退回默认
-        return DEFAULT_APP_BUILD
+        return bi.DEFAULT_APP_BUILD
 
 
 def _collect_metrics_if_any(args: argparse.Namespace, pipeline):

@@ -1333,7 +1333,7 @@ docstring 互相指认。
 
 ### 实测结论（决定了本任务的实际形状）
 
-**当前 metadata 格式不含任何导航声明。** 全仓 165 个 `source_metadata.json`
+**当前 metadata 格式不含任何导航声明。** 全仓的 `source_metadata.json`（含 `out/` 工作副本，数量随时点波动）
 逐关键词扫过：`nav` / `transition` / `goto` / `navigate` / `action` / `tap` /
 `push` / `segue` **全部无命中**。顶层只有
 `app_version / build / generated_at / git_commit / parser_version /
@@ -1369,7 +1369,14 @@ screen_elements / screens`。
 
 ### 真机端到端（源图 vs 运行时图，同一 `(app_id, build)`）
 
-用 Gate M2 的 `generated/local/source_metadata.json` + `trace_run2.db`：
+> ⚠️ **前提（review_p2_task52 P3-1 补记）**：这组数字要求两面**显式对齐到同一
+> scope**——真 metadata 的 `build` 是 `"local"`，而 Gate M2 的 `trace_run1/2.db`
+> 的 `runs.app_build` 是**空串**（早于 Task 5.1 的写入修复），所以建运行时图时
+> 必须显式传 `app_build=""`。用默认值建两面会得到不同 scope（`'local'` vs
+> `''`），差集就不成立。**该分叉本身已在本次修订里消除**（见下方 P3-1 记录）。
+
+用 Gate M2 的 `generated/local/source_metadata.json` + `trace_run2.db`（显式
+`app_build=""` 对齐）：
 
 | 面 | 节点 |
 |---|---|
@@ -1392,3 +1399,88 @@ screen_elements / screens`。
 
 - 全量 pytest **1168 passed**（Task 5.2 新增 18）。
 - 全仓测试文件重复定义扫描**零命中**（连续第二次）。
+
+---
+
+## Task 5.2 评审修订记录（review_p2_task52 收口，2026-10-05）
+
+评审「有条件通过」，**4×P3**（无 P2）。其中 P3-1 被要求「Task 5.3 接线前处理」、
+P3-3 被标为「收益最高」。
+
+### P3-1 build id 的兜底是**两套实现**：源图侧 `or ""` vs 运行时侧 `or "local"`
+
+- 症状（同一概念两处实现、兜底值不同）：
+
+  | metadata 输入 | 源图 `app_build`（旧） | 运行时侧 |
+  |---|---|---|
+  | `{"build": "1026"}` | `"1026"` | `"1026"` ✅ |
+  | 无 `build` 键 / `None` / 空串 | `""` | `"local"` ❌ 分叉 |
+
+  分叉时 `build_source_graph` docstring 承诺的「源图范围应与运行时图对齐」不成立
+  → diff 找不到同一 scope 的两面。
+- **同一个问题在真机上已经显形**：真 metadata 的 `build` 是 `"local"`，而 Gate M2
+  的 `trace_run1/2.db` 的 `runs.app_build` 是空串 → 用默认值建两面会得到
+  `('...','local')` vs `('...','')`。Task 5.2 声称的「真机同 scope 10 vs 3」只有在
+  **显式传 `app_build=""`** 时才复现（该前提已补进本文件 Task 5.2 段）。
+- 修法（单点化，三处）：
+  1. `DEFAULT_APP_BUILD` 从 `cli/pipeline.py` 移到 **`source/build_identity.py`**
+     （单一字面量；`cli/pipeline.py` re-export 以保住既有导入点）；
+  2. 新增 `build_identity.resolve_app_build(metadata) -> str`——**build id 的唯一
+     解析规则**（非空白字符串，否则兜底）；
+  3. `build_source_graph` 与 `cli/main._resolve_app_build` **都调它**；
+     顺带新增 `build_identity.read_metadata(path)` 作为**全仓唯一的 metadata JSON
+     解析点**，`graph.read_source_metadata` 只翻异常类型（`BuildIdentityError`
+     → `ValueError`），不再自己 `json.loads`。
+- 补 2 条测试：源图与运行时侧对「无 build / None / 空串 / 纯空白」**取同值**；
+  以及用 `inspect.getsource` 断言运行时侧确实调用共用入口（防有人改回去）。
+- ⚠️ 留给 Task 5.3：`graph diff` 应在两面 scope 不同时 **fail-loud**（而不是安静地
+  报满屏 `NOT_OBSERVED`）——已写进本记录，接线时落实。
+
+### P3-2 `generated_at` 不做类型校验（同一函数里两套标准）
+
+- 探针实测：`123` 被 SQLite 的 TEXT 亲和性**静默落库为 `'123'`**；`['a']` /
+  `{'x': 1}` 直到 upsert 才炸 `ProgrammingError: Error binding parameter 7`——
+  离现场（build）很远。而同一个函数对 `screens` 的校验很严。
+- 修法：新增 `_declared_time(metadata)` 类型闸门——`str | None`，非字符串/空白即
+  `ValueError`（在 build 现场炸）。补 3 条测试（五种坏类型 / `None` 与 ISO 串放行 /
+  「错误在 build 就抛，库里什么都没写」）。
+
+### P3-3 「固化体检」并未固化（收益最高的一条）
+
+- 评审实测：仓库里**没有任何**重复定义守护测试（`tests/` 下 `import ast` /
+  `FunctionDef` 零命中）——`aadb8b3` 的「固化体检」只是**手工跑过一次**。
+- 修法：新增 `tests/unit/test_repo_hygiene.py`（3 例）：
+  1. `test_no_duplicate_top_level_definitions`——扫仓库自己的 Python（`tests/` +
+     各源码包，排除 `out/`/`build/` 等生成物），`ast` 取顶层 `FunctionDef` /
+     `AsyncFunctionDef` / `ClassDef` 名，断言无重复；
+  2. `test_test_files_collect_count_matches_definitions`——`tests/**/test_*.py` 的
+     `def test_` 数与唯一名数对账（`--collect-only` 的 ast 等价物）；
+  3. `test_hygiene_scan_actually_covers_the_repo`——**防空转**：扫到的文件数有下界、
+     根级 `conftest.py` 与 `tests/` 必须覆盖到、`out/` 必须被排除。
+- **探针验证它真的会红**：临时注入一个重复定义 → 两条断言同时失败并**指名报出**
+  文件与重复名；移除后恢复绿。
+- **它上线后立刻抓到了本次修订自己的重复追加**：`cat >>` 追加 P3-2/P3-4 的 4 条测试
+  被重复执行（4 个名字各 2 次）——守护在第一次全量回归时就报了出来。这正是它存在的
+  意义：**同类缺陷第四次发生时，不再靠人记得手工跑一遍**。
+
+### P3-4 `declared_screens` 接受纯空白屏名
+
+- 判据 `not item` 对 `"  "` 放行 → 会成为一个名叫两个空格的节点。
+- 修法：改 `not item.strip()`，与措辞「非空字符串」严格一致；补 4 种空白形态测试。
+
+### 文档小修（评审建议）
+
+- 「全仓 165 个 `source_metadata.json`」→ 改成不带数字的措辞（`out/` 每次 run 都
+  新增副本，数量随时点波动）。
+- `screen_elements[].name` 的后果从「diff **全变** ADDED/NOT_OBSERVED」改成
+  「真机 10 个名字里 8 个相同、**2 个错位**」——决定不变，但理由不能夸大（用一个
+  夸大的后果支撑一个正确决定，将来会被当反例）。
+- 删掉 `read_source_metadata` 里多余的局部 `import json`（改为委托共用解析点后
+  自然消失）。
+- Task 5.2 段的「真机同 scope 10 vs 3」补上前提（**显式 `app_build=""`**）。
+
+### 实测
+
+- 全量 pytest **1177 passed**（Task 5.2 首次交付 1168 → 修订后 +9：源图 6 + 卫生 3）。
+- 全仓重复定义守护**已固化**（不再依赖手工）；本次修订期间的重复追加由它当场抓出
+  并清除。
