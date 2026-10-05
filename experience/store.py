@@ -42,6 +42,7 @@ from experience.models import (
     Experience,
     ExperienceRun,
     ExperienceStatus,
+    StateEvent,
 )
 from experience.schema_migrations import migrate
 
@@ -88,6 +89,10 @@ class ExperienceStore(Protocol):
                       app_build: str | None = None) -> None: ...
 
     def list(self, status: ExperienceStatus | None = None) -> list[Experience]: ...
+
+    def get_experience(self, experience_id: str) -> Experience | None: ...
+
+    def get_state_events(self, experience_id: str) -> list[StateEvent]: ...
 
 
 class SQLiteExperienceStore:
@@ -256,6 +261,40 @@ class SQLiteExperienceStore:
                     " ORDER BY updated_at DESC, rowid DESC",
                     (status.value,)).fetchall()
             return [self._exp_from_row(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_experience(self, experience_id: str) -> Experience | None:
+        """按 id 直查（含 REJECTED——`mta experience show/revalidate` 是
+        审计/操作视角，REJECTED 行必须可见；消费视角的 lookup 仍排除）。"""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM experiences WHERE experience_id=?",
+                (experience_id,)).fetchone()
+            return self._exp_from_row(row) if row else None
+        finally:
+            conn.close()
+
+    def get_state_events(self, experience_id: str) -> list[StateEvent]:
+        """状态时间线（4.3：状态可复算，不靠当前值反推）。按 id 升序。"""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM experience_state_events WHERE experience_id=?"
+                " ORDER BY id ASC", (experience_id,)).fetchall()
+            return [StateEvent(
+                experience_id=r["experience_id"],
+                from_status=(None if r["from_status"] is None
+                             else ExperienceStatus(r["from_status"])),
+                to_status=ExperienceStatus(r["to_status"]),
+                reason=r["reason"] or "",
+                run_id=r["run_id"],
+                app_build=r["app_build"],
+                operator=r["operator"] or "system",
+                created_at=datetime.fromisoformat(
+                    r["created_at"].replace("Z", "+00:00")),
+            ) for r in rows]
         finally:
             conn.close()
 

@@ -220,6 +220,59 @@ def build_parser() -> argparse.ArgumentParser:
                          help="归由理由必填（审计数据）")
     rep_tri.add_argument("--db", metavar="PATH", default="out/trace.db")
 
+    # --- mta experience（设计 13 节；Task 3.4 / Gate M3） -----------------
+    exp_p = sub.add_parser(
+        "experience", help="Experience 库运维子命令（13 节：list/show/"
+                           "verify/revalidate/sweep；promote 在 M4 加入）")
+    exp_sub = exp_p.add_subparsers(dest="experience_cmd", required=True)
+
+    def _add_exp_db(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--exp-db", metavar="PATH",
+                       default=str(DEFAULT_EXPERIENCE_DB),
+                       help="Experience SQLite 路径（默认 out/experience.db）")
+
+    exp_list = exp_sub.add_parser("list", help="列出 Experience（含 REJECTED"
+                                               "——审计视角）")
+    _add_exp_db(exp_list)
+    exp_list.add_argument("--status", default="ALL",
+                          choices=["CANDIDATE", "VERIFIED", "DEGRADED",
+                                   "REJECTED", "ALL"],
+                          help="按状态过滤（默认 ALL）")
+
+    exp_show = exp_sub.add_parser("show", help="单条详情：字段 + 样本历史 + "
+                                               "状态时间线")
+    exp_show.add_argument("experience_id")
+    _add_exp_db(exp_show)
+    exp_show.add_argument("--runs-limit", type=int, default=10,
+                          help="样本历史条数（默认最近 10 条）")
+
+    exp_verify = exp_sub.add_parser(
+        "verify", help="对全部非终态 Experience 跑 Verifier 并产出决策报告；"
+                       "PROMOTE/DEGRADE 决策落库（E4：资格经 Repository 解析"
+                       "元素判定，解析不到 = 不合格）")
+    _add_exp_db(exp_verify)
+    exp_verify.add_argument("--generated", metavar="DIR", default=None)
+    exp_verify.add_argument("--overrides", metavar="DIR", default=None,
+                            help="Repository 来源（E4 资格解析用；缺省 "
+                                 "repository/overrides）")
+
+    exp_rev = exp_sub.add_parser(
+        "revalidate", help="显式重验证通过 → VERIFIED(REVALIDATED)。"
+                           "只接受 DEGRADED（3.1 护栏）；--fingerprint 是"
+                           "验证证据（E8 观测更新）")
+    exp_rev.add_argument("experience_id")
+    _add_exp_db(exp_rev)
+    exp_rev.add_argument("--fingerprint", required=True,
+                         help="重验证时观测到的屏指纹（必填——没有证据的"
+                              "重验证不可留痕）")
+    exp_rev.add_argument("--operator", metavar="NAME", default=None)
+
+    exp_sweep = exp_sub.add_parser(
+        "sweep", help="清理过期 Candidate（8.2：STALE）；只改状态不删证据")
+    _add_exp_db(exp_sweep)
+    exp_sweep.add_argument("--max-idle-days", type=int, default=90,
+                           help="闲置天数阈值（默认 90，8.2 设计值）")
+
     return parser
 
 
@@ -890,6 +943,180 @@ def cmd_review(args: argparse.Namespace) -> int:
         return 3
 
 
+def cmd_experience(args: argparse.Namespace) -> int:
+    """设计 13 节 Experience 运维子命令（Task 3.4 / Gate M3）。
+
+    职责边界：本命令组是**库的读/巡检/显式操作**入口——判定全部来自
+    experience 包的纯函数（evaluate / eligible_for_auto_verification /
+    is_stale），CLI 不复制任何判据；执行路径的 Guard 接线归引擎（Task 2.4），
+    缓存接线归 Task 4.3（plan 定档）。
+
+    E4 单点（review_p2_task31 P3-7 接线前置①）：`verify` 对 CANDIDATE 的
+    资格必须经 Repository 解析出目标元素再调 `eligible_for_auto_verification`
+    ——解析不到（无 Repository / 元素未登记）= 不合格（fail-closed），
+    决策报告写明原因。非 CANDIDATE 状态 evaluate 不消费资格（VERIFIED 走
+    E6 窗口、DEGRADED 等显式重验证），传 False 即「不适用」，非「不合格」。
+    """
+    from experience import (
+        SQLiteExperienceStore,
+        StalenessPolicy,
+        apply_outcome,
+        eligible_for_auto_verification,
+        evaluate,
+        revalidate as verifier_revalidate,
+        sweep_stale_candidates,
+    )
+    from experience.models import ExperienceStatus, VerificationPolicy
+
+    store = SQLiteExperienceStore(args.exp_db)
+
+    if args.experience_cmd == "list":
+        status = (None if args.status == "ALL"
+                  else ExperienceStatus(args.status))
+        exps = store.list(status)
+        if not exps:
+            print("experience list: no experiences")
+            return 0
+        for e in exps:
+            print(f"{e.experience_id} [{e.status.value}] "
+                  f"app={e.app_id} screen={e.screen_id} target={e.target_id} "
+                  f"samples={e.sample_count} rate={e.success_rate:.2f} "
+                  f"updated={e.updated_at.isoformat()}")
+        return 0
+
+    if args.experience_cmd == "show":
+        exp = store.get_experience(args.experience_id)
+        if exp is None:
+            print(f"EXPERIENCE ERROR: no such experience: "
+                  f"{args.experience_id}")
+            return 3
+        print(f"experience {exp.experience_id}")
+        print(f"  status={exp.status.value} origin={exp.origin}")
+        print(f"  app={exp.app_id} screen={exp.screen_id} "
+              f"target={exp.target_id}")
+        print(f"  strategy={exp.strategy.type}:{exp.strategy.value}")
+        print(f"  samples={exp.sample_count} "
+              f"(success={exp.success_count} failure={exp.failure_count}) "
+              f"rate={exp.success_rate:.4f}")
+        print(f"  validated_builds={exp.validated_builds} "
+              f"fingerprint={exp.last_screen_fingerprint}")
+        print(f"  promoted={exp.promoted} commit={exp.promoted_commit}")
+        print(f"  created={exp.created_at.isoformat()} "
+              f"updated={exp.updated_at.isoformat()}")
+        runs = store.get_runs(exp.experience_id,
+                              limit=args.runs_limit)
+        if runs:
+            print(f"  runs (latest {len(runs)}):")
+            for r in runs:
+                print(f"    {r.run_id} {r.result} build={r.app_build} "
+                      f"guard={r.guard_reason} at={r.created_at.isoformat()}")
+        events = store.get_state_events(exp.experience_id)
+        if events:
+            print("  state_events:")
+            for ev in events:
+                print(f"    {ev.from_status.value if ev.from_status else '-'}"
+                      f"→{ev.to_status.value} {ev.reason} "
+                      f"by={ev.operator} at={ev.created_at.isoformat()}")
+        return 0
+
+    if args.experience_cmd == "verify":
+        exps = [e for e in store.list()
+                if e.status is not ExperienceStatus.REJECTED]
+        if not exps:
+            print("experience verify: no experiences to verify")
+            return 0
+        repo = None
+        repo_error = None
+        try:
+            repo = _load_repository(args)
+        except Exception as e:  # noqa: BLE001 — 库不可用 → 全员 fail-closed
+            repo_error = f"{type(e).__name__}: {e}"
+        from cli.pipeline import DEFAULT_APP_BUILD
+        counts: dict[str, int] = {}
+        applied = 0
+        for exp in exps:
+            runs = store.get_runs(exp.experience_id)
+            eligible: bool | None = None
+            why = "OK"
+            if exp.status is ExperienceStatus.CANDIDATE:
+                if repo is None:
+                    eligible, why = False, (repo_error
+                                            or "REPOSITORY_UNAVAILABLE")
+                else:
+                    try:
+                        element = repo.resolve(
+                            f"{exp.screen_id}.{exp.target_id}",
+                            build=DEFAULT_APP_BUILD)
+                        eligible = eligible_for_auto_verification(element)
+                    except Exception as e:  # noqa: BLE001
+                        eligible, why = False, f"ELEMENT_UNRESOLVED:" \
+                                               f" {type(e).__name__}"
+            outcome = evaluate(exp, runs, VerificationPolicy(),
+                               auto_verify_eligible=bool(eligible))
+            counts[outcome.reason] = counts.get(outcome.reason, 0) + 1
+            extra = (f" eligible={eligible}" + (f" ({why})" if why != "OK"
+                                                else "")) \
+                if exp.status is ExperienceStatus.CANDIDATE else ""
+            print(f"{exp.experience_id} [{exp.status.value}] "
+                  f"{outcome.decision.value}/{outcome.reason} "
+                  f"samples={outcome.detail['sample_count']} "
+                  f"rate={outcome.detail['success_rate']} "
+                  f"distinct={outcome.detail['distinct_runs']}{extra}")
+            if apply_outcome(store, exp, outcome, operator="cli-verify"):
+                applied += 1
+                print(f"  ↳ applied: {exp.status.value} → "
+                      f"{outcome.decision.value}（experience_state_events "
+                      f"已留痕，operator=cli-verify）")
+        print(f"experience verify: {len(exps)} checked, {applied} transitions,"
+              f" decisions={counts}")
+        return 0
+
+    if args.experience_cmd == "revalidate":
+        import getpass
+        exp = store.get_experience(args.experience_id)
+        if exp is None:
+            print(f"EXPERIENCE ERROR: no such experience: "
+                  f"{args.experience_id}")
+            return 3
+        operator = args.operator or getpass.getuser()
+        try:
+            verifier_revalidate(store, exp, fingerprint=args.fingerprint,
+                                operator=operator)
+        except ValueError as e:
+            # 3.1 护栏的 CLI 出口（review_p2_task31 P2-1 接线前置②）：
+            # 错误信息必须给出下一步，不是一句裸报错。
+            print(f"EXPERIENCE ERROR: {e}")
+            if exp.status is ExperienceStatus.CANDIDATE:
+                print("下一步：CANDIDATE 走 `mta experience verify`——"
+                      "经 E4 资格 + 4.5 门槛升级，不走重验证后门")
+            elif exp.status is ExperienceStatus.REJECTED:
+                print("下一步：REJECTED 是终态，重新走 `mta review accept`"
+                      " 建 Candidate（E5 重新学习路径）")
+            else:  # VERIFIED：本就无需重验证
+                print("下一步：已是 VERIFIED，无需重验证"
+                      "（显式重验证只用于恢复 DEGRADED）")
+            return 3
+        print(f"experience revalidate: {exp.experience_id} "
+              f"DEGRADED → VERIFIED (reason=REVALIDATED, "
+              f"fingerprint={args.fingerprint}, operator={operator})")
+        return 0
+
+    if args.experience_cmd == "sweep":
+        swept = sweep_stale_candidates(
+            store, StalenessPolicy(max_idle_days=args.max_idle_days))
+        if not swept:
+            print("experience sweep: no stale candidates")
+            return 0
+        for sid in swept:
+            print(f"swept {sid} → REJECTED(STALE)")
+        print(f"experience sweep: {len(swept)} cleaned"
+              "（只改状态不删证据——11.2 保留规则）")
+        return 0
+
+    print(f"experience: unknown subcommand {args.experience_cmd!r}")
+    return 2
+
+
 def main(argv: Sequence | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -905,6 +1132,8 @@ def main(argv: Sequence | None = None) -> int:
         return cmd_review(args)
     if args.command == "report":
         return cmd_report(args)
+    if args.command == "experience":
+        return cmd_experience(args)
     # 全部子命令已实现——占位分发随 review_m5_task51 P3-4 退役
     raise AssertionError(f"unhandled command: {args.command}")
 
