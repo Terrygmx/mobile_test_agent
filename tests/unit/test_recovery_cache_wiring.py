@@ -269,3 +269,43 @@ def test_cache_miss_falls_back_to_llm_unchanged(store):
     assert r.recovered and r.kind == "llm", "空库 → 缓存不介入 → 回落 LLM"
     assert _types(r) == ["experience_lookup", "experience_miss"]
     assert len(dispatched) == 1, "LLM 候选真的被执行了"
+
+
+def test_measured_latency_is_not_truncated_to_zero(store):
+    """P3-2 的实证：计时不再被 `int()` 截断——200 次取均值必须 > 0。
+
+    单次亚毫秒操作可能四舍五入到 0，所以取均值（与 review_p2_task43 的探针
+    同法）。修订前 `int(delta * 1000)` 让 cache 段**恒为 0**（样本集 `{0}`），
+    设计 17 的「Cache < Store」梯度就成了 `0 < 0`。
+    """
+    _seed(store)
+    cache = RecoveryCache()
+    lat = []
+    for _ in range(200):
+        ctx, _d = _ctx()
+        r = _engine(store, cache=cache).recover(ctx)
+        lat.append(_lookup_detail(r)["latency_ms"])
+
+    assert all(isinstance(x, float) for x in lat), "必须是浮点毫秒"
+    assert store.lookups == 1, "首次查库、其后全命中缓存"
+    assert sum(lat) / len(lat) > 0, "均值 > 0 才说明没被截断成 0"
+
+
+def test_measured_latency_is_not_truncated_to_zero(store):
+    """P3-2 的实证：计时不再被 `int()` 截断——200 次取均值必须 > 0。
+
+    单次亚毫秒操作可能四舍五入到 0，所以取均值（与 review_p2_task43 的探针
+    同法）。修订前 `int(delta * 1000)` 让 cache 段**恒为 0**（样本集 `{0}`），
+    设计 17 的「Cache < Store」梯度就成了 `0 < 0`。
+    """
+    _seed(store)
+    cache = RecoveryCache()
+    lat = []
+    for _ in range(200):
+        ctx, _d = _ctx()
+        r = _engine(store, cache=cache).recover(ctx)
+        lat.append(_lookup_detail(r)["latency_ms"])
+
+    assert all(isinstance(x, float) for x in lat), "必须是浮点毫秒"
+    assert store.lookups == 1, "首次查库、其后全命中缓存"
+    assert sum(lat) / len(lat) > 0, "均值 > 0 才说明没被截断成 0"

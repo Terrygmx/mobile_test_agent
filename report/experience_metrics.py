@@ -10,7 +10,7 @@
 | lookup / cache / LLM 延迟梯度 | 各段单次操作耗时均值（验证「Cache < Store < LLM」） |
 | Revalidation 成功率 | REVALIDATED 次数 / 曾降级次数 |
 
-## 口径上必须说清的三件事
+## 口径上必须说清的五件事
 
 1. **分母是「全部 Recovery Attempts」，不是「Experience 被查过几次」。**
    `experience_lookup` 事件只覆盖「真的查了库」的那些尝试——`no_store` /
@@ -18,33 +18,52 @@
    （Task 2.4 明文「没查库就不发事件」），拿事件当分母会系统性高估命中率。
    所以分母取 **trace `steps` 里带 recovery 标记的步骤数**——那是「失败步骤进了
    恢复管线」的步骤级事实，与 Experience 路径是否被咨询无关。分子同样取步骤级
-   （`recovered_kind == RECOVERED_EXPERIENCE`），两边同源、单位一致。
+   （见第 2 点），两边同源、单位一致。
    plan 说「数据源为 trace `experience_*` 事件 + experience 库」，此处**扩到
    trace 的 `steps`**，理由即上述（事件表在语义上无法表达「没查库的 attempt」）。
 
-2. **revert 之后的「预期恢复」要能与真回归区分**（review_p2_task42 建议动作 #2）。
+2. **分子按「机制名」判，不按 §10 的分类标签**（review_p2_task43 P2-2）。
+   `recovered_kind` 是「对使用者有意义」的标签，会被**上下文压过**——断言目标
+   漂移的上下文（`context="assertion_target"`）把机制名盖成
+   `RECOVERED_ASSERTION_TARGET`，而那条路径正是「aux 命中 Experience」（矩阵
+   #15）。拿标签当分子会让设计 §17 的**核心指标对整整一类 Experience 恢复记 0**。
+   判据 = `recovery_kind == "experience"` ∧ 有 `recovered_kind`（第二个条件必需：
+   `_aux_rerun_failed` 在**失败**步骤上也写 `recovery_kind`）。
+   `by_recovered_kind` 仍按 §10 标签分组——两者刻意不同，一个答「谁救的」、
+   一个答「对使用者意味着什么」。
+
+3. **Promotion Rate 的分子限定 VERIFIED**（review_p2_task43 P2-1）。设计 §17 的
+   定义是「Verified 中被 Promote 的比例」；不限定会让分子含已 DEGRADED/REJECTED
+   的经验（§9.4：Promotion 后降级**不撤销**已进 Git 的策略），而分母只数
+   VERIFIED——比率能算出 **300%**。
+
+4. **revert 之后的「预期恢复」要能与真回归区分**（review_p2_task42 建议动作 #2）。
    Promotion 被 `git revert` 之后，被转正的策略不在 find 链上，每次 run 都会
    稳定地多走一次恢复——这**不是**新回归。可判定的信号是：一条
    `promoted=True` 的 Experience 仍在产生成功的 `experience_execution`
    （说明它的策略没在 find 链里生效，很可能已被 revert）。故单列
    `promoted_but_recovering` 计数，并在报告里注明这是**推断**而非事实。
 
-3. **延迟梯度只报能测的段**。`cache` / `store` 来自 `experience_lookup` 事件的
-   `latency_ms`，`llm` 来自 `llm_call` stage 的 `latency_ms`（Task 4.3 新增）。
-   `promoted` 段**不报**——被转正的策略是 P1 `find()` 链上的一条普通 Locator，
-   它的耗时在 `steps.latency_ms`（整步）里，与恢复期内部的单次操作不同量级，
-   硬放在同一张梯度表里比会得出错误结论。`deterministic`（settle / reconcile /
-   run_memo）是纯进程内计算，没有单独计时，同样标 N/A 而不是填 0——填 0 会被
-   读成「快到测不出」，那是另一种谎。
+5. **延迟梯度只报能测的段**。`cache` / `store` 来自 `experience_lookup` 事件的
+   `latency_ms`（**浮点毫秒**——`int()` 截断会让亚毫秒操作恒记 0，梯度退化成
+   `0 < 0`），`llm` 来自 `llm_call` stage 的 `latency_ms`。`promoted` 段**不报**
+   ——被转正的策略是 P1 `find()` 链上的一条普通 Locator，它的耗时在
+   `steps.latency_ms`（整步）里，与恢复期内部的单次操作不同量级，硬放在同一张
+   梯度表里比会得出错误结论。`deterministic`（settle / reconcile / run_memo）
+   是纯进程内计算，没有单独计时，同样标 N/A 而不是填 0——填 0 会被读成
+   「快到测不出」，那是另一种谎。
 """
 from __future__ import annotations
 
+import html as _html
 import json
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from experience.models import Experience
+from experience.models import Experience, ExperienceStatus
+from experience.verifier import is_state_transition
+from tracer.storage import EXPERIENCE_EVENT_TYPES
 
 __all__ = [
     "ExperienceMetrics",
@@ -64,8 +83,8 @@ __all__ = [
 RECOVERY_MARKER_KEYS = ("recovery", "recovery_attempted", "recovered_kind",
                         "recovery_kind")
 
-# §10 的分类标签：由 Experience 解决的恢复
-_EXPERIENCE_KIND = "RECOVERED_EXPERIENCE"
+# 引擎里 Experience 机制的**机制名**（`rec.kind`，不是 §10 的分类标签）
+_EXPERIENCE_MECHANISM = "experience"
 
 _STATUSES = ("CANDIDATE", "VERIFIED", "DEGRADED", "REJECTED")
 
@@ -85,12 +104,19 @@ class ExperienceMetrics:
     recovery_attempts: int = 0
     experience_resolved: int = 0
     resolution_rate: float | None = None
+    # §10 的分类标签分布（按**上下文编码**的标签分组，与分子的判据不同——
+    # 分子按机制名，见 compute 的注释）
     by_recovered_kind: dict = field(default_factory=dict)
 
     # ② 四状态计数
     status_counts: dict = field(default_factory=dict)
 
-    # ③ Promotion Rate（+ revert 推断）
+    # ③ Promotion Rate。
+    # `promoted` 的语义**限定为「VERIFIED 中已 promote 的条数」**（设计 §17 的
+    # 定义是「Verified 中被 Promote 的比例」）。不这样限定会让分子含已
+    # DEGRADED/REJECTED 的经验——§9.4 明文「Promotion 后 DEGRADED 不自动撤销
+    # 已进 Git 的策略」，那些条数留在分子里而分母只数 VERIFIED，比率能算出
+    # **300%**（review_p2_task43 P2-1）。
     promoted: int = 0
     promotion_rate: float | None = None
     promoted_but_recovering: int = 0
@@ -149,7 +175,16 @@ def compute_experience_metrics(*, step_details: list[dict] | None = None,
         kind = d.get("recovered_kind")
         if kind:
             by_kind[kind] = by_kind.get(kind, 0) + 1
-    resolved = by_kind.get(_EXPERIENCE_KIND, 0)
+    # 分子按**机制名**判，不按 §10 的分类标签（review_p2_task43 P2-2）：
+    # `recovered_kind` 是「对使用者有意义」的标签，会被**上下文压过**——
+    # 断言目标漂移的上下文（`context="assertion_target"`，`cli/pipeline.py` 的
+    # aux 路径）把机制名盖成 `RECOVERED_ASSERTION_TARGET`，而那条路径恰恰是
+    # 「aux 命中 Experience」（矩阵 #15）。用标签当分子会把这一整类记 0。
+    # 第二个条件（有 `recovered_kind`）是必需的：`_aux_rerun_failed` 会在
+    # **失败**步骤上写 `recovery_kind`（那是事实），只判机制名会把失败算成解决。
+    resolved = sum(1 for d in attempts
+                   if d.get("recovery_kind") == _EXPERIENCE_MECHANISM
+                   and "recovered_kind" in d)
 
     # ② 四状态计数
     status_counts = {s: 0 for s in _STATUSES}
@@ -157,9 +192,10 @@ def compute_experience_metrics(*, step_details: list[dict] | None = None,
         status_counts[exp.status.value] = status_counts.get(
             exp.status.value, 0) + 1
 
-    # ③ Promotion Rate
+    # ③ Promotion Rate（分子**限定 VERIFIED**——见 dataclass 注释里的 300% 反例）
     verified = status_counts.get("VERIFIED", 0)
-    promoted = sum(1 for e in experiences if e.promoted)
+    promoted = sum(1 for e in experiences
+                   if e.promoted and e.status is ExperienceStatus.VERIFIED)
     # revert 推断：promoted 但仍在本期产生了成功的 experience_execution
     hit_ids = {ev["detail"].get("experience_id")
                for ev in events
@@ -170,26 +206,38 @@ def compute_experience_metrics(*, step_details: list[dict] | None = None,
         if e.promoted and e.experience_id in hit_ids)
 
     # ④ 延迟梯度
-    cache_ms = [ev["detail"]["latency_ms"] for ev in events
+    def _ms_of(x):
+        """延迟样本（浮点毫秒）。bool 是 int 的子类，显式排除。"""
+        return x if isinstance(x, (int, float)) and not isinstance(x, bool) \
+            else None
+
+    cache_ms = [v for ev in events
                 if ev.get("event_type") == "experience_lookup"
                 and (ev.get("detail") or {}).get("source") == "cache"
-                and isinstance((ev.get("detail") or {}).get("latency_ms"), int)]
-    store_ms = [ev["detail"]["latency_ms"] for ev in events
+                if (v := _ms_of((ev.get("detail") or {}).get("latency_ms")))
+                is not None]
+    store_ms = [v for ev in events
                 if ev.get("event_type") == "experience_lookup"
                 and (ev.get("detail") or {}).get("source") == "store"
-                and isinstance((ev.get("detail") or {}).get("latency_ms"), int)]
-    llm_ms = [st["latency_ms"] for d in step_details
-              for st in _stages_of(d)
+                if (v := _ms_of((ev.get("detail") or {}).get("latency_ms")))
+                is not None]
+    llm_ms = [v for d in step_details for st in _stages_of(d)
               if st.get("stage") == "llm_call"
-              and isinstance(st.get("latency_ms"), int)]
+              if (v := _ms_of(st.get("latency_ms"))) is not None]
     latency = {"cache": _mean(cache_ms), "store": _mean(store_ms),
                "llm": _mean(llm_ms)}
     latency_samples = {"cache": len(cache_ms), "store": len(store_ms),
                        "llm": len(llm_ms)}
 
     # ⑤ Revalidation 成功率
-    reval_attempts = sum(1 for ev in state_events
-                         if ev.get("to_status") == "DEGRADED")
+    # 只数**真跳变**进 DEGRADED 的行：`mark_revalidation_required` 刻意写
+    # from == to 的同值标记行，把当前正处于 DEGRADED 的那条也算进来会把
+    # 1 次真降级报成 2 次（review_p2_task43 P3-1）。判据用 `is_state_transition`
+    # ——与 `has_state_event_since_transition` 的 SQL 同义，不各写一份。
+    reval_attempts = sum(
+        1 for ev in state_events
+        if ev.get("to_status") == "DEGRADED"
+        and is_state_transition(ev.get("from_status"), ev.get("to_status")))
     reval_success = sum(1 for ev in state_events
                         if ev.get("reason") == "REVALIDATED"
                         and ev.get("to_status") == "VERIFIED")
@@ -240,10 +288,18 @@ def collect_experience_metrics(*, trace_db: str | Path,
         step_details = []
         for row in conn.execute("SELECT detail_json FROM steps"):
             step_details.append(json.loads(row[0]) if row[0] else {})
+        # 显式列举 §11.1 的**全部** 12 个事件类型，不用 `LIKE 'experience_%'`
+        # （review_p2_task43 P3-5）：① 12 个里有 4 个不带该前缀
+        # （candidate_created / candidate_verified / promotion_proposed /
+        # promotion_approved），LIKE 是**隐式白名单**——将来任何指标想用
+        # `promotion_*` 事件都会静默取到 0；② LIKE 里 `_` 是单字符通配符，
+        # `'experience_%'` 会匹配 `'experienceXlookup'`。
+        types = sorted(EXPERIENCE_EVENT_TYPES)
+        placeholders = ",".join("?" * len(types))
         events = []
         for et, detail in conn.execute(
-                "SELECT event_type, detail_json FROM infra_events"
-                " WHERE event_type LIKE 'experience_%'"):
+                f"SELECT event_type, detail_json FROM infra_events"
+                f" WHERE event_type IN ({placeholders})", types):
             events.append({"event_type": et,
                            "detail": json.loads(detail) if detail else {}})
     finally:
@@ -267,12 +323,34 @@ def collect_experience_metrics(*, trace_db: str | Path,
 # --- 渲染（HTML 片段；纯字符串拼接，无 I/O） -------------------------------
 
 
+def _esc(text) -> str:
+    """HTML 转义（review_p2_task43 P3-4）。
+
+    `report/html.py` 有自己的 `_esc`，但本模块被它 import（反向会成环），
+    所以各持一份**同一个标准库调用**（`html.escape`），不是两套实现。
+    为什么要转义：trace 库是**可写的外部输入**（`steps.detail_json` 里的
+    `recovered_kind` 等值），而报告会被打开在浏览器里。
+    """
+    return _html.escape(str(text))
+
+
 def _pct(x: float | None) -> str:
     return "N/A" if x is None else f"{x * 100:.1f}%"
 
 
 def _ms(x: float | None) -> str:
-    return "N/A" if x is None else f"{x:.1f}ms"
+    """毫秒渲染——**亚毫秒要看得见**（review_p2_task43 P3-2）。
+
+    `{x:.1f}ms` 会把 0.004ms 渲染成 `0.0ms`，而设计 §17 的延迟梯度正是要
+    分辨 cache 与 store 这种同量级的段——一律显示 `0.0ms` 等于把梯度指标
+    废掉，还会让读者读成「快到测不出」（那是另一种谎，本模块 docstring 里
+    已经为 `deterministic` 立过这条规矩）。
+    """
+    if x is None:
+        return "N/A"
+    if x < 1:
+        return f"{x:.3f}ms"
+    return f"{x:.1f}ms"
 
 
 def render_experience_metrics_section(m: ExperienceMetrics) -> str:
@@ -282,8 +360,9 @@ def render_experience_metrics_section(m: ExperienceMetrics) -> str:
     事，报告把它们写成同一个数字会误导基线判读。
     """
     def card(label: str, value: object, cls: str = "") -> str:
-        return (f'<div class="card {cls}"><div class="num">{value}</div>'
-                f'<div class="label">{label}</div></div>')
+        return (f'<div class="card {_esc(cls)}">'
+                f'<div class="num">{_esc(value)}</div>'
+                f'<div class="label">{_esc(label)}</div></div>')
 
     status_cards = "".join(
         card(s, m.status_counts.get(s, 0), f"c-exp-{s.lower()}")
@@ -301,12 +380,13 @@ def render_experience_metrics_section(m: ExperienceMetrics) -> str:
         ("promoted", "Promoted 策略（P1 find 链上的普通 Locator）", None, 0),
     ]
     grad_html = "".join(
-        f"<tr><td><code>{name}</code></td><td>{note}</td>"
-        f"<td>{_ms(v)}</td><td>{n}</td></tr>"
+        f"<tr><td><code>{_esc(name)}</code></td><td>{_esc(note)}</td>"
+        f"<td>{_esc(_ms(v))}</td><td>{_esc(n)}</td></tr>"
         for name, note, v, n in grad_rows)
 
-    kinds = "".join(f"<li><code>{k}</code>: {v}</li>"
-                    for k, v in sorted(m.by_recovered_kind.items())) or "<li>（无）</li>"
+    kinds = "".join(f"<li><code>{_esc(k)}</code>: {_esc(v)}</li>"
+                    for k, v in sorted(m.by_recovered_kind.items())) \
+        or "<li>（无）</li>"
     ev = m.events
 
     return f"""<section class="exp-metrics">
@@ -325,10 +405,10 @@ Recovery Attempts</strong>（含 Experience MISS 后回落 LLM 的、以及因�
 <code>experience_lookup</code> 事件数——后者只覆盖「真的查了库」的尝试，拿它当
 分母会系统性高估。累积口径（全部历史 run），故随运行次数上升。</p>
 <ul class="note"><li>本期恢复分类：</li>{kinds}</ul>
-<p class="note">lookup 事件 {ev.get('experience_lookup', 0)} 次（其中缓存命中
-{ev.get('lookup_source_cache', 0)} 次）；miss {ev.get('experience_miss', 0)}；
-guard_block {ev.get('experience_guard_block', 0)}；
-execution {ev.get('experience_execution', 0)}。</p>
+<p class="note">lookup 事件 {_esc(ev.get('experience_lookup', 0))} 次（其中缓存命中
+{_esc(ev.get('lookup_source_cache', 0))} 次）；miss {_esc(ev.get('experience_miss', 0))}；
+guard_block {_esc(ev.get('experience_guard_block', 0))}；
+execution {_esc(ev.get('experience_execution', 0))}。</p>
 <p class="note">⚠️ 已 Promote 但仍在产生恢复命中：<strong>
 {m.promoted_but_recovering}</strong> 条 —— <em>推断</em>其 Promotion 未在 find
 链生效（很可能已被 <code>git revert</code>）。这是「revert 后的预期恢复」，不是
@@ -339,5 +419,8 @@ execution {ev.get('experience_execution', 0)}。</p>
 <p class="note">梯度只报能测的段。<code>deterministic</code> 是纯进程内计算
 （无 I/O，未单独计时）；<code>promoted</code> 的耗时在 <code>steps.latency_ms</code>
 （整步）里，与恢复期内部单次操作不同量级，放在同一张表里比会得出错误结论——
-两者标 N/A 而不是填 0。</p>
+两者标 N/A 而不是填 0。cache / store 是**亚毫秒级**操作，故 &lt;1ms 时保留三位
+小数，让「快」与「测不到」在读数上分得开。⚠️ **修订前**（计时用
+`int(delta * 1000)` 截断）产生的历史 trace 里，亚毫秒操作会被记成整数 0，读数为
+`0.000ms` 属**旧数据残留**，不是本段真的没有耗时。</p>
 </section>"""

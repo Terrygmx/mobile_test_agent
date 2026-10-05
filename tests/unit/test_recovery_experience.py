@@ -731,7 +731,9 @@ def test_hit_path_emits_lookup_hit_execution(store):
         "candidates": 1}
     # Task 4.3：lookup 事件带来源与耗时（延迟梯度指标要能分辨 cache/store）
     assert lookup["source"] == "store", "未启用缓存 → 来源是 store"
-    assert isinstance(lookup["latency_ms"], int) and lookup["latency_ms"] >= 0
+    # 浮点毫秒（review_p2_task43 P3-2）：`int()` 截断会把亚毫秒操作记成 0，
+    # 让设计 17 的「Cache < Store」梯度退化成 `0 < 0`。
+    assert isinstance(lookup["latency_ms"], float) and lookup["latency_ms"] >= 0
     hit = _events(r)[1]["detail"]
     assert hit["experience_id"] and hit["status_before"] == "CANDIDATE"
     assert hit["screen_match"] is True and hit["uniqueness_count"] == 1

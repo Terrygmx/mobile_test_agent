@@ -910,3 +910,237 @@ Files 清单只含 verifier/sweeper，不在 `agent/recovery.py` 或 `cli/pipeli
   必须过真机回归。
   （首跑因网关连续 3 次 `LLM_PROVIDER_ERROR` + 后续 `wait ProfileView` 超时红，
   复跑即绿；与 2026-10-04 那次同签名，属环境抖动。）
+
+---
+
+## 【回填】Task 3.2 – 4.2 完成记录（2026-10-05 补记）
+
+> 这几段是**事后回填**：Task 3.2–4.2 当时只在 `review/` 留了记录、未按惯例追加
+> 本文件（Task 4.3 评审 §6-9 点出的断档）。内容从各任务的 commit message 与
+> `review/review_p2_task3x|4x_*.md` 摘取，**未重新验证**——原始证据以那些文件为准。
+
+### Task 3.2（P2-07 ranker 多候选排序，`ba3282d` + 修订 `4905682`）
+
+- 交付：`experience/ranker.py::rank_experiences` 纯函数（E13）——信任档位
+  VERIFIED > DEGRADED > CANDIDATE > REJECTED（排尾）；同档零样本排尾、
+  `success_rate` 降序、新近度新→旧、`experience_id` 确定性兜底；**返回新列表
+  不 mutate 输入**。`agent/recovery.py::_try_experiences` 的 Store 默认序
+  （`updated_at DESC`）换入 ranker。
+- 决策/偏离（登记在设计 §5.1 修订记录 + 模块 docstring）：
+  - **DEGRADED 档位**：设计 §5.1 只写了「VERIFIED 优先于 CANDIDATE」，未提
+    DEGRADED。定为「VERIFIED > DEGRADED > CANDIDATE」——降级是「曾经可信、
+    近期失效」，仍比从未验证过的候选可信。
+  - **新近度用 `updated_at` 作代理**（偏离：设计说「最近一次成功时间」）：
+    `updated_at` 是「最后一次写时刻」（`record_run` / `update_status` /
+    指纹 / build 任一落库都推进），不等于「最后一次成功」。补 `last_success_at`
+    列是 Schema 变更，撤偏离的条件已写明。
+  - **零样本 VERIFIED 排最前**（9.5 人工 Promotion 路径）：语义是「人工判断
+    > 统计」，已留痕。
+  - 档位内排尾限定、REJECTED 防御性排尾、naive datetime → TypeError
+    fail-loud 不兜底，全部登记。
+- 实测：1020 collected（+10）；修订 `4905682` 为文档与注释修订，无行为变更。
+- 评审：`review_p2_task32_2026-10-05.md`（通过，3×P3 全清）。
+
+### Task 3.3（P2-08 Recovery Cache，`4d71b9c` + 修订 `a83882b`）
+
+- 交付：`experience/cache.py::RecoveryCache` 进程内 LRU（`threading.Lock` +
+  `OrderedDict`，与 Store 同款并发纪律）；`cache_key` 五元组 sha256。
+- **E1 延伸做进 API 形状**：`get` 返回裸 `list[Experience]`，缓存里不存在
+  「已验证 / 可跳过」标记——「绕过 Guard」在类型上不可表达（比「调用方记得先过
+  Guard」的约定强一个量级）。
+- 两处公式细化：`None` 段 → `''`（f-string 的字面 `'None'` 会与真值撞车）；
+  段内含 `'|'` → fail-loud（分隔符混进段会让两个签名静默撞 key）。
+- 其他决策：**入出皆深拷贝**（缓存正本不被运行时突变污染）；`app_build` 不在
+  键里（无失效风暴）；**空候选列表不进缓存**（防负缓存黑洞：Store 侧后增数据
+  进程内永久失明且无报错）；`clear()` 仅显式运维；`hits/misses` 计数供 Task 4.3
+  的延迟梯度用。
+- 接线定档（本任务只交模块）：引擎接线归 **Task 4.3**（延迟梯度指标需要缓存
+  真实进入执行路径），两条红线写明（命中/未命中共用同一段 Guard+记账；缓存不得
+  改变 ranker 输入集语义）。**任务号勘误 4.2→4.3**。
+- 实测：1034 collected（+14）；修订 `a83882b` 1036（+2 钉子测试）。
+- 评审：`review_p2_task33_2026-10-05.md`（通过，4×P3 全清）。
+  **挂账**：`validated_builds` 裁决机制三选一 → 已在 Task 4.3 拍板为 (a)。
+
+### Task 3.4（`mta experience` CLI + Gate M3，`808ac8c` + 修订 `2972563`）
+
+- 交付：`cli/main.py::cmd_experience` 五个子命令（设计 13 节）——
+  `list`（`--status` 过滤，含 REJECTED 审计视角）/ `show`（字段 + 样本历史 +
+  状态时间线）/ `verify`（对全部非终态跑 Verifier，PROMOTE/DEGRADE 落库，
+  决策报告带 eligible 与原因）/ `revalidate`（`--fingerprint` 证据必填，非
+  DEGRADED → exit 3 + 下一步指引）/ `sweep`（STALE 清理，只改状态不删证据）。
+- **E4 单点接线**（review_p2_task31 P3-7 验收项）：`verify` 的资格经 Repository
+  解析元素 + `eligible_for_auto_verification`；解析不到 = 不合格（fail-closed），
+  报告写明 `ELEMENT_UNRESOLVED` / `REPOSITORY_UNAVAILABLE`。
+- `experience/store.py`：新增 `get_experience`（按 id 直查含 REJECTED）+
+  `get_state_events`（状态时间线）。
+- **登记偏离**：`revalidate` 的「Guard + 执行」自动化需要设备会话 → CLI 只提供
+  留痕出口（`--fingerprint` 必填 + `--evidence-run-id` 把证据挂到真实 trace run，
+  落 `experience_state_events.run_id`），输出明示「证据为操作者自报 —— operator
+  留痕」。自动化留待 M4+ 真机路径。
+- `phase0/verify_p2_m3.py`：Gate M3 离线判据 8/8——S1 完整状态转换事件链、
+  矩阵 #5（总体 0.97 仍被窗口降级）/ #6（新 build 不直接信任，成功后追加，E7
+  集合语义）/ #7（fingerprint 变化 → 标记不拒绝）/ #8/#9（**经真 CLI** 非幂等与
+  MEDIUM 10/10 不升级）/ #11（STALE 证据保留）/ #12（双线程 200 次并发写无丢失）
+  + S8 CLI 冒烟；`out/p2_m3_gate/summary.json` verdict=PASS。
+- 实测：1051 collected（+15）；修订 `2972563` 1054（+3 净增，Gate M3 重跑 8/8）。
+- 评审：`review_p2_task34_2026-10-05.md`（通过，1×P2 + 3×P3 全清）。
+
+### Task 4.1（P2-09 promoter，`f93d9f3` + 修订 `9284f6d`）
+
+- 交付：`experience/promoter.py` 两段式 Promotion（设计 9.3）——
+  `generate_proposal` 只落 proposal 表**不写文件**；`approve_proposal` 写
+  `overrides/elements/<Screen>.yaml`（`origin: experience`）+ git commit +
+  promoted 记账，返回 sha。
+- 红线：非 VERIFIED 需 9.5 显式 `manual_override` + 理由；REJECTED 连人工路径
+  也不开（终态，复活只走 E5）；已有同 id override fail-loud（不可静默覆盖）；
+  `approve` 必须走 proposal，**无直写入口**。
+- 9.4 两条时间线：`approve` 不改 `status`，`promoted`/`promoted_commit` 独立
+  记账（`record_promotion` 落 `from==to` 事件 reason=PROMOTED）。
+- 接线前置落地：`ORIGINS` 扩 `"experience"`（与写入**同批**，否则 loader 白名单
+  一上线就 fail-loud）；`type` 字段定档——override 省略 type 沿用 generated（5.3）。
+- resolver：experience 策略出现时链稳定为 `manual > source > experience`
+  （**尝试顺序**、排链尾不丢弃、冲突记 `experience_strategy_conflict`）；
+  无 experience 策略时**不做任何重排**（P1 行为保留）。
+- 修订 `9284f6d`：**P2-1** 写文件与 git commit 之间补事务性（git 失败回滚文件写，
+  proposal 保持 PENDING，重试即续传——不再把工具写了一半的文件误报成「人工
+  override」）；**P2-2 定档 (c)**：promoter 产出的 override doc 带
+  `mode: append`，§9.2「排链尾不丢弃」由**写入口**兑现（更正：上一条 commit 的
+  该说法当时只在手写三源单文档成立，promoter 真实产物是 replace）；H15 注记；
+  同 id 检查正则 `\s*$` → `\b`（容忍行尾注释）。
+- 实测：1071 collected（+17）；修订 1074（+3）。
+- 评审：`review_p2_task41_2026-10-05.md`（Task 3.4 核销 ✅；2×P2 + 4×P3 全清）。
+
+### Task 4.2（Promotion 解耦 + 回滚 + Gate M4，`649b78f` + 修订 `06f6ea6`）
+
+- 交付：`tests/fault_injection/test_p2_matrix_m4.py` 矩阵 #13/#14（FakeExecutor，
+  **真 git 仓库不 mock**）——#13 promote 后注入连续失败 → DEGRADED 且 overrides
+  **未被程序改动**（工作区 diff 干净，9.4）；#14 `git revert` → resolver 恢复
+  source-only 链、Store 的 promoted 记账/状态/事件链/样本**全部原样**（9.6/E10）。
+  外加 Gate M4 头条：promote 后正常 `find()` 命中、不进 Recovery。
+- **promoter 同 id 定档修订**（Gate M4 真机首跑实锤的堵点）：漂移转正的主流程
+  恰恰是目标元素在 overrides 已有 P1 登记——同 id 由 fail-loud 改为**并入既有
+  文档 strategies 链尾**（单文档不产双 doc、git diff 可审计、resolver origin
+  排序保链尾）；已含相同 experience 策略 → 重复 promote fail-loud。
+- `phase0/verify_p2_m4.py`：Gate M4 真机判据（设计 18 步骤 9–10）——G1 矩阵
+  pytest + G2 漂移首跑 LLM 救回 + accept → Candidate + G3 9.5 人工 promote
+  （CLI 两段式）→ overrides 并入 + commit + G4 再跑 PASS/零恢复/零 LLM +
+  G5 revert 后 `RECOVERED_EXPERIENCE`、Store 记账原样 + G6 空库 no-llm 仍 FAIL；
+  `out/p2_m4_gate/summary.json` verdict=PASS（device_half=PASS）。
+- **事故记录**：`proj` 无自己的 `.git` 时 `git -C` 会穿透到主仓库，
+  `rev-parse` 判据不成立——已改为检查 `proj/.git` 存在性 + `toplevel` 断言双保险；
+  首跑污染的主仓库已 `reset` 还原（源码/overrides 无损）。
+- 修订 `06f6ea6`：**P2-1** `_merge_experience_strategy` 弃用
+  `yaml.safe_dump_all` 整文件重序列化（手写 overrides 的头注释/行内注释会被
+  **静默抹掉**——探针实锤），改**行级手术**（定位 `strategies:` 块尾插一行，其余
+  字节不动），测试断言 `before in after`（全文逐字节保留）；**P3-1** 工作提交身份
+  修复（`git -C proj config` 把 gate_m4 身份写进了主仓库 → 已清泄漏配置 +
+  `amend --reset-author`，现 `guomingxin`，tag 重指）；P3-2 G5 判据
+  附注 revert 后稳态；P3-3 docstring 注记 + G2 重试扩到环境级 `WAIT_TIMEOUT` 抖动。
+- 实测：1078 collected（+4）；修订 1079（+1 注释保全测试），Gate M4 在 HEAD 重跑
+  exit 0 / device_half=PASS。
+- 评审：`review_p2_task42_2026-10-05.md`（通过，1×P2 + 3×P3 全清）。
+
+---
+
+## Task 4.3 评审修订记录（review_p2_task43 收口，2026-10-05）
+
+评审结论「有条件通过」，2×P2 + 6×P3。**两条 P2 都是「指标口径与它自己的定义
+不符」**，且评审明确建议「修完再开 M5」（M5 的端到端演示要拿 Resolution Rate
+当「知识在积累」的证据）。逐条处置：
+
+### P2-1 Promotion Rate 的分子未限定 VERIFIED（能渲染出 `300.0%`）
+
+- 设计 §17 的定义是「Verified 中被 Promote 的比例」；实现是「全部
+  `promoted=True` / VERIFIED 计数」。二者在 §9.4 的明文场景下必然分叉——
+  **Promotion 后 DEGRADED 不自动撤销已进 Git 的策略**，那条经验仍在分子里却
+  不在分母里。评审探针：`2 promoted / 1 VERIFIED` → `200%`；再加一条 REJECTED
+  → **`300%`**。
+- 修法：`promoted = sum(... if e.promoted and e.status is VERIFIED)`；dataclass
+  注释写明该字段的语义就是「VERIFIED 中已 promote 的条数」（两个概念同名是这类
+  口径错的高发形态）。补两条钉子测试（含渲染面：产物里不得出现 `200%/300%`）。
+
+### P2-2 Resolution Rate 的分子用「上下文编码的标签」，整类漏计
+
+- 分子原取 `recovered_kind == "RECOVERED_EXPERIENCE"`，但 `recovered_kind` 是
+  §10 的分类标签，**会被上下文压过**：断言目标漂移的上下文
+  （`context="assertion_target"`，`cli/pipeline.py` 的 aux 路径）把机制名盖成
+  `RECOVERED_ASSERTION_TARGET`——而那条路径正是「aux 命中 Experience」（矩阵
+  #15）。核心指标对**整整一类** Experience 恢复记 0。
+- 修法：分子改按**机制名**判 ——
+  `d.get("recovery_kind") == "experience" and "recovered_kind" in d`。
+  第二个条件必需：`_aux_rerun_failed` 在**失败**步骤上也写 `recovery_kind`，
+  只判机制名会把失败算成「已解决」。评审的六形状探针表逐条复核，**只有**
+  「aux 断言·Experience 成功」由 0 变 1，其余五种不变。
+- 连带：`by_recovered_kind` 仍按 §10 标签分组（一个答「谁救的」、一个答「对
+  使用者意味着什么」），docstring 写明二者刻意不同。既有测试 fixture 里只写了
+  `recovered_kind`、没写 `recovery_kind`——那是**生产不可能出现的形状**（真实
+  恢复步骤两个键都写），已按管线真实形状补齐。
+
+### P3-1 `revalidation_attempts` 被非跳变标记污染
+
+- 判据 `to_status == "DEGRADED"` 会把 `mark_revalidation_required` 刻意写的
+  `from == to` 标记行算成一次降级 → 真降级 1 次报成 2 次、成功率 100% 掉成 50%。
+- 修法：新增 `experience/verifier.py::is_state_transition`（**「状态跳变」的
+  唯一定义**，与 `has_state_event_since_transition` 的 SQL 同义），指标用它过滤。
+  评审指出的「同一个概念在本仓已有权威判据、这里没用它是典型的『两套实现』」
+  已通过把定义抽成具名谓词解决（SQL 版无法直接复用，已在两处 docstring 互相指认）。
+
+### P3-2 `int()` 毫秒截断 → cache 段恒 0，梯度指标目的落空
+
+- 三处计时都是 `int((time.monotonic() - t) * 1000)`，亚毫秒操作**一律记 0**
+  （评审探针：200 次 dict.get 与内存 sqlite 的样本集都是 `{0}`）→ 设计 §17 的
+  「Cache < Store」退化成 `0 < 0`；产物里已出现 `0.0ms`。
+- 修法：新增 `agent/recovery.py::_ms_since`（单点）——`perf_counter()` +
+  `round(delta * 1000, 3)` **浮点毫秒**；渲染层 `_ms` 在 <1ms 时保留三位小数，
+  并注明「修订前的历史 trace 里 `0.000ms` 是旧截断残留」。补一条 200 次取均值的
+  实证测试（均值 > 0 才说明没被截断）。
+  ⚠️ 4.7 样本的 `latency_ms`（落 `experience_runs.latency_ms`，INTEGER 列）**不**
+  改：那里含设备 I/O 属毫秒级，截断无实际影响，改它要动 Schema——已在
+  `_ms_since` 的 docstring 写明这个边界。
+
+### P3-3 测试文件 56 行逐行重复块 + 2 个被遮蔽的同名测试
+
+- 实测确认评审的发现：`def test_` **26 个 / 唯一 24 个**（`test_cli_run_html_*`
+  各定义两次），Python 后者静默覆盖前者——**一整块永不执行的死代码**。
+  成因是我追加测试时的 `cat >>` 被重复执行（本项目已知的重复追加坑）。
+- 修法：删掉重复块，追加内容改走「临时文件 + 程序化追加 + 追加后立即查重」
+  （`def` 数与唯一名数对账），本次追加后 33/33 唯一。
+
+### P3-4 渲染层不转义
+
+- `by_recovered_kind` 的键等值原样进 HTML（评审探针：`<script>` 原样存在）。
+  trace 库是**可写的外部输入**，而报告会被打开在浏览器里。
+- 修法：`experience_metrics.py` 加 `_esc`（`html.escape`；`html.py` 有自己的
+  同名函数但本模块被它 import，反向会成环——两处都是**同一个标准库调用**，
+  不是两套实现），全部插值点套上。
+
+### P3-5 事件采集用 `LIKE 'experience_%'`
+
+- 12 个事件类型里有 4 个不带该前缀（`candidate_created` / `candidate_verified` /
+  `promotion_proposed` / `promotion_approved`）→ **隐式白名单**，将来任何指标想
+  用 `promotion_*` 事件都会静默取到 0；且 `LIKE` 里 `_` 是单字符通配符。
+- 修法：改 `event_type IN (...)` 显式列举，列表由 `EXPERIENCE_EVENT_TYPES`
+  生成（单一真值源，不手抄）。
+
+### P3-6 测试名与断言矛盾 + 梯度测试的过度声称
+
+- `..._are_absent_not_zero` 的断言其实是「键在、值为 None」→ 改名
+  `..._are_none_not_zero`，docstring 写明「不在键里的是 `deterministic` /
+  `promoted`（渲染层硬编码 N/A），不是这三个键」。
+- 梯度测试补 docstring：`cache < store < llm` 是**自己注入的数据**，
+  纯函数测试证明不了系统行为——真实梯度要等基线数据。
+
+### 未处理（登记）
+
+- 评审 §4 的四条「未验证/存疑」全部为**已登记的可接受项**：Gate M4 本次未复跑
+  （Task 4.3 已复跑 Gate M2）、`promoted_but_recovering` 的假阳性面（报告已标
+  「推断」，成因区分留待基线）、`collect_experience_metrics` 读全表 `steps` 的
+  规模（当前无问题，未压测）、`status_counts` 对四态之外键的静默处理
+  （`ExperienceStatus` 是四值枚举，不可达）。
+
+### 实测
+
+- 全量 pytest **1121 passed**（Task 4.3 首次交付 1111 → 修订后 +10）。
+- 真机指标产物用修订后代码**重新生成**：`out/p2_m2_gate/experience_metrics_demo.html`
+  （run1 `0.0%` → run2 `100.0%` 不变；run2 的 store 段仍显示 `0.000ms`——那是
+  **修订前**的 trace 数据，页内已注明）。

@@ -195,6 +195,22 @@ class RunMemo:
         self._memo[(screen, target_id, app_build)] = strategy
 
 
+def _ms_since(t0: float) -> float:
+    """`t0` 到现在的**浮点毫秒**（`t0` 由 `time.perf_counter()` 取）。
+
+    单点定义（review_p2_task43 P3-2）：recovery 期所有**跨进程边界的**计时都
+    走它——`int(delta * 1000)` 的截断会让亚毫秒操作恒记 0，把设计 17 的延迟
+    梯度变成 `0 < 0`（cache 与 store 都是亚毫秒级），产物里还会出现
+    `0.0ms` 这种自相矛盾的数字。用 `perf_counter()`（单调、高分辨率、语义
+    明确是计时用）而不是 `time.monotonic()`。
+
+    ⚠️ 4.7 样本的 `latency_ms`（`_try_one_experience` 里那次候选评估）**不**
+    走本函数：它落 `experience_runs.latency_ms`，是 INTEGER 列，且含设备 I/O
+    属毫秒级——截断在那里无实际影响，改它要动 Schema。
+    """
+    return round((time.perf_counter() - t0) * 1000, 3)
+
+
 def _single_element(found) -> object:
     """Executor 契约归一（2.6 实锤：单元素或列表两种替身形态）。"""
     if isinstance(found, (list, tuple)):
@@ -659,17 +675,21 @@ class RecoveryEngine:
                if self.cache is not None else None)
         cached = None
         if self.cache is not None:
-            t_cache = time.monotonic()
+            # 计时一律 `perf_counter()` + **浮点毫秒**（review_p2_task43 P3-2）：
+            # `int(... * 1000)` 会把亚毫秒操作一律截断成 0——cache 段恒 0、
+            # store 段常 0，设计 17 的「Cache < Store」梯度就没法验证
+            # （`0 < 0` 恒假），产物里还会出现 `0.0ms` 这种自相矛盾的数字。
+            t_cache = time.perf_counter()
             cached = self.cache.get(key)
-            cache_ms = int((time.monotonic() - t_cache) * 1000)
+            cache_ms = _ms_since(t_cache)
         if cached is not None:
             candidates, source, lookup_ms = cached, "cache", cache_ms
         else:
             try:
-                t_store = time.monotonic()
+                t_store = time.perf_counter()
                 candidates = self.experience_store.lookup(
                     ctx.app_id, ctx.screen_id or "", ctx.element_id)
-                lookup_ms = int((time.monotonic() - t_store) * 1000)
+                lookup_ms = _ms_since(t_store)
             except Exception as e:  # noqa: BLE001 — 读库故障不伪装成「没有经验」
                 stages.append({"stage": "experience",
                                "outcome": f"lookup_error:{type(e).__name__}"})
@@ -1025,11 +1045,11 @@ class RecoveryEngine:
                  else ctx.screen_id) or ""),
             page_source=untrusted)
         try:
-            t_llm = time.monotonic()
+            t_llm = time.perf_counter()
             raw = self.llm.complete(prompt, timeout=timeout)
         except Exception as e:  # noqa: BLE001 — provider 故障如实分类
             stages.append({"stage": "llm_call", "outcome": "error",
-                           "latency_ms": int((time.monotonic() - t_llm) * 1000)})
+                           "latency_ms": _ms_since(t_llm)})
             return miss("LLM_PROVIDER_ERROR",
                         {"stage": "llm", "outcome": "LLM_PROVIDER_ERROR",
                          "error": f"{type(e).__name__}: {e}"})
@@ -1038,7 +1058,7 @@ class RecoveryEngine:
         # 只测 `complete()` 本身（不含 prompt 组装/解析），与 cache/store 的
         # 单次操作耗时同量级，才谈得上梯度。
         stages.append({"stage": "llm_call", "outcome": "ok",
-                       "latency_ms": int((time.monotonic() - t_llm) * 1000)})
+                       "latency_ms": _ms_since(t_llm)})
 
         parsed = parse_llm_output(raw)
         if parsed.ignored_fields:

@@ -66,6 +66,7 @@ from experience.models import (
 __all__ = [
     "VerificationOutcome",
     "REVALIDATION_REQUIRED",
+    "is_state_transition",
     "distinct_run_count",
     "success_rate_of",
     "recent_failure_count",
@@ -103,6 +104,23 @@ class VerificationOutcome:
 
 
 # --- 纯谓词（4.5 / 4.6 / 4.4 / E8） ---------------------------------------
+
+
+def is_state_transition(from_status, to_status) -> bool:
+    """**「状态跳变」的唯一定义**（时间线行的判据）。
+
+    `from_status is None`（首条事件，无前态）或 `from != to` 才是跳变；
+    `from == to` 是**非跳变标记**（E8 的 `REVALIDATION_REQUIRED` 刻意写同值行，
+    见 `store.record_state_event`）。
+
+    ⚠️ 这个规则在 `SQLiteExperienceStore.has_state_event_since_transition` 里
+    有一份 SQL 版（`from_status IS NULL OR from_status != to_status`）——两处
+    必须同义。任何按「时间线行」计数的消费方（如指标的 revalidation 分母）都
+    要用本函数，不要各自写 `to_status == "DEGRADED"` 之类的判据：那会把非跳变
+    标记也算进去（review_p2_task43 P3-1 实测：真降级 1 次报成 2 次、成功率
+    100% 掉成 50%）。
+    """
+    return from_status is None or from_status != to_status
 
 
 def distinct_run_count(runs: list[ExperienceRun]) -> int:

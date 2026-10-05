@@ -29,9 +29,18 @@ APP = "com.phaset0.logindemo"
 # --- 构造原始行（都是「已经取出来的行」，纯函数不吃别的） --------------------
 
 
-def _step(*, recovered_kind=None, recovery=None, attempted=None,
-          extra=None) -> dict:
+def _step(*, recovered_kind=None, mechanism=None, recovery=None,
+          attempted=None, extra=None) -> dict:
+    """构造一条 steps 的 detail（**按管线真实形状**）。
+
+    `mechanism`（= `recovery_kind`）与 `recovered_kind` 在真实恢复步骤上
+    **同时存在**（`cli/pipeline.py` 的两条成功路径都写两个键）——fixture 只写
+    一个就会造出生产不可能出现的形状，让按机制名判的分子与按标签判的分子
+    看起来一样。review_p2_task43 P2-2 的探针表逐形状核过。
+    """
     d = dict(extra or {})
+    if mechanism:
+        d["recovery_kind"] = mechanism
     if recovered_kind:
         d["recovered_kind"] = recovered_kind
     if recovery is not None:
@@ -80,9 +89,9 @@ def test_miss_then_llm_counts_in_denominator_not_numerator():
     这条会被整条漏掉，命中率被系统性高估。
     """
     steps = [
-        _step(recovered_kind="RECOVERED_EXPERIENCE",
+        _step(recovered_kind="RECOVERED_EXPERIENCE", mechanism="experience",
               recovery={"stages": [{"stage": "experience", "outcome": "hit"}]}),
-        _step(recovered_kind="RECOVERED_LLM",
+        _step(recovered_kind="RECOVERED_LLM", mechanism="llm",
               attempted={"stages": [
                   {"stage": "experience", "outcome": "miss"},
                   {"stage": "llm", "outcome": "candidate"}]}),
@@ -105,7 +114,8 @@ def test_attempts_that_never_queried_the_store_still_count():
                                      "outcome": "incomplete_key"}]}),
         _step(attempted={"stages": [{"stage": "experience",
                                      "outcome": "no_page_source"}]}),
-        _step(recovered_kind="RECOVERED_EXPERIENCE", recovery={"stages": []}),
+        _step(recovered_kind="RECOVERED_EXPERIENCE", mechanism="experience",
+              recovery={"stages": []}),
     ]
     m = compute_experience_metrics(step_details=steps)
 
@@ -144,7 +154,7 @@ def test_resolution_rate_is_step_level_not_candidate_level():
     会把「一次恢复」算成多次，率超过 1。
     """
     steps = [_step(recovered_kind="RECOVERED_EXPERIENCE",
-                   recovery={"stages": []})]
+                   mechanism="experience", recovery={"stages": []})]
     events = [_execution("e1", "FAILURE"), _execution("e2", "FAILURE"),
               _execution("e3", "SUCCESS")]
     m = compute_experience_metrics(step_details=steps, events=events)
@@ -154,18 +164,29 @@ def test_resolution_rate_is_step_level_not_candidate_level():
 
 
 def test_by_recovered_kind_breakdown():
+    """分类分布按 §10 标签分组；分子按**机制名**判——两者刻意不同。
+
+    这里 4 步里 3 步是 Experience 救的（两条 `RECOVERED_EXPERIENCE` + 一条
+    `RECOVERED_ASSERTION_TARGET`，后者的标签被上下文压过但机制仍是 experience）
+    → 分子 3、分母 4。分布表照旧按 §10 标签拆成三档，读者能同时看到
+    「谁救的」与「对使用者意味着什么」（review_p2_task43 P2-2）。
+    """
     steps = [
-        _step(recovered_kind="RECOVERED_EXPERIENCE", recovery={}),
-        _step(recovered_kind="RECOVERED_EXPERIENCE", recovery={}),
-        _step(recovered_kind="RECOVERED_LLM", recovery={}),
-        _step(recovered_kind="RECOVERED_ASSERTION_TARGET", recovery={}),
+        _step(recovered_kind="RECOVERED_EXPERIENCE", mechanism="experience",
+              recovery={}),
+        _step(recovered_kind="RECOVERED_EXPERIENCE", mechanism="experience",
+              recovery={}),
+        _step(recovered_kind="RECOVERED_LLM", mechanism="llm", recovery={}),
+        _step(recovered_kind="RECOVERED_ASSERTION_TARGET",
+              mechanism="experience", recovery={}),
     ]
     m = compute_experience_metrics(step_details=steps)
 
     assert m.by_recovered_kind == {"RECOVERED_EXPERIENCE": 2,
                                    "RECOVERED_LLM": 1,
                                    "RECOVERED_ASSERTION_TARGET": 1}
-    assert m.resolution_rate == pytest.approx(0.5)
+    assert m.experience_resolved == 3, "标签是断言目标、机制仍是 experience"
+    assert m.resolution_rate == pytest.approx(0.75)
 
 
 def test_entered_recovery_marker_set():
@@ -222,6 +243,13 @@ def test_promoted_but_recovering_flags_reverted_promotions():
 
 
 def test_latency_gradient_splits_cache_and_store():
+    """延迟分段：cache 与 store 按 source 分组，llm 取 `llm_call` stage。
+
+    ⚠️ 本测试断言 `cache < store < llm` 用的是**自己注入的数据**
+    （1/3ms vs 10/30ms vs 400ms），**不是**「系统真的满足该梯度」的证据——
+    纯函数测试证明不了系统行为（review_p2_task43 P3-6）。真实梯度要等基线
+    数据积累后从产物里读（设计 §17：「先建基线，不预设绝对数值」）。
+    """
     events = [_lookup("store", 30), _lookup("store", 10),
               _lookup("cache", 1), _lookup("cache", 3)]
     steps = [_step(attempted={"stages": [
@@ -235,11 +263,16 @@ def test_latency_gradient_splits_cache_and_store():
     assert m.latency["cache"] < m.latency["store"] < m.latency["llm"]
 
 
-def test_latency_unmeasurable_segments_are_absent_not_zero():
-    """不可测的段**不出现**在 dict 里（渲染层标 N/A）。
+def test_latency_unmeasurable_segments_are_none_not_zero():
+    """不可测的段值是 **None**，不是 0（渲染层标 N/A）。
 
     填 0 会被读成「快到测不出」，而实际是「没有这个计时点」——那是另一种谎。
-    `deterministic`（纯进程内）与 `promoted`（P1 find 链）都不在本表。
+
+    名字里的「不可测」指 `deterministic`（纯进程内，未单独计时）与
+    `promoted`（P1 find 链，耗时在整步里）——它们**根本不在 dict 的键里**，
+    由渲染层硬编码成 N/A 行。而 `cache` / `store` / `llm` 三个键**始终在**
+    （值可能为 None，表示「这一段没有样本」）。两种「没有」不是一回事，
+    早先的测试名把它们混为一谈（review_p2_task43 P3-6）。
     """
     m = compute_experience_metrics()
     assert m.latency == {"cache": None, "store": None, "llm": None}
@@ -308,7 +341,7 @@ def test_render_run_report_includes_metrics_only_when_given():
     assert "Experience 指标" not in render_run_report(run)
     html = render_run_report(run, experience_metrics=compute_experience_metrics(
         step_details=[_step(recovered_kind="RECOVERED_EXPERIENCE",
-                            recovery={})]))
+                            mechanism="experience", recovery={})]))
     assert "Experience 指标（设计 17）" in html
     assert "Resolution Rate" in html
 
@@ -326,7 +359,8 @@ def _trace_db(tmp_path) -> str:
                                    detail_json TEXT);
     """)
     conn.execute("INSERT INTO steps (detail_json) VALUES (?)",
-                 (json.dumps({"recovered_kind": "RECOVERED_EXPERIENCE",
+                 (json.dumps({"recovery_kind": "experience",
+                              "recovered_kind": "RECOVERED_EXPERIENCE",
                               "recovery": {"stages": [
                                   {"stage": "llm_call", "latency_ms": 250}]}}),))
     conn.execute("INSERT INTO steps (detail_json) VALUES (?)",
@@ -468,59 +502,152 @@ def test_cli_run_html_omits_metrics_when_exp_db_absent(tmp_path):
     assert "Experience 指标" not in html.read_text(encoding="utf-8")
 
 
-# --- CLI 端到端：`mta run --html` 真的带出指标段 -----------------------------
+# --- review_p2_task43 的修订钉子（2×P2 + 4×P3） -----------------------------
 
 
-def test_cli_run_html_includes_metrics_when_exp_db_exists(tmp_path):
-    """G10 的可观测面：报告首页必须真的出现指标段。
+def test_promotion_rate_numerator_is_limited_to_verified():
+    """P2-1：分子限定 VERIFIED，否则 §9.4 场景能算出 **300%**。
 
-    单独测渲染函数不够——`_collect_metrics_if_any` 的接线（库存在才采集、
-    采集喂给报告）才是「指标可观测」的落点。
+    设计 §17 的定义是「Verified 中被 Promote 的比例」。一条 promoted 的经验
+    被滑动窗口降级后（§9.4：**不自动撤销**已进 Git 的策略），它仍在
+    `promoted` 里却不在 VERIFIED 里——分子不限定就会报出 >100% 的「比例」。
     """
-    from cli.main import main
+    exps = [
+        _exp("e1", ExperienceStatus.VERIFIED, promoted=True),
+        _exp("e2", ExperienceStatus.DEGRADED, promoted=True),
+        _exp("e3", ExperienceStatus.REJECTED, promoted=True),
+    ]
+    m = compute_experience_metrics(experiences=exps)
 
-    sdir = tmp_path / "suites"
-    sdir.mkdir()
-    (sdir / "plain_001.yaml").write_text(
-        'schema_version: "0.2"\nid: login_001\nname: 登录\nsuite: smoke\n'
-        "steps:\n  - action: launch_app\n", encoding="utf-8")
-
-    exp_db = tmp_path / "exp.db"
-    SQLiteExperienceStore(exp_db).create_candidate(CandidateSeed(
-        review_id=1, recovery_id=1, seed_run_id="run_seed", seed_step_id=1,
-        seed_recovery_review_id=1, app_id=APP, screen_id="LoginView",
-        target_id="username_field",
-        strategy=LocatorStrategy(type="accessibility_id", value="u_v2",
-                                 origin="experience")))
-    html = tmp_path / "report.html"
-
-    code = main(["run", "--case", "login_001", "--suites-root", str(sdir),
-                 "--db", str(tmp_path / "trace.db"), "--fake-driver",
-                 "--no-llm", "--exp-db", str(exp_db), "--html", str(html)])
-
-    assert code == 0
-    body = html.read_text(encoding="utf-8")
-    assert "Experience 指标（设计 17）" in body
-    assert "Resolution Rate" in body
-    assert "CANDIDATE" in body and "1" in body, "库里的候选数要出现在状态计数里"
+    assert m.status_counts["VERIFIED"] == 1
+    assert m.promoted == 1, "只有 VERIFIED 的那条进分子"
+    assert m.promotion_rate == pytest.approx(1.0)
+    assert _pct_of(m.promotion_rate) <= "100.0%", "比例不得超过 100%"
 
 
-def test_cli_run_html_omits_metrics_when_exp_db_absent(tmp_path):
-    """库不存在 → 不采集、不构造（最小副作用），报告不带指标段。"""
-    from cli.main import main
+def _pct_of(x: float | None) -> str:
+    return "N/A" if x is None else f"{x * 100:.1f}%"
 
-    sdir = tmp_path / "suites"
-    sdir.mkdir()
-    (sdir / "plain_001.yaml").write_text(
-        'schema_version: "0.2"\nid: login_001\nname: 登录\nsuite: smoke\n'
-        "steps:\n  - action: launch_app\n", encoding="utf-8")
-    exp_db = tmp_path / "never_used.db"
-    html = tmp_path / "report.html"
 
-    code = main(["run", "--case", "login_001", "--suites-root", str(sdir),
-                 "--db", str(tmp_path / "trace.db"), "--fake-driver",
-                 "--no-llm", "--exp-db", str(exp_db), "--html", str(html)])
+def test_promotion_rate_render_never_exceeds_100_percent():
+    """P2-1 的渲染面：产物里不该出现 `300.0%` 这种数字。"""
+    exps = [_exp("e1", ExperienceStatus.VERIFIED, promoted=True),
+            _exp("e2", ExperienceStatus.DEGRADED, promoted=True),
+            _exp("e3", ExperienceStatus.REJECTED, promoted=True)]
+    html = render_experience_metrics_section(
+        compute_experience_metrics(experiences=exps))
+    assert "300.0%" not in html and "200.0%" not in html
+    assert "100.0%" in html
 
-    assert code == 0
-    assert not exp_db.exists(), "报告不该顺手把空库建出来"
-    assert "Experience 指标" not in html.read_text(encoding="utf-8")
+
+def test_resolution_counts_assertion_target_recovered_by_experience():
+    """P2-2：分子按**机制名**判，不按 §10 的分类标签。
+
+    断言目标漂移的上下文（`context="assertion_target"`）把机制名盖成
+    `RECOVERED_ASSERTION_TARGET`，而那条路径正是「aux 命中 Experience」
+    （矩阵 #15）。用标签当分子会把这一整类记 0——设计 §17 的核心指标对整整
+    一类 Experience 恢复失明。
+    """
+    steps = [
+        # aux 断言路径：机制是 experience，但分类标签被上下文压过
+        _step(extra={"recovery_kind": "experience",
+                     "recovered_kind": "RECOVERED_ASSERTION_TARGET",
+                     "recovery_context": "assertion_target",
+                     "recovery": {"stages": []}}),
+        # 对照：同机制、非断言上下文
+        _step(extra={"recovery_kind": "experience",
+                     "recovered_kind": "RECOVERED_EXPERIENCE",
+                     "recovery": {"stages": []}}),
+    ]
+    m = compute_experience_metrics(step_details=steps)
+
+    assert m.recovery_attempts == 2
+    assert m.experience_resolved == 2, "两条都是 Experience 救的"
+    assert m.resolution_rate == pytest.approx(1.0)
+    assert m.by_recovered_kind == {"RECOVERED_ASSERTION_TARGET": 1,
+                                   "RECOVERED_EXPERIENCE": 1}, \
+        "分类标签分布照旧按 §10 的标签分组（与分子判据不同，docstring 已说明）"
+
+
+def test_aux_rerun_failure_is_not_counted_as_resolved():
+    """P2-2 的第二个条件：`recovery_kind` 有但 `recovered_kind` 无 = 没恢复。
+
+    `_aux_rerun_failed` 在**失败**步骤上写 `recovery_kind`（那是事实），
+    只判机制名会把失败算成「已解决」。
+    """
+    steps = [_step(extra={"recovery_kind": "experience",
+                          "recovery_context": "aux_rerun_failed",
+                          "recovery": {"stages": []}})]
+    m = compute_experience_metrics(step_details=steps)
+    assert m.recovery_attempts == 1 and m.experience_resolved == 0
+
+
+def test_revalidation_attempts_ignores_non_transition_markers():
+    """P3-1：`REVALIDATION_REQUIRED` 是 from==to 的**非跳变标记**，不算降级。
+
+    E8 的标记刻意写同值行；把 `to_status == "DEGRADED"` 当判据会把当前正处
+    DEGRADED 的那条也算成一次「降级尝试」→ 真降级 1 次报成 2 次、成功率
+    100% 掉成 50%（降级越频繁偏差越大，方向恒为低估）。
+    """
+    state_events = [
+        {"from_status": "VERIFIED", "to_status": "DEGRADED",
+         "reason": "SLIDING_WINDOW"},
+        {"from_status": "DEGRADED", "to_status": "DEGRADED",
+         "reason": "REVALIDATION_REQUIRED"},     # 非跳变标记，不算
+        {"from_status": "DEGRADED", "to_status": "VERIFIED",
+         "reason": "REVALIDATED"},
+    ]
+    m = compute_experience_metrics(state_events=state_events)
+
+    assert m.revalidation_attempts == 1
+    assert m.revalidation_successes == 1
+    assert m.revalidation_rate == pytest.approx(1.0)
+
+
+def test_is_state_transition_matches_the_store_sql_predicate():
+    """P3-1：跳变判据单点（与 `has_state_event_since_transition` 的 SQL 同义）。"""
+    from experience.verifier import is_state_transition
+
+    assert is_state_transition(None, "CANDIDATE") is True, "首条事件无前态"
+    assert is_state_transition("CANDIDATE", "VERIFIED") is True
+    assert is_state_transition("DEGRADED", "DEGRADED") is False, "非跳变标记"
+
+
+def test_render_escapes_values_from_the_trace_db():
+    """P3-4：trace 库是**可写的外部输入**，渲染必须转义。
+
+    报告会被打开在浏览器里；`steps.detail_json` 里的 `recovered_kind` 值
+    原样进 HTML 就是注入面。
+    """
+    evil = "<script>alert(1)</script>"
+    m = compute_experience_metrics(step_details=[
+        _step(recovered_kind=evil, recovery={})])
+    html = render_experience_metrics_section(m)
+
+    assert evil not in html, "原样出现即为注入"
+    assert "&lt;script&gt;" in html
+
+
+def test_latency_accepts_float_milliseconds():
+    """P3-2：延迟是**浮点毫秒**（不再被 `int()` 截断成 0）。
+
+    亚毫秒的 cache/store 操作若一律记 0，设计 §17 的「Cache < Store」梯度
+    就成了 `0 < 0`——指标在 ms 粒度上不可验证。
+    """
+    events = [_lookup("cache", 0.004), _lookup("cache", 0.008),
+              _lookup("store", 0.42), _lookup("store", 0.58)]
+    m = compute_experience_metrics(events=events)
+
+    assert m.latency["cache"] == pytest.approx(0.006)
+    assert m.latency["store"] == pytest.approx(0.5)
+    assert m.latency["cache"] < m.latency["store"], "梯度可分辨"
+
+
+def test_render_shows_sub_millisecond_values_not_zero():
+    """P3-2 的渲染面：亚毫秒要看得见，不能显示成 `0.0ms`。"""
+    m = compute_experience_metrics(events=[_lookup("cache", 0.004)])
+    html = render_experience_metrics_section(m)
+
+    assert "0.004ms" in html, "三位小数保留亚毫秒"
+    assert "0.0ms" not in html.replace("0.004ms", ""), \
+        "`0.0ms` 只该出现在真的测不到时"
