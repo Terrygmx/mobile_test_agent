@@ -355,7 +355,11 @@ def read_trace_steps(trace_db: str | Path, *,
     try:
         where, params = "", []
         if app_build is not None:
-            where = " WHERE r.app_build=?"
+            # ⚠️ `COALESCE` 必需：scope 值里的 `''` 是**归一化后**的形式
+            # （下面 `(r["build"] or "")` 把 NULL 映射成空串），而库里旧 run
+            # 的 `app_build` 是 **NULL**——直接 `= ''` 匹配不到任何行，
+            # 于是「用 `--build ""` 建图」会静默得到空图。
+            where = " WHERE COALESCE(r.app_build,'')=?"
             params.append(app_build)
         runs = conn.execute(
             f"SELECT DISTINCT r.app_bundle_id AS app_id, r.app_build AS build"
@@ -376,7 +380,8 @@ def read_trace_steps(trace_db: str | Path, *,
             " FROM steps s JOIN testcase_runs t"
             " ON t.id = s.testcase_run_id"
             " JOIN runs r ON r.run_id = t.run_id"
-            + (" WHERE r.app_build=?" if app_build is not None else "")
+            + (" WHERE COALESCE(r.app_build,'')=?" if app_build is not None
+               else "")
             + " ORDER BY s.testcase_run_id, s.step_index",
             params).fetchall()
     finally:

@@ -14,7 +14,9 @@ CLI `--graph-db`）+ **独立版本链**（`graph/migrations/`），不挂在 ex
 """
 from __future__ import annotations
 
+import json
 import sqlite3
+import time
 from pathlib import Path
 
 from graph.builder import build_runtime_graph, read_trace_steps
@@ -28,6 +30,10 @@ from experience.schema_migrations import latest_version, migrate
 
 __all__ = ["GRAPH_MIGRATIONS_DIR", "GRAPH_SCHEMA_VERSION", "GraphStore",
            "build_and_store"]
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 GRAPH_MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
@@ -92,6 +98,52 @@ class GraphStore:
                       t.first_seen, t.last_seen) for t in graph.transitions])
         finally:
             conn.close()
+
+    # --- diff 落库（`graph_diffs` 表，Task 5.3 的消费者） ---
+
+    def record_diff(self, diff) -> int:
+        """把一次 Graph Diff 落库（按 `(app_id, base_build, build)` **整体替换**）。
+
+        与图同样的替换语义（重跑 `graph diff` 必须幂等），并且同样在**单事务**里
+        换掉——读者看不到「一半新一半旧」的差异列表。
+        """
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "DELETE FROM graph_diffs WHERE app_id=? AND base_build=?"
+                    " AND build=?", (diff.app_id, diff.base_build, diff.build))
+                conn.executemany(
+                    "INSERT INTO graph_diffs (app_id, base_build, build, kind,"
+                    " screen_id, from_screen, to_screen, trigger, detail_json,"
+                    " created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    [(diff.app_id, diff.base_build, diff.build, e.kind,
+                      e.screen_id, e.from_screen, e.to_screen, e.trigger,
+                      json.dumps(e.detail, ensure_ascii=False), _now())
+                     for e in diff.entries])
+        finally:
+            conn.close()
+        return len(diff.entries)
+
+    def load_diff(self, app_id: str = "", base_build: str = "",
+                  build: str = "") -> list[dict]:
+        """读回差异行（按 kind 排序，便于报告稳定呈现）。"""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT kind, screen_id, from_screen, to_screen, trigger,"
+                " detail_json, created_at FROM graph_diffs"
+                " WHERE app_id=? AND base_build=? AND build=?"
+                " ORDER BY kind, screen_id, from_screen, to_screen",
+                (app_id, base_build, build)).fetchall()
+        finally:
+            conn.close()
+        return [{"kind": r["kind"], "screen_id": r["screen_id"],
+                 "from_screen": r["from_screen"], "to_screen": r["to_screen"],
+                 "trigger": r["trigger"],
+                 "detail": json.loads(r["detail_json"]) if r["detail_json"]
+                 else {},
+                 "created_at": r["created_at"]} for r in rows]
 
     # --- 读 ---
 

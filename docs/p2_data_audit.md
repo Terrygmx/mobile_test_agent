@@ -1484,3 +1484,102 @@ P3-3 被标为「收益最高」。
 - 全量 pytest **1177 passed**（Task 5.2 首次交付 1168 → 修订后 +9：源图 6 + 卫生 3）。
 - 全仓重复定义守护**已固化**（不再依赖手工）；本次修订期间的重复追加由它当场抓出
   并清除。
+
+---
+
+## Task 5.3 完成记录（P2-13 Graph Diff 五类 + build-to-build + `mta graph` CLI，2026-10-06）
+
+**Objective**：设计 12.2 / 12.3：五类分类 + build-to-build + `mta graph` CLI。
+
+### 交付
+
+- `graph/diff.py`（新）：`diff_graphs`（**纯函数**）+ `DiffEntry` / `GraphDiff`
+  值对象 + 五个 kind 常量 + `transition_key`。
+- `graph/storage.py`：`record_diff`（按 `(app_id, base_build, build)` 整体替换）
+  + `load_diff`——`graph_diffs` 表（Task 5.1 建）首次有消费者。
+- `cli/main.py`：`mta graph` 子命令组（`build` / `diff` / `show`）+ `cmd_graph`。
+- `tests/unit/test_graph_diff.py`：29 例（纯函数 20 + CLI 端到端 9）。
+
+### 方向约定（五类的措辞都是站在「当前面」上说的）
+
+`base` = **参照面**（Source 声明 / 旧 build），`new` = **当前面**（Runtime 观测 /
+新 build）。同一个纯函数服务两种用法：
+
+- **Runtime vs Source**（同 build）：`diff_graphs(source, runtime)` → 五类判定；
+- **Build-to-Build**（设计 12.3）：`diff_graphs(old_runtime, new_runtime,
+  allow_build_change=True)`。
+
+### 三处口径（都从设计字面推出来）
+
+1. **REMOVED 默认不可达——这是设计要的。** 设计明文「仅当 Source 明确标注过、
+   **且** Runtime 多次尝试确认不存在」。后者需要**负证据**（「试过、确认不在」），
+   而运行时图只记「到达了什么」（Task 5.1 口径：超时的屏 wait 不算到达）。故负
+   证据做成显式入参 `absent_confirmations`（键 = 条目身份串，节点用 `screen_id`、
+   转移用 `from->to@trigger`），阈值 `DEFAULT_REMOVAL_CONFIRMATIONS = 3`。
+   **当前无生产者** ⇒ 真实数据上 REMOVED 不可达，正是「默认优先标 NOT_OBSERVED」
+   （矩阵 #16）。要让它可达需扩运行时图记录负证据——**独立立项**，不在本任务顺手做。
+2. **UNKNOWN = 参照面缺失/为空、无法判定。** 库里「没构建过」与「构建了但为空」
+   不可区分（空图不留行），而两者结论相同：**参照面为空时，当前面独有的条目既可能
+   是「新增」也可能是「参照缺失」**。所以参照面为空时**不产 ADDED**，全部标 UNKNOWN
+   并写明原因。这顺带堵住一个静默误读——多数现成 metadata 没有 `screens`，源图本
+   就为空，照常判 ADDED 会把运行时全部算成「未声明」。
+3. **跨范围 fail-loud。** `app_id` 不同 → `ValueError`；`app_build` 不同而没显式
+   `allow_build_change=True` → `ValueError`（否则 scope 不重叠会安静地报满屏
+   `NOT_OBSERVED`）。
+
+### CLI（设计 13 节）
+
+```bash
+mta graph build [--from-trace T] [--from-source M] [--bundle-id ID] [--build B] [--graph-db G]
+mta graph diff  --build B [--base-build A] [--bundle-id ID] [--graph-db G] [--save]
+mta graph show  [--bundle-id ID] [--build B] [--graph-db G]
+```
+
+- `build`：两个 `--from-*` 都不给 → **两面都建**（默认路径：一条命令备齐）。
+  空图**必须说出来**（`GRAPH WARN`）——运行时图为空 = trace 里没有任何屏观测；
+  源图为空 = metadata 没声明屏（后者在现成 metadata 里是多数）。
+- `diff`：给 `--base-build` → build-to-build；否则「源图 vs 运行时图」。
+  **退出码**：有真实变化（非 UNKNOWN）→ 1，CI 可用它判「图变了」；无变化或仅
+  UNKNOWN → 0（UNKNOWN 是「没判定」，不是「有变化」）。
+- **scope 对齐守卫**（review_p2_task52 P3-1 要求的接线前置）：要比较的那一面在
+  请求的 build 上没有图、但**在别的 build 上有** → exit 3 并**点名那个 build**。
+  此时安静地判 UNKNOWN（或满屏 NOT_OBSERVED）会把「scope 没对齐」伪装成「声明
+  缺失」，而前者是可操作的配置问题。
+
+### 冒烟中发现并修掉的一个真 bug
+
+`read_trace_steps(app_build="")` 用 SQL 等值匹配，而库里旧 run 的 `app_build` 是
+**NULL**（scope 值里的 `""` 是归一化后的形式）→ `WHERE app_build=''` 匹配不到任何
+行，`mta graph build --build ""` **静默得到空图**。修：过滤改
+`COALESCE(r.app_build,'')=?`。这是「归一化值与存储值不同域」的典型坑。
+
+### 真机端到端（Gate M2 的 trace + metadata，显式对齐 `--build ""`）
+
+```
+NOT_OBSERVED  screen DetailView / SearchView / SpikeNavDetail / SpikeNavRoot /
+                     SpikeSheet / SpikeSheetHost / SpikeTab        ← 7 个
+ADDED         transition LoginView -> HomeView (trigger=tap:login_button)
+ADDED         transition HomeView -> ProfileView (trigger=tap:go_profile)
+合计：ADDED=2, REMOVED=0, CHANGED=0, NOT_OBSERVED=7, UNKNOWN=0   → exit 1
+```
+
+- **`NOT_OBSERVED = 7` 正是矩阵 #16**（Source 有、用例从未覆盖 → 不是 REMOVED）。
+- `ADDED = 2` 是已登记的数据面边界：源图没有转移（metadata 无导航声明），所以
+  运行时的转移全算「未声明」。**没有为了演示 CHANGED 去编数据**。
+- scope 未对齐时（源图在 `1026`、运行时图在 `1025`）→ exit 3 + 点名 `1026`。
+
+### 累积的接线前置（本任务一次性消费完）
+
+| 前置 | 来源 | 状态 |
+|---|---|---|
+| `runs.app_build` 从未被写入 | Task 5.1 顺手修 | ✅ 消费 |
+| `upsert_graph` 幂等替换（重跑不翻倍） | Task 5.1 P2-1 | ✅ 消费 |
+| `--from-trace` = trace **全量**（不是单 run） | Task 5.1 定档 | ✅ 实现 |
+| 源图无转移 ⇒ 转移级 `CHANGED`/`REMOVED` 无数据可判 | Task 5.2 实测 | ✅ 未编造，如实报 |
+| 两面 scope 不同时 `graph diff` 要 fail-loud | Task 5.2 P3-1 | ✅ 实现（exit 3 + 点名） |
+| 旧 trace（`app_build` 空串）与新 run 混库必 fail-loud | Task 5.1/5.2 文档 | ✅ 已写进 plan/CLI help |
+
+### 实测
+
+- 全量 pytest **1206 passed**（Task 5.3 新增 29）。
+- 真机端到端见上；`graph_diffs` 落库 9 行，重跑按范围整体替换（幂等）。

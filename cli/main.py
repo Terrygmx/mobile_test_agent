@@ -18,6 +18,7 @@ import yaml
 
 from environment.secrets import EnvSecretProvider
 from experience import DEFAULT_EXPERIENCE_DB
+from graph import DEFAULT_GRAPH_DB
 from repository.resolver import Repository, Severity
 from testcase.lint import lint, max_severity
 from tracer.storage import ATTRIBUTIONS
@@ -297,6 +298,54 @@ def build_parser() -> argparse.ArgumentParser:
                              help="git 仓库根（overrides 写在 <root>/"
                                   "repository/overrides/elements/；默认 cwd）")
     exp_promote.add_argument("--operator", metavar="NAME", default=None)
+
+    # --- mta graph（设计 12 / 13 节；Task 5.3） ---------------------------
+    gph_p = sub.add_parser(
+        "graph", help="UI State Graph 子命令（13 节：build/diff/show）")
+    gph_sub = gph_p.add_subparsers(dest="graph_cmd", required=True)
+
+    def _add_graph_scope(p: argparse.ArgumentParser) -> None:
+        """三个子命令共用的范围参数（graph 库 + app_id + build）。
+
+        `app_id` 默认取 `--bundle-id` 的仓库默认值；build 见各自的 help。
+        """
+        p.add_argument("--graph-db", metavar="PATH",
+                       default=str(DEFAULT_GRAPH_DB),
+                       help="Graph SQLite 路径（默认 out/graph.db）")
+        p.add_argument("--bundle-id", metavar="ID", default="",
+                       help="App bundle id（图的范围第一段；源图侧 metadata "
+                            "不含 bundle id，必须显式给）")
+
+    gph_build = gph_sub.add_parser(
+        "build", help="建图并落库：--from-trace 建运行时图 / --from-source "
+                      "建源图（可同批）")
+    _add_graph_scope(gph_build)
+    gph_build.add_argument("--db", metavar="PATH", default="out/trace.db",
+                           help="TraceStore SQLite 路径（`--from-trace` 的"
+                                "默认值；与 `mta run --db` 同默认）")
+    gph_build.add_argument("--from-trace", metavar="PATH", default=None,
+                           help="trace 库路径（默认 --db）")
+    gph_build.add_argument("--from-source", metavar="PATH", default=None,
+                           help="source_metadata.json 路径（默认 "
+                                "<generated>/source_metadata.json）")
+    gph_build.add_argument("--build", metavar="ID", default=None,
+                           help="限定/指定 build id（运行时侧默认取 trace 里的"
+                                "范围；源图侧默认取 metadata 的 build）")
+
+    gph_diff = gph_sub.add_parser(
+        "diff", help="五类差异（设计 12.2）：给 --base-build 则 build-to-build"
+                     "（12.3），否则「源图 vs 运行时图」")
+    _add_graph_scope(gph_diff)
+    gph_diff.add_argument("--build", metavar="ID", required=True,
+                          help="当前面 build")
+    gph_diff.add_argument("--base-build", metavar="ID", default=None,
+                          help="参照面 build（给了即 build-to-build）")
+    gph_diff.add_argument("--save", action="store_true",
+                          help="把差异落 graph_diffs 表（重跑按范围整体替换）")
+
+    gph_show = gph_sub.add_parser("show", help="打印库里的图（范围 + 节点 + 转移）")
+    _add_graph_scope(gph_show)
+    gph_show.add_argument("--build", metavar="ID", default=None)
 
     return parser
 
@@ -1252,6 +1301,179 @@ def cmd_experience(args: argparse.Namespace) -> int:
     return 2
 
 
+def _graph_metadata_path(args: argparse.Namespace) -> Path:
+    """`--from-source` 缺省：<generated>/source_metadata.json（与 12.3 布局一致）。"""
+    if args.from_source:
+        return Path(args.from_source)
+    return Path(getattr(args, "generated", None)
+                or "repository/generated/local") / "source_metadata.json"
+
+
+def _graph_build(args: argparse.Namespace) -> int:
+    """`mta graph build`：建图并落库（运行时面 / 源面，可同批）。
+
+    判定全在 `graph.builder`（纯函数），这里只做「读 → 建 → 写」。
+    """
+    from graph import GraphStore, build_runtime_graph, build_source_graph
+    from graph import read_source_metadata, read_trace_steps
+
+    store = GraphStore(args.graph_db)
+    built: list[str] = []
+    # 两个 flag 都没给 → 默认两边都建（CLI 的常见用法：一条命令把两面备齐）
+    do_trace = args.from_trace is not None or args.from_source is None
+    do_source = args.from_source is not None or args.from_trace is None
+
+    if do_trace:
+        trace_db = args.from_trace or args.db
+        try:
+            steps, app_id, build = read_trace_steps(
+                trace_db, app_build=args.build)
+        except ValueError as e:
+            print(f"GRAPH ERROR: {e}")
+            return 3
+        g = build_runtime_graph(steps, app_id=args.bundle_id or app_id,
+                                app_build=build)
+        store.upsert_graph(g)
+        built.append(f"runtime: {len(g.nodes)} 节点 / "
+                     f"{len(g.transitions)} 转移（app={g.app_id!r} "
+                     f"build={g.app_build!r}）")
+        if not g.nodes:
+            print("GRAPH WARN: 运行时图为空——trace 里没有任何屏观测"
+                  "（既没有成功的 `wait_for screen:X`，也没有恢复期屏识别）")
+
+    if do_source:
+        meta_path = _graph_metadata_path(args)
+        try:
+            metadata = read_source_metadata(meta_path)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"GRAPH ERROR: {e}")
+            return 3
+        g = build_source_graph(metadata, app_id=args.bundle_id,
+                               app_build=args.build)
+        store.upsert_graph(g)
+        built.append(f"source: {len(g.nodes)} 节点 / "
+                     f"{len(g.transitions)} 转移（app={g.app_id!r} "
+                     f"build={g.app_build!r}）")
+        if not g.nodes:
+            # 「如实为空」是设计允许的，但**必须说出来**：多数现成 metadata
+            # 没有 `screens` 键，静默的空源图会让 diff 的判读完全跑偏。
+            print(f"GRAPH WARN: 源图为空——{meta_path} 没有声明任何屏"
+                  f"（缺 `screens` 键）；此时 diff 会判 UNKNOWN（无法判定）")
+
+    for line in built:
+        print(f"graph build: {line}")
+    print(f"graph db: {args.graph_db}")
+    return 0
+
+
+def _other_builds_with(store, app_id: str, build: str,
+                       source_of: str) -> list[str]:
+    """同一 app 的**其它 build** 上有没有这一面的图（scope 没对齐的诊断用）。"""
+    return sorted(b for (a, b, so) in store.list_scopes()
+                  if a == app_id and so == source_of and b != build)
+
+
+def _graph_diff(args: argparse.Namespace) -> int:
+    """`mta graph diff`：五类差异（设计 12.2）/ build-to-build（12.3）。
+
+    **scope 对齐守卫**（review_p2_task52 P3-1 的接线前置）：要比较的那一面在
+    请求的 build 上没有图、但**在别的 build 上有** → fail-loud 并点名那个
+    build。此时安静地判 UNKNOWN（或更糟：满屏 NOT_OBSERVED）会把「scope 没
+    对齐」伪装成「声明缺失」，而前者是可操作的配置问题。
+    """
+    from graph import GraphStore, RUNTIME, SOURCE, diff_graphs
+
+    store = GraphStore(args.graph_db)
+    if args.base_build is not None:
+        # build-to-build：同一面（默认运行时）在两个 build 之间比
+        sides = [("base", args.base_build, RUNTIME),
+                 ("new", args.build, RUNTIME)]
+    else:
+        # 源图（声明）vs 运行时图（观测）——五类判定
+        sides = [("base(source)", args.build, SOURCE),
+                 ("new(runtime)", args.build, RUNTIME)]
+    for label, build, source_of in sides:
+        g = store.load_graph(args.bundle_id, build, source_of)
+        if g.is_empty:
+            others = _other_builds_with(store, args.bundle_id, build, source_of)
+            if others:
+                print(f"GRAPH ERROR: {label} 面在 build={build!r} 上没有图，"
+                      f"但同一 app 在 {others} 上有——两面 scope 未对齐。"
+                      f"用 `--build <其中一个>` 重跑，或先用 "
+                      f"`mta graph build` 把该 build 的图建出来。")
+                return 3
+    if args.base_build is not None:
+        base = store.load_graph(args.bundle_id, args.base_build, RUNTIME)
+        new = store.load_graph(args.bundle_id, args.build, RUNTIME)
+        diff = diff_graphs(base or None, new or None, allow_build_change=True)
+    else:
+        base = store.load_graph(args.bundle_id, args.build, SOURCE)
+        new = store.load_graph(args.bundle_id, args.build, RUNTIME)
+        diff = diff_graphs(base or None, new or None)
+
+    counts = diff.counts
+    print(f"graph diff: app={diff.app_id!r} "
+          f"base_build={diff.base_build!r} build={diff.build!r} "
+          f"（base={diff.base_source_of or '-'} → new={diff.source_of or '-'}）")
+    if diff.reason:
+        print(f"  判定：UNKNOWN —— {diff.reason}")
+    for e in diff.entries:
+        print("  " + e.render())
+    print("  合计：" + ", ".join(f"{k}={counts[k]}" for k in
+                                 ("ADDED", "REMOVED", "CHANGED",
+                                  "NOT_OBSERVED", "UNKNOWN")))
+    if args.save:
+        n = store.record_diff(diff)
+        print(f"  已落库 graph_diffs：{n} 行（按范围整体替换）")
+    # 退出码：有真实变化（非 UNKNOWN）→ 1（CI 可用它判断「图变了」）；
+    # 无变化或仅 UNKNOWN → 0（UNKNOWN 是「没判定」，不是「有变化」）。
+    return 1 if diff.changed else 0
+
+
+def _graph_show(args: argparse.Namespace) -> int:
+    """`mta graph show`：打印库里的图。"""
+    from graph import GraphStore, RUNTIME, SOURCE
+
+    store = GraphStore(args.graph_db)
+    scopes = store.list_scopes()
+    if not scopes:
+        print("graph show: 库里没有任何图（先跑 `mta graph build`）")
+        return 0
+    for app_id, build, source_of in scopes:
+        if args.bundle_id and app_id != args.bundle_id:
+            continue
+        if args.build is not None and build != args.build:
+            continue
+        g = store.load_graph(app_id, build, source_of)
+        print(f"graph show: app={app_id!r} build={build!r} "
+              f"source_of={source_of} — {len(g.nodes)} 节点 / "
+              f"{len(g.transitions)} 转移")
+        for n in g.nodes:
+            ev = ",".join(n.evidence) or "-"
+            print(f"  node {n.screen_id} visits={n.visit_count} ev={ev} "
+                  f"first={n.first_seen or '-'} last={n.last_seen or '-'}")
+        for t in g.transitions:
+            print(f"  {t.from_screen} -> {t.to_screen} "
+                  f"trigger={t.trigger or '-'} count={t.count}")
+    return 0
+
+
+def cmd_graph(args: argparse.Namespace) -> int:
+    """设计 13 节的 `mta graph` 子命令组（Task 5.3）。
+
+    职责边界：判定全部来自 `graph` 包的纯函数（`build_runtime_graph` /
+    `build_source_graph` / `diff_graphs`），CLI 不复制任何判据。
+    """
+    if args.graph_cmd == "build":
+        return _graph_build(args)
+    if args.graph_cmd == "diff":
+        return _graph_diff(args)
+    if args.graph_cmd == "show":
+        return _graph_show(args)
+    print(f"graph: unknown subcommand {args.graph_cmd!r}")
+    return 2
+
+
 def main(argv: Sequence | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1269,6 +1491,8 @@ def main(argv: Sequence | None = None) -> int:
         return cmd_report(args)
     if args.command == "experience":
         return cmd_experience(args)
+    if args.command == "graph":
+        return cmd_graph(args)
     # 全部子命令已实现——占位分发随 review_m5_task51 P3-4 退役
     raise AssertionError(f"unhandled command: {args.command}")
 

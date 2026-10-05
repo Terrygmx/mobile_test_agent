@@ -26,6 +26,16 @@ from graph.builder import (
     read_source_metadata,
     read_trace_steps,
 )
+from graph.diff import (
+    ADDED,
+    CHANGED,
+    NOT_OBSERVED,
+    REMOVED,
+    UNKNOWN,
+    DiffEntry,
+    GraphDiff,
+    diff_graphs,
+)
 from graph.models import (
     RUNTIME,
     SOURCE,
@@ -53,4 +63,7 @@ __all__ = [
     "build_runtime_graph", "read_trace_steps", "observed_screens",
     "is_screen_wait",
     "build_source_graph", "read_source_metadata", "declared_screens",
+    # diff（Task 5.3）
+    "ADDED", "REMOVED", "CHANGED", "NOT_OBSERVED", "UNKNOWN",
+    "DiffEntry", "GraphDiff", "diff_graphs",
 ]
