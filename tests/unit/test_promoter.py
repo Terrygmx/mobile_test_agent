@@ -178,9 +178,14 @@ def test_approve_twice_fails_loud(store, repo_root):
         approve_proposal(store, p.proposal_id, repo_root=repo_root)
 
 
-def test_approve_refuses_to_shadow_existing_manual_override(store, repo_root):
-    """目标 overrides 文件里已有同 id 的元素定义 → fail-loud（不可静默
-    覆盖——人工写过的 override 只能人工处置）。"""
+def test_approve_merges_into_existing_override_doc(store, repo_root):
+    """同 id 已有 override（漂移场景的常态：旧名是 P1 人工登记）→
+    **并入**该文档 strategies 链尾，单文档不产双 doc（Gate M4 真机实锤：
+    拒绝同 id 会堵死 Promotion 的正常用法）。
+
+    并入的 strategy 不带 mode 键副作用——resolver 的 origin 稳定排序保证
+    experience 落尝试链尾（9.2）；git diff 可审计，revert 可整笔撤销。
+    """
     exp_id = _verified(store)
     lv = repo_root / "repository" / "overrides" / "elements"
     lv.mkdir(parents=True)
@@ -190,7 +195,35 @@ def test_approve_refuses_to_shadow_existing_manual_override(store, repo_root):
         "  - {type: accessibility_id, value: manual_v1, origin: manual}\n",
         encoding="utf-8")
     p = generate_proposal(store, store.get_experience(exp_id))
-    with pytest.raises(ValueError, match="已存在"):
+
+    approved, sha = approve_proposal(store, p.proposal_id,
+                                     repo_root=repo_root)
+
+    import yaml
+    docs = [d for d in yaml.safe_load_all(
+        (lv / "HomeView.yaml").read_text(encoding="utf-8")) if d]
+    assert len(docs) == 1, "单文档——不产同 id 双 doc（静默覆盖不存在）"
+    origins = [(s["origin"], s["value"]) for s in docs[0]["strategies"]]
+    assert origins == [("manual", "manual_v1"), ("experience", "v2")], \
+        "experience 策略并入链尾，manual 主策略保留"
+    assert approved.status == "APPROVED" and sha
+    assert store.get_experience(exp_id).promoted is True
+
+
+def test_approve_refuses_duplicate_experience_strategy(store, repo_root):
+    """同 id 文档已含相同 experience 策略 → 重复 promote，fail-loud
+    （不重复追加，proposal 保持 PENDING）。"""
+    exp_id = _verified(store)
+    lv = repo_root / "repository" / "overrides" / "elements"
+    lv.mkdir(parents=True)
+    (lv / "HomeView.yaml").write_text(
+        "schema_version: \"1.0\"\nkind: element\nid: login_button\n"
+        "screen: HomeView\ntype: button\nstrategies:\n"
+        "  - {type: accessibility_id, value: manual_v1, origin: manual}\n"
+        "  - {type: accessibility_id, value: v2, origin: experience}\n",
+        encoding="utf-8")
+    p = generate_proposal(store, store.get_experience(exp_id))
+    with pytest.raises(ValueError, match="重复 promote"):
         approve_proposal(store, p.proposal_id, repo_root=repo_root)
     assert store.get_promotion_proposal(p.proposal_id).status == "PENDING"
 
@@ -243,7 +276,8 @@ def test_approve_git_failure_rolls_back_file_write(store, repo_root,
 
 def test_approve_detects_id_with_trailing_comment(store, repo_root):
     """P3-2（review_p2_task41）：`id: login_button  # 备注` 也要命中同 id
-    检查——漏检会追加出同 id 双文档（loader 后者胜，静默覆盖）。"""
+    检查——漏检会追加出同 id 双文档（loader 后者胜，静默覆盖）。定档修订
+    后命中 → **并入**该文档（yaml round-trip 会丢行内注释，git diff 可见）。"""
     exp_id = _verified(store)
     lv = repo_root / "repository" / "overrides" / "elements"
     lv.mkdir(parents=True)
@@ -253,8 +287,17 @@ def test_approve_detects_id_with_trailing_comment(store, repo_root):
         "  - {type: accessibility_id, value: manual_v1, origin: manual}\n",
         encoding="utf-8")
     p = generate_proposal(store, store.get_experience(exp_id))
-    with pytest.raises(ValueError, match="已存在"):
-        approve_proposal(store, p.proposal_id, repo_root=repo_root)
+
+    approved, sha = approve_proposal(store, p.proposal_id,
+                                     repo_root=repo_root)
+
+    import yaml
+    docs = [d for d in yaml.safe_load_all(
+        (lv / "HomeView.yaml").read_text(encoding="utf-8")) if d]
+    assert len(docs) == 1, "注释行没漏检——并入单文档而非追加双 doc"
+    assert ("experience", "v2") in [(s["origin"], s["value"])
+                                    for s in docs[0]["strategies"]]
+    assert approved.status == "APPROVED"
 
 
 def test_promoter_diff_uses_append_mode_to_keep_source_chain(store,

@@ -18,8 +18,11 @@
 - **9.5 人工越权路径**：非 VERIFIED（CANDIDATE/DEGRADED）生成 proposal
   必须 `manual_override=True` **且**给理由（无理由的越权不可审计）；
   REJECTED 是终态——连人工路径也不开，复活只能重新 ACCEPT（E5）。
-- **不可静默覆盖**：目标 overrides 文件已有同 id 元素定义（多半是人工
-  写的）→ fail-loud，人工 override 只能人工处置。
+- **同 id 并入，不产双 doc**（Gate M4 真机实锤后的定档修订）：目标元素在
+  overrides 已有登记（漂移场景的常态——旧名是 P1 人工登记的）→ 把
+  experience 策略并入该文档 strategies **链尾**（单文档、git diff 可审计、
+  resolver origin 排序保链尾）；已含相同 experience 策略 → 重复 promote
+  fail-loud。
 """
 from __future__ import annotations
 
@@ -129,6 +132,42 @@ def generate_proposal(store: SQLiteExperienceStore, exp: Experience, *,
     return store.create_promotion_proposal(proposal)
 
 
+def _merge_experience_strategy(target: Path, exp: Experience) -> None:
+    """把 experience 策略并入**既有的**同 id 元素文档（review_p2_task41
+    后的定档修订，Gate M4 真机实锤的堵点）。
+
+    漂移转正的主流程恰恰是「目标元素在 overrides 已有人工/source 登记」
+    （旧名是 P1 人工登记的），拒绝同 id 等于堵死 Promotion 的正常用法。
+    并入 = 在该文档的 strategies **链尾**追加一条 origin: experience——
+    单文档不产同 id 双 doc（loader 后者胜的静默覆盖不存在了），git diff
+    可审计；resolver 的 origin 稳定排序保证它落在尝试链尾（9.2）。
+    已含相同 experience 策略 → 重复 promote，fail-loud。
+    """
+    import yaml
+
+    docs = [d for d in yaml.safe_load_all(
+        target.read_text(encoding="utf-8")) if d]
+    for doc in docs:
+        if doc.get("kind") == "element" and doc.get("id") == exp.target_id:
+            strategies = doc.setdefault("strategies", [])
+            if any(s.get("origin") == "experience"
+                   and s.get("value") == exp.strategy.value
+                   for s in strategies):
+                raise ValueError(
+                    f"{target} 的 {exp.target_id!r} 已含相同 experience "
+                    f"策略（{exp.strategy.value!r}）——疑似重复 promote，"
+                    f"不重复追加")
+            strategies.append({"type": exp.strategy.type,
+                               "value": exp.strategy.value,
+                               "origin": "experience"})
+            target.write_text(
+                yaml.safe_dump_all(docs, allow_unicode=True,
+                                   sort_keys=False), encoding="utf-8")
+            return
+    raise ValueError(
+        f"{target} 含 id {exp.target_id!r} 的判定与文档不一致——人工检查")
+
+
 def approve_proposal(store: SQLiteExperienceStore, proposal_id: str, *,
                      repo_root: Path,
                      committer: str | None = None) -> tuple[PromotionProposal,
@@ -159,17 +198,22 @@ def approve_proposal(store: SQLiteExperienceStore, proposal_id: str, *,
 
     target = (Path(repo_root) / "repository" / "overrides" / "elements"
               / f"{exp.screen_id}.yaml")
+    merged = False
     if target.exists():
         existing = target.read_text(encoding="utf-8")
         # \b 而非 \s*$：行尾注释（`id: x  # 备注`）也要命中（review_p2_task41
         # P3-2——漏检会追加出同 id 双文档，loader 后者胜，静默覆盖）。
         if re.search(rf"^id:\s*{re.escape(exp.target_id)}\b",
                      existing, re.MULTILINE):
-            # 不可静默覆盖：同 id 的 override 已存在（多半是人工写的）。
-            raise ValueError(
-                f"overrides 已存在同 id 元素定义：{exp.target_id!r} in "
-                f"{target}——人工写过的 override 只能人工处置，工具不代改")
-        original = existing
+            # 同 id：**并入**既有文档的 strategies 链尾（见
+            # _merge_experience_strategy）——漂移转正的主流程正是「目标
+            # 元素已有 P1 登记」，拒绝会堵死 Promotion 的正常用法；
+            # 单文档不产双 doc，git diff 可审计。
+            _merge_experience_strategy(target, exp)
+            original = existing
+            merged = True   # 策略已写盘，下面的「追加 proposal 文档」跳过
+        else:
+            original = existing
     else:
         original = None
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -179,7 +223,9 @@ def approve_proposal(store: SQLiteExperienceStore, proposal_id: str, *,
     # 自己写了一半的文件挡死，还被误报成「人工 override」。proposal 保持
     # PENDING，修复 git 后重试即续传。
     try:
-        if original is not None:
+        if merged:
+            pass    # _merge_experience_strategy 已把策略并入既有文档并写盘
+        elif original is not None:
             target.write_text(original.rstrip("\n") + "\n---\n"
                               + proposal.diff, encoding="utf-8")
         else:
