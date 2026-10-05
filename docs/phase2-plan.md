@@ -202,6 +202,11 @@ M1 审计/Schema(1.5d) ─► M2 Store/Guard(4d) ─► M3 验证/降级(3d) ─
 
 ### Task 3.4: `mta experience` CLI（设计 13 节）
 
+> **⚠️ 接线前置（review_p2_task31 P2-1/P3-3/P3-7 显性化，2026-10-05）**：
+> 1. **E4 资格单点**（P3-7）：`verify` 子命令必须从 Repository 解析出目标元素并经 `eligible_for_auto_verification` 得到布尔，再传给 `evaluate` 的 `auto_verify_eligible`——它是 E4 的**唯一**实现且目前零生产调用面；忘调/传常量 `True` 会令整条 E4 约束为空。验收含一条矩阵测试：非幂等元素即使 100% 成功也不升级。
+> 2. **revalidate 护栏已就位**（P2-1）：`revalidate` 对非 DEGRADED 现在 fail-loud（`ValueError`）；CLI 侧捕获后应给出可操作的错误信息（CANDIDATE → 走 verify；REJECTED → 走重新 ACCEPT），不得自行绕过。
+> 3. **DEGRADED 的自动 REJECTED 出口暂无**（P3-3 定档）：§4.3「持续失败 → REJECTED」不在 `evaluate` 内实现（维持状态机纯函数口径）；若 CLI 要提供人工 `reject` 出口，在本任务加 `apply_outcome`（决策来自人工，不来自 evaluate），并在模块 docstring 偏离清单同步更新。
+
 **Objective:** list/show/verify/revalidate/sweep 五个子命令（promote 在 M4 加入）。
 
 **Files:**

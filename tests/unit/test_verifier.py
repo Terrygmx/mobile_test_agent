@@ -34,9 +34,11 @@ from experience.verifier import (
     mark_revalidation_required,
     needs_revalidation,
     revalidate,
+    recent_failure_count,
     sliding_window_degrade,
     success_rate_of,
 )
+from experience.sweeper import StalenessPolicy
 from executor.policy import Idempotency
 from repository.loader import LocatorStrategy
 from testcase.schema import Risk
@@ -338,12 +340,18 @@ def test_mark_revalidation_required_is_idempotent_and_remarkable(store):
 
 
 def test_revalidate_promotes_and_records_new_fingerprint(store):
-    """E8：重验证通过 → VERIFIED(reason=REVALIDATED) + 更新 fingerprint 观测。"""
+    """E8：重验证通过 → VERIFIED(reason=REVALIDATED) + 更新 fingerprint 观测。
+
+    传给 revalidate 的必须是**库里当前状态**的 exp（review_p2_task31 P2-1
+    后护栏按内存 status 判）——status 变过要重取，不能拿旧快照。
+    """
     exp = _seed_store(store)
     store.update_status(exp.experience_id, ExperienceStatus.VERIFIED, "M")
     store.update_status(exp.experience_id, ExperienceStatus.DEGRADED, "W")
+    current = next(e for e in store.list(ExperienceStatus.DEGRADED)
+                   if e.experience_id == exp.experience_id)
 
-    revalidate(store, exp, fingerprint="new_fp", run_id="run_rv",
+    revalidate(store, current, fingerprint="new_fp", run_id="run_rv",
                operator="alice")
 
     after = store.lookup(exp.app_id, exp.screen_id, exp.target_id)[0]
@@ -353,6 +361,91 @@ def test_revalidate_promotes_and_records_new_fingerprint(store):
     assert (rows[-1]["from_status"], rows[-1]["to_status"],
             rows[-1]["reason"], rows[-1]["operator"]) == (
         "DEGRADED", "VERIFIED", "REVALIDATED", "alice")
+
+
+def test_revalidate_rejects_candidate_no_zero_sample_promotion(store):
+    """P2-1（review_p2_task31）：零样本 CANDIDATE 不得经 revalidate 直推 VERIFIED。
+
+    这条路等于绕过 E4 资格 + 4.5 门槛——VERIFIED 是「可自动使用」的信任档位，
+    必须由 evaluate 的判据抬上去，不能被显式重验证的接线顺手抄近道。
+    """
+    exp = _seed_store(store)
+    assert exp.status is ExperienceStatus.CANDIDATE
+    before = _state_events(store, exp.experience_id)
+
+    with pytest.raises(ValueError, match="只用于 DEGRADED"):
+        revalidate(store, exp)
+
+    assert _state_events(store, exp.experience_id) == before, \
+        "拒绝时不得写任何状态事件"
+
+
+def test_revalidate_rejects_rejected_terminal_not_revived(store):
+    """P2-1（review_p2_task31）：REJECTED 是终态，不得被 revalidate 复活。
+
+    复活只能人工重新 ACCEPT 一条新 Candidate（E5 的重新学习路径）——
+    不做新种子、不积累样本的一行式复活是绕过 E5 的捷径。
+    """
+    exp = _seed_store(store)
+    store.update_status(exp.experience_id, ExperienceStatus.REJECTED,
+                        "MANUAL_REJECT", operator="bob")
+    rows = _state_events(store, exp.experience_id)
+    before_status = [r for r in rows if r["to_status"] == "REJECTED"]
+
+    # lookup 设计上排除 REJECTED（E5）——取终态行只能走 list
+    current = next(e for e in store.list(ExperienceStatus.REJECTED)
+                   if e.experience_id == exp.experience_id)
+    with pytest.raises(ValueError, match="只用于 DEGRADED"):
+        revalidate(store, current)
+
+    after = next(e for e in store.list(ExperienceStatus.REJECTED)
+                 if e.experience_id == exp.experience_id)
+    assert after.status is ExperienceStatus.REJECTED
+    rows_after = _state_events(store, exp.experience_id)
+    assert [r for r in rows_after if r["to_status"] == "REJECTED"] == \
+        before_status, "不得出现 REJECTED → VERIFIED 的事件"
+
+
+# --- P3-1 / P3-2（review_p2_task31）：判据单点 + policy 下界 -----------------
+
+
+def test_recent_failure_count_is_single_gated_implementation():
+    """P3-1：窗口计数只有一个带守卫的实现（4.6 判据单点）。
+
+    两层防线：`recent_failure_count`/`sliding_window_degrade` 的 `window<=0`
+    守卫挡直调；`VerificationPolicy.degrade_window` 的 `Field(ge=1)`（P3-2）
+    挡配置入口——policy 过不了构造，`evaluate` 的 `detail` 也就吃不到非法窗口。
+    """
+    runs = [_run(i, result="FAILURE" if i % 2 == 0 else "SUCCESS")
+            for i in range(6)]                       # FAILURE,SUCCESS 交替
+    assert recent_failure_count(runs, window=3) == 1   # 尾 3 条 1 个失败
+    assert recent_failure_count(runs, window=6) == 3   # 全史 3 个失败
+    with pytest.raises(ValueError, match="window must be positive"):
+        recent_failure_count(runs, window=0)
+    with pytest.raises(ValueError, match="window must be positive"):
+        sliding_window_degrade(runs, window=-1)
+
+
+@pytest.mark.parametrize("kw", [
+    {"min_samples": 0}, {"min_samples": -5},
+    {"min_success_rate": -0.1}, {"min_success_rate": 2.0},
+    {"min_distinct_runs": 0},
+    {"degrade_window": 0}, {"degrade_window": -1},
+    {"degrade_max_failures": 0},
+])
+def test_verification_policy_rejects_out_of_range(kw):
+    """P3-2：policy 来自 YAML/CLI，手误必须 fail-loud（默认值即设计值，
+    但传入值没有下界时会静默失真）。"""
+    with pytest.raises(Exception):  # pydantic ValidationError
+        VerificationPolicy(**kw)
+
+
+@pytest.mark.parametrize("days", [0, -1])
+def test_staleness_policy_rejects_nonpositive_idle_days(days):
+    """P3-2：max_idle_days=-1 实测会把当天刚建的候选全清（无 undo）——
+    构造时即拒绝。"""
+    with pytest.raises(ValueError, match="max_idle_days must be >= 1"):
+        StalenessPolicy(max_idle_days=days)
 
 
 # --- 应用区：决策 → 落库 ----------------------------------------------------

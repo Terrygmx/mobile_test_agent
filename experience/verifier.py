@@ -20,9 +20,14 @@
 
 DEGRADED 没有自动出口：4.3 明文「DEGRADED ──(显式 revalidate 成功)──►
 VERIFIED」。**不提供「窗口恢复就自动转回」**——那会让降级变成抖动（E6 的
-滑动窗口是安全阀，不是健康探针）。
+滑动窗口是安全阀，不是健康探针）。**同理也没有自动的 REJECTED 出口**：
+§4.3 的「DEGRADED ──(持续失败 / 人工判定)──► REJECTED」目前**无实现**——
+`evaluate` 对反复失败的 DEGRADED 只会一直返回 `AWAITING_REVALIDATION`，
+唯一的自动出口是 sweeper（它只清 CANDIDATE）。人工判定侧归 9.5 流程；
+「持续失败 → REJECTED」是否在 Task 3.4 的 CLI 里给 `mta experience reject`
+出口，接线时定档（review_p2_task31 P3-3，勿当回归重查）。
 
-## 与设计伪代码的三处有意偏离（都写在对应函数的 docstring 里）
+## 与设计伪代码的四处有意偏离（都写在对应函数的 docstring 里）
 
 1. `evaluate` 多一个**必填关键字** `auto_verify_eligible`：E4 的资格是**目标
    元素**的属性（idempotency / risk），而 `(exp, runs, policy)` 三者里都没有
@@ -36,6 +41,14 @@ VERIFIED」。**不提供「窗口恢复就自动转回」**——那会让降�
 3. `success_rate` 与 `distinct_runs` 一律**从传入的 runs 现算**，不读
    `Experience` 上的冗余列——冗余列是给查询用的，判定必须以历史为唯一依据
    （E11：判定只吃「实际被尝试」的样本）。
+4. `eligible_for_auto_verification` **去掉了伪代码里的 `exp` 参数**（签名级
+   偏离，review_p2_task31 P3-5）：设计伪代码 `eligible(exp, element)` 的
+   `exp` 在函数体内未用到，留着只会诱导调用方以为状态参与资格判定（资格是
+   **元素**的属性，与经验当前的样本/状态无关）。顺带两笔口径：伪代码用
+   `element.effective_risk`，实现用 `element.risk`（`EffectiveElement` 的
+   真实字段名是后者）；`executor.policy.Risk` 与 `testcase.schema.Risk` 是
+   **同一枚举对象**（`is` 为 True），两处 import 名字不同源却同体——改
+   import 源不会换枚举，勿为此加转换层。
 """
 from __future__ import annotations
 
@@ -55,6 +68,7 @@ __all__ = [
     "REVALIDATION_REQUIRED",
     "distinct_run_count",
     "success_rate_of",
+    "recent_failure_count",
     "sliding_window_degrade",
     "eligible_for_auto_verification",
     "needs_revalidation",
@@ -107,6 +121,20 @@ def success_rate_of(runs: list[ExperienceRun]) -> float:
     return sum(1 for r in runs if r.result == "SUCCESS") / len(runs)
 
 
+def recent_failure_count(runs: list[ExperienceRun], *,
+                         window: int) -> int:
+    """4.6 判据的共用计数谓词：最近 `window` 次里的失败数（**唯一实现**）。
+
+    `sliding_window_degrade` 与 `evaluate` 的 `detail["window_failures"]`
+    都从这里取数——同一概念只许一处实现，否则两套切片必然漂移
+    （review_p2_task31 P3-1：`runs[-0:]` 是**整个列表**，裸切片会把
+    「最近 0 条的失败数」算成「全部历史的失败数」，detail 静默失真）。
+    """
+    if window <= 0:
+        raise ValueError(f"window must be positive, got {window}")
+    return sum(1 for r in runs[-window:] if r.result == "FAILURE")
+
+
 def sliding_window_degrade(runs: list[ExperienceRun], *,
                            window: int = 5, max_failures: int = 2) -> bool:
     """4.6 / E6：最近 `window` 次里失败 ≥ `max_failures` → 触发降级。
@@ -118,11 +146,7 @@ def sliding_window_degrade(runs: list[ExperienceRun], *,
     E6：窗口触发**优先于**总体 success_rate，两者独立计算（矩阵 #5：历史 100
     次 98 成功、最近 5 次里 3 次失败 → 立即 DEGRADED，不受 98% 影响）。
     """
-    if window <= 0:
-        raise ValueError(f"window must be positive, got {window}")
-    recent = runs[-window:]
-    failures = sum(1 for r in recent if r.result == "FAILURE")
-    return failures >= max_failures
+    return (recent_failure_count(runs, window=window) >= max_failures)
 
 
 def eligible_for_auto_verification(element) -> bool:
@@ -177,8 +201,8 @@ def evaluate(exp: Experience, runs: list[ExperienceRun],
     sample_count = len(runs)
     rate = success_rate_of(runs)
     distinct = distinct_run_count(runs)
-    window_failures = sum(1 for r in runs[-policy.degrade_window:]
-                          if r.result == "FAILURE")
+    window_failures = recent_failure_count(runs,
+                                           window=policy.degrade_window)
     base = {"sample_count": sample_count, "success_rate": round(rate, 6),
             "distinct_runs": distinct,
             "window_failures": window_failures,
@@ -247,6 +271,10 @@ def apply_outcome(store, exp: Experience, outcome: VerificationOutcome, *,
 
     判定与落库**分开**是为了 E13：`evaluate` 可脱离设备单测，本函数才是
     I/O。两者之间没有共享的规则，故不存在「两套实现漂移」。
+
+    ⚠️ 本函数**不校验** `exp.status` 与决策是否匹配——它是「决策 → 落库」的
+    裸搬运工（review_p2_task31 P3-4）。调用方必须保证 `outcome` 来自**同一条
+    exp** 的 `evaluate`；Task 3.4 CLI 接线时若需校验，由调用方传前自行断言。
     """
     if not outcome.changes_status:
         return False
@@ -267,9 +295,16 @@ def revalidate(store, exp: Experience, *, fingerprint: str | None = None,
     观测记录」）。它**不**自己跑验证：验证证据由调用方（跑了一次真机验证的
     人/命令）提供，`fingerprint` 就是那次观测。
 
-    调用前若 `exp.status` 不是 DEGRADED，`update_status` 会按同状态 no-op
-    语义处理——不会伪造出一条跳变事件。
+    **只接受 DEGRADED**（fail-loud，review_p2_task31 P2-1）：CANDIDATE 走
+    这条路等于绕过 E4 资格 + 4.5 门槛零样本直推 VERIFIED；REJECTED 走这条
+    路等于复活终态——4.3 明文复活只能人工重新 ACCEPT 一条新 Candidate
+    （E5 的重新学习路径）。两条都是状态机红线，不提供静默 no-op 出口。
     """
+    if exp.status is not ExperienceStatus.DEGRADED:
+        raise ValueError(
+            f"revalidate 只用于 DEGRADED（显式重验证），当前状态是 "
+            f"{exp.status.value}：CANDIDATE 需先经 evaluate 过 E4+4.5 门槛，"
+            f"REJECTED 是终态、只能重新 ACCEPT 新 Candidate（E5）")
     store.update_status(exp.experience_id, ExperienceStatus.VERIFIED,
                         "REVALIDATED", operator=operator, run_id=run_id,
                         app_build=app_build)

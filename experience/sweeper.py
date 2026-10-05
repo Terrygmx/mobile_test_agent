@@ -33,9 +33,19 @@ STALE_REASON = "STALE"
 
 @dataclass(frozen=True)
 class StalenessPolicy:
-    """设计 8.2 的 `candidate_staleness` 段（默认值即设计值）。"""
+    """设计 8.2 的 `candidate_staleness` 段（默认值即设计值）。
+
+    `max_idle_days` 有下界（review_p2_task31 P3-2）：YAML/CLI 手误的
+    `-1` 实测会**把当天刚建的候选全清掉**（update_status 无 undo）——
+    构造时即 fail-loud。
+    """
 
     max_idle_days: int = 90
+
+    def __post_init__(self) -> None:
+        if self.max_idle_days < 1:
+            raise ValueError(
+                f"max_idle_days must be >= 1, got {self.max_idle_days}")
 
 
 def _last_activity(exp: Experience,

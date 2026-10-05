@@ -215,14 +215,18 @@ class StateEvent(_Strict):
 
 
 class VerificationPolicy(_Strict):
-    """4.5 升级门槛（默认值即设计值——改动即设计变更，测试拦住）。"""
+    """4.5 升级门槛（默认值即设计值——改动即设计变更，测试拦住）。
 
-    min_samples: int = 10
-    min_success_rate: float = 0.95
-    min_distinct_runs: int = 3
+    取值有下界（review_p2_task31 P3-2）：policy 来自 YAML/CLI，手误的
+    `degrade_window: 0` 会让窗口计数静默失真——fail-loud 而非吞掉。
+    """
+
+    min_samples: int = Field(default=10, ge=1)
+    min_success_rate: float = Field(default=0.95, ge=0, le=1)
+    min_distinct_runs: int = Field(default=3, ge=1)
     # 4.6 滑动窗口降级参数
-    degrade_window: int = 5
-    degrade_max_failures: int = 2
+    degrade_window: int = Field(default=5, ge=1)
+    degrade_max_failures: int = Field(default=2, ge=1)
 
 
 class VerificationDecision(str, Enum):

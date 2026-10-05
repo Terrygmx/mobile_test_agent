@@ -209,5 +209,14 @@ def test_sweep_honours_policy_max_idle_days(store):
     assert sweep_stale_candidates(
         store, StalenessPolicy(max_idle_days=29), now=NOW) == [
         exp.experience_id]
+    # 30 天闲置在 90 天口径下不清——用**新种**的候选考（review_p2_task31
+    # P3-6：复用已被清成 REJECTED 的那条，无论 90 天逻辑对错断言都成立，
+    # 策略值根本没被读到）。
+    fresh30 = _seed(store)
+    _backdate(store, fresh30.experience_id, 30)
     assert sweep_stale_candidates(
         store, StalenessPolicy(max_idle_days=90), now=NOW) == []
+    current = next(e for e in store.list(ExperienceStatus.CANDIDATE)
+                   if e.experience_id == fresh30.experience_id)
+    assert is_stale(current, store.get_runs(fresh30.experience_id),
+                    now=NOW, max_idle_days=90) is False
