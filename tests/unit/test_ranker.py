@@ -100,13 +100,14 @@ def test_same_status_sorted_by_success_rate_desc():
 
 
 def test_same_rate_sorted_by_recency_newest_first():
-    """rate 同分 → 最近一次成功时间新→旧。
+    """rate 同分 → 最近写时刻新→旧。
 
     「最近一次成功时间」在 Experience 行上没有专列（登记的偏离）：以
-    `updated_at`（最后一次**样本**时刻，不分成败）作新近度代理——引入
-    last_success_at 需要每次样本多写一列或 ranker 读 runs（I/O），与
-    E13 冲突。对排序而言「最近动过哪条」与「最近成功哪条」的差异只
-    影响同分候选的先后，不影响 Guard 判定。
+    `updated_at` 作新近度代理——**真实语义是「最后一次写时刻」**（样本/
+    状态跳变/指纹任一落库都推进，review_p2_task32 P3-1 实锤过「状态跳变
+    计新」），比「最后一次样本」更粗。影响仅限同分候选先后（Guard 兜底）；
+    引入 last_success_at 列的 Schema 变更点已在 ranker 模块 docstring
+    登记，届时撤偏离。
     """
     old = _exp(ExperienceStatus.CANDIDATE, exp_id="old", rate=0.9,
                samples=10, success=9, updated=NOW - timedelta(days=7))

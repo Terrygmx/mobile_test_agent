@@ -304,6 +304,21 @@ def try_experiences(candidates: list[Experience], ctx, executor) -> RecoveryOutc
 
 全部候选用尽才回落到 LLM（受 P1 Budget 控制）。
 
+> **修订记录（Task 3.2 实现后回填，2026-10-05，review_p2_task32 P3-2）**：
+> 伪代码的排序规则只写了两档；实现为四级信任档位 **VERIFIED > DEGRADED >
+> CANDIDATE > REJECTED（排尾）**。DEGRADED 排在 CANDIDATE 之前意味着
+> 「刚被 E6 滑动窗口判连续失败的候选」仍先于「零失败但未验证的候选」被
+> 尝试——理由：DEGRADED 有真实历史（曾是 VERIFIED），排序只决定「先试
+> 哪条」，每条各自仍走完整 Guard（E1），试错代价只是一次 Guard+执行，
+> 不会误用；「有真实历史」优先于「零证据」。「无样本排尾」是**档位内**
+> 限定（零样本 VERIFIED——9.5 人工 Promotion 跳过自动验证的路径——仍以
+> 档位 0 排最前，「人工判断 > 统计」语义自洽）。同档同率按 `updated_at`
+> （最后一次写时刻）作新近度代理，与 5.1 原义「最近一次成功时间」的
+> 偏离已在 `experience/ranker.py` 模块 docstring 登记（含未来补
+> `last_success_at` 列的 Schema 变更点）。REJECTED 排尾是防御性的——
+> `lookup` 已按 7.1 修订排除 REJECTED，ranker 不做资格判定（那是 Guard
+> 的事）。
+
 ---
 
 ## 6. 非幂等 / 高风险目标的处理
