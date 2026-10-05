@@ -17,9 +17,14 @@
 ## 失效策略：`app_build` 变化不整体清空
 
 cache_key 的五元组**不含 app_build**（设计 7.3 公式原样）——新 build
-不触发失效风暴，某条 Experience 在新 build 下还能不能用，由 Guard 的
-`validated_builds` 集合检查（E7）自然裁决：用不了就是一次 Guard BLOCK，
-记一条失败样本，代价有界。`clear()` 是显式运维动作，没有自动钩子。
+不触发失效风暴，某条 Experience 在新 build 下还能不能用，交给
+validated_builds（E7）语义自然消化。⚠️ **当前 Guard 链没有任何 build
+检查步骤**（review_p2_task33 P3-2 定档挂账）：实际行为是「不检查、
+EXECUTE 照常、成功后追 build 记账」（E7）——docstring 曾把「Guard
+BLOCK 记失败样本」当成既有机制，那是错的（照做会在每次 build 变化后
+给每条 Experience 首用记失败样本，污染 E6 滑动窗口）。裁决机制三选一
+已挂账到 plan Task 4.3 接线前置，拍板前**不得**按旧措辞自行实现。
+`clear()` 是显式运维动作，没有自动钩子。
 
 ## 对 7.3 公式的两处登记细化
 
@@ -76,6 +81,9 @@ class RecoveryCache:
         self._capacity = capacity
         self._entries: OrderedDict[str, list[Experience]] = OrderedDict()
         self._lock = threading.Lock()
+        # hits/misses 允许锁外读（review_p2_task33 P3-4）：CPython int
+        # += 在 GIL 下无撕裂，计数是观测用 approximate 值不是账本——
+        # 给它加锁只会白花一次争用，别「好心」加。
         self.hits = 0
         self.misses = 0
 

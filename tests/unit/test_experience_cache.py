@@ -146,6 +146,37 @@ def test_cache_returns_copies_not_live_references():
     assert cache.get(key)[0] is not returned
 
 
+def test_put_side_copy_isolates_cache_from_source_mutation():
+    """P3-3（review_p2_task33）：put 侧对称隔离——调用方 put 之后继续改
+    源列表，缓存正本不受影响（防止有人「优化掉」put 侧拷贝）。"""
+    cache = RecoveryCache()
+    key = cache_key("com.x", "HomeView", "t", "NOT_FOUND", "fp")
+    source = [_exp("exp_a")]
+    cache.put(key, source)
+
+    source[0].sample_count += 99
+    source.append(_exp("intruder"))
+
+    cached = cache.get(key)
+    assert len(cached) == 1
+    assert cached[0].sample_count == 0
+    assert cached[0].experience_id == "exp_a"
+
+
+def test_put_empty_list_is_not_cached():
+    """P3-1（review_p2_task33）：空列表不进缓存——负缓存黑洞的钉子。
+
+    「miss 也缓存」是最常见的缓存陷阱：Store 侧新增候选后，本进程会
+    永远看不见且无任何报错。这条行为最容易被后人「顺手修好」（把空
+    列表也缓存上），故用测试钉住。
+    """
+    cache = RecoveryCache()
+    key = cache_key("com.x", "HomeView", "t", "NOT_FOUND", "fp")
+    cache.put(key, [])
+    assert cache.get(key) is None
+    assert len(cache) == 0
+
+
 # --- app_build 不在键里：无失效风暴 ------------------------------------------
 
 
