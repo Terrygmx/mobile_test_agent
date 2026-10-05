@@ -5,9 +5,15 @@
 （out/trace.db）分开演进——可变状态库 vs append-only 流水库（plan
 Task 1.2 关键决策），单写者边界（E9）按库划分。
 
-泛化点（plan：graph 侧 M5 直接调用，不挂在 experience 包下）：执行器
-只认「目录 + 版本链」，不 import experience 模型——graph/migrations 建
-自己的 002 链时零改动复用。
+## 泛化（plan Task 1.2 决策：graph 侧 M5 直接调用，不挂在 experience 包下）
+
+执行器只认「**迁移目录 + 版本链**」，不 import 任何 experience 模型。Task 5.1
+把目录从硬编码改为参数（`migrations_dir` / `pkg`），experience 侧保持原默认值
+零改动；`graph/storage.py` 传自己的 `graph/migrations` 即可复用同一套
+幂等/向后追加/fail-loud 语义——两套链各自演进，共用一份执行器实现。
+
+（`graph → experience` 的 import 是**对通用工具**的依赖，不是主线耦合：
+graph 不读 experience 的任何模型或存储，design §14 的「独立主线 B」仍成立。）
 """
 from __future__ import annotations
 
@@ -17,43 +23,55 @@ import time
 from importlib import resources
 from pathlib import Path
 
-# 迁移脚本目录（打包内相对本模块；脚本名 <version>_<name>.sql 排序即应用序）
+# 默认迁移脚本目录（打包内相对本模块；脚本名 <version>_<name>.sql 排序即应用序）
 _MIGRATIONS_PKG = "experience.migrations"
 
 _VERSION_RE = re.compile(r"^(\d+)_")
 
 
-__all__ = ["migrate", "current_version", "EXPERIENCE_SCHEMA_VERSION"]
+__all__ = ["migrate", "current_version", "available_migrations",
+           "latest_version", "EXPERIENCE_SCHEMA_VERSION"]
 
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def _available_migrations() -> list[tuple[int, str]]:
-    """(序号, 脚本名) 列表，按序号升序。支持包资源与真实目录两种形态。"""
+def _default_dir() -> Path:
+    return Path(__file__).parent / "migrations"
+
+
+def available_migrations(migrations_dir=None,
+                         pkg: str | None = None) -> list[tuple[int, str]]:
+    """(序号, 脚本名) 列表，按序号升序。支持包资源与真实目录两种形态。
+
+    `migrations_dir` / `pkg` 缺省即 experience 自己的链；graph 侧传自己的目录
+    与包名（zipapp 形态用得上 `pkg`）。
+    """
     out: list[tuple[int, str]] = []
-    pkg_dir = Path(__file__).parent / "migrations"
+    pkg_dir = Path(migrations_dir) if migrations_dir else _default_dir()
     if pkg_dir.is_dir():
         names = [p.name for p in sorted(pkg_dir.iterdir())
                  if p.suffix == ".sql" and _VERSION_RE.match(p.name)]
     else:  # zipapp 等打包形态
-        names = [n for n in resources.files(_MIGRATIONS_PKG).iterdir()
+        names = [n for n in resources.files(pkg or _MIGRATIONS_PKG).iterdir()
                  if n.endswith(".sql") and _VERSION_RE.match(n)]
     for name in names:
         seq = int(_VERSION_RE.match(name).group(1))
         out.append((seq, name))
     return sorted(out)
-def _latest_known_version() -> str:
+
+
+def latest_version(migrations_dir=None, pkg: str | None = None) -> str:
     """汇总版本串 = 最新已知脚本的**脚本名**（review_p2_task12 P3-3：
     从链尾派生，加 003_*.sql 忘改常量也不会让 migrate() 返回值撒谎）。"""
-    known = _available_migrations()
+    known = available_migrations(migrations_dir, pkg)
     if not known:
         raise RuntimeError("no migration scripts found")
     return known[-1][1].removesuffix(".sql")
 
 
-EXPERIENCE_SCHEMA_VERSION = _latest_known_version()
+EXPERIENCE_SCHEMA_VERSION = latest_version()
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -90,17 +108,24 @@ def _applied_seq(conn: sqlite3.Connection) -> set[int]:
     return out
 
 
-def _load_script(name: str) -> str:
-    pkg_dir = Path(__file__).parent / "migrations"
+def _load_script(name: str, migrations_dir=None,
+                 pkg: str | None = None) -> str:
+    pkg_dir = Path(migrations_dir) if migrations_dir else _default_dir()
     path = pkg_dir / name
     if path.is_file():
         return path.read_text(encoding="utf-8")
-    return (resources.files(_MIGRATIONS_PKG).joinpath(name)
+    return (resources.files(pkg or _MIGRATIONS_PKG).joinpath(name)
             .read_text(encoding="utf-8"))
 
 
-def migrate(conn: sqlite3.Connection) -> str:
-    """把 conn 升到 EXPERIENCE_SCHEMA_VERSION，返回版本串。幂等。
+def migrate(conn: sqlite3.Connection, *, migrations_dir=None,
+            pkg: str | None = None) -> str:
+    """把 conn 升到该链的最新版本，返回版本串。幂等。
+
+    `migrations_dir` / `pkg` 缺省即 experience 链（行为与 Task 1.2 完全一致）；
+    graph 侧传自己的目录。**同一个库只属于一条链**——传错目录会让执行器拿另一
+    条链的脚本往这个库里灌，版本串也会跟着错，所以调用方必须显式（默认值只
+    服务 experience 自己）。
 
     只向后追加：已应用序号 > 本 build 已知脚本 → 拒绝（旧代码打开新库，
     静默续写会破坏迁移链——与 tracer.migrate 同款 fail-loud）。
@@ -109,21 +134,21 @@ def migrate(conn: sqlite3.Connection) -> str:
         "CREATE TABLE IF NOT EXISTS schema_migrations ("
         " version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
     applied = _applied_seq(conn)
-    known = _available_migrations()
+    known = available_migrations(migrations_dir, pkg)
 
     if applied and max(applied) > max((s for s, _ in known), default=0):
         raise RuntimeError(
-            f"experience db is newer than this build "
+            f"db is newer than this build "
             f"(applied={sorted(applied)}, known={[n for _, n in known]})")
 
     for seq, name in known:
         if seq in applied:
             continue
         # 脚本自含 IF NOT EXISTS——单脚本内重放安全；跨脚本由版本链保证
-        conn.executescript(_load_script(name))
+        conn.executescript(_load_script(name, migrations_dir, pkg))
         conn.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?,?)",
             (name.removesuffix(".sql"), _now()))
         conn.commit()
 
-    return EXPERIENCE_SCHEMA_VERSION
+    return latest_version(migrations_dir, pkg)

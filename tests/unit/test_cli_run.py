@@ -1031,3 +1031,93 @@ def test_resolve_app_build_falls_back_on_bad_json(tmp_path):
     meta = tmp_path / "source_metadata.json"
     meta.write_text("{not json", encoding="utf-8")
     assert _resolve_app_build(_ns(metadata=str(meta))) == DEFAULT_APP_BUILD
+
+
+def test_run_records_app_build_scope(tmp_path):
+    """Task 5.1：`runs.app_build` 必须被写入（M5 的 build-to-build diff 按它分图）。
+
+    此前该列**从未被写过**（P1 遗留：build identity 只记 `metadata_build`），
+    于是所有真实 run 的图都会落进同一个空 scope，`mta graph diff --build B
+    --base-build A` 无从下手。两条路径（真机 / --fake-driver）都要记。
+    """
+    import sqlite3
+
+    sdir = tmp_path / "suites"
+    sdir.mkdir()
+    (sdir / "plain_001.yaml").write_text(VALID_TC, encoding="utf-8")
+    meta = tmp_path / "source_metadata.json"
+    meta.write_text('{"build": "1026", "git_commit": "abc1234"}',
+                    encoding="utf-8")
+    db = tmp_path / "trace.db"
+
+    code = main(["run", "--case", "login_001", "--suites-root", str(sdir),
+                 "--db", str(db), "--fake-driver", "--no-llm",
+                 "--metadata", str(meta)])
+    assert code == 0
+    row = sqlite3.connect(db).execute(
+        "SELECT app_build FROM runs ORDER BY rowid DESC LIMIT 1").fetchone()
+    assert row[0] == "1026", "build id 来自 12.3 metadata（与 pipeline 同源）"
+
+
+def test_run_records_default_app_build_without_metadata(tmp_path):
+    """读不到 metadata → 记 `local`（与 pipeline 的 DEFAULT_APP_BUILD 一致），
+    不 fail-loud、也不留 NULL。"""
+    import sqlite3
+
+    sdir = tmp_path / "suites"
+    sdir.mkdir()
+    (sdir / "plain_001.yaml").write_text(VALID_TC, encoding="utf-8")
+    db = tmp_path / "trace.db"
+
+    code = main(["run", "--case", "login_001", "--suites-root", str(sdir),
+                 "--db", str(db), "--fake-driver", "--no-llm",
+                 "--metadata", str(tmp_path / "nope.json")])
+    assert code == 0
+    row = sqlite3.connect(db).execute(
+        "SELECT app_build FROM runs ORDER BY rowid DESC LIMIT 1").fetchone()
+    assert row[0] == "local"
+
+
+def test_run_records_app_build_scope(tmp_path):
+    """Task 5.1：`runs.app_build` 必须被写入（M5 的 build-to-build diff 按它分图）。
+
+    此前该列**从未被写过**（P1 遗留：build identity 只记 `metadata_build`），
+    于是所有真实 run 的图都会落进同一个空 scope，`mta graph diff --build B
+    --base-build A` 无从下手。两条路径（真机 / --fake-driver）都要记。
+    """
+    import sqlite3
+
+    sdir = tmp_path / "suites"
+    sdir.mkdir()
+    (sdir / "plain_001.yaml").write_text(VALID_TC, encoding="utf-8")
+    meta = tmp_path / "source_metadata.json"
+    meta.write_text('{"build": "1026", "git_commit": "abc1234"}',
+                    encoding="utf-8")
+    db = tmp_path / "trace.db"
+
+    code = main(["run", "--case", "login_001", "--suites-root", str(sdir),
+                 "--db", str(db), "--fake-driver", "--no-llm",
+                 "--metadata", str(meta)])
+    assert code == 0
+    row = sqlite3.connect(db).execute(
+        "SELECT app_build FROM runs ORDER BY rowid DESC LIMIT 1").fetchone()
+    assert row[0] == "1026", "build id 来自 12.3 metadata（与 pipeline 同源）"
+
+
+def test_run_records_default_app_build_without_metadata(tmp_path):
+    """读不到 metadata → 记 `local`（与 pipeline 的 DEFAULT_APP_BUILD 一致），
+    不 fail-loud、也不留 NULL。"""
+    import sqlite3
+
+    sdir = tmp_path / "suites"
+    sdir.mkdir()
+    (sdir / "plain_001.yaml").write_text(VALID_TC, encoding="utf-8")
+    db = tmp_path / "trace.db"
+
+    code = main(["run", "--case", "login_001", "--suites-root", str(sdir),
+                 "--db", str(db), "--fake-driver", "--no-llm",
+                 "--metadata", str(tmp_path / "nope.json")])
+    assert code == 0
+    row = sqlite3.connect(db).execute(
+        "SELECT app_build FROM runs ORDER BY rowid DESC LIMIT 1").fetchone()
+    assert row[0] == "local"

@@ -309,6 +309,15 @@ M1 审计/Schema(1.5d) ─► M2 Store/Guard(4d) ─► M3 验证/降级(3d) ─
 
 ### Task 5.3: P2-13 — Graph Diff
 
+> **⚠️ 接线前置（Task 5.1 显性化，2026-10-05）**：build-to-build diff
+> （`mta graph diff --build 1025 --base-build 1024`）要按 build 分图，而
+> **`runs.app_build` 此前从未被写入**（P1 遗留：`mta run` 只记 `metadata_build`；
+> 该列全仓无消费者）→ 所有真实 run 的图会落进同一个空 scope。**已在 Task 5.1
+> 顺手补齐**（`cmd_run` 里 `_resolve_app_build` 算一次、pipeline 与 `runs` 共用，
+> 两条路径都记，含两条专测）——本任务直接消费即可，无需再改。
+> 另：`graph.build` 的 `--from-trace` 语义是**trace 全量**（不是单个 run），
+> 图的权威输入即全量，重跑必须幂等（`upsert_graph` 已按范围整体替换）。
+
 **Objective:** 设计 12.2 / 12.3：五类分类 + build-to-build + `mta graph` CLI。
 
 **Files:**

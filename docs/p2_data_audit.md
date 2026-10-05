@@ -1144,3 +1144,95 @@ Files 清单只含 verifier/sweeper，不在 `agent/recovery.py` 或 `cli/pipeli
 - 真机指标产物用修订后代码**重新生成**：`out/p2_m2_gate/experience_metrics_demo.html`
   （run1 `0.0%` → run2 `100.0%` 不变；run2 的 store 段仍显示 `0.000ms`——那是
   **修订前**的 trace 数据，页内已注明）。
+
+---
+
+## Task 5.1 完成记录（P2-11 Runtime Graph，设计 12.1，2026-10-05）
+
+**Objective**：从 P1 Trace 构建实际到达的 Screen/Transition。
+
+M5 的第一个任务，也是 `graph/` 包与 graph 库的落地（plan Task 1.2 的决策：
+graph 三表**随 M5 实现定型**，独立库 `out/graph.db` + 独立版本链）。
+
+### 交付
+
+- `graph/models.py`：`ScreenNode` / `ScreenTransition` / `RuntimeGraph` /
+  `TraceStep`（frozen dataclass——图节点是**纯值**，无跨字段一致性约束；
+  与 `experience/models.py` 的 pydantic 定位不同，那里承载 E5/E7 的写入闸门）。
+- `graph/builder.py`：`build_runtime_graph`（**纯函数**）+ `observed_screens` /
+  `is_screen_wait` 谓词 + `read_trace_steps`（本模块唯一 I/O 区）。
+- `graph/storage.py`：`GraphStore`（构造即迁移）+ `build_and_store`；
+  `GRAPH_MIGRATIONS_DIR` / `GRAPH_SCHEMA_VERSION`。
+- `graph/migrations/001_graph_schema.sql`：`screen_nodes` / `screen_transitions` /
+  `graph_diffs` 三表 + 索引。
+- `graph/__init__.py`：包导出 + `DEFAULT_GRAPH_DB`（`out/graph.db`，与
+  `DEFAULT_EXPERIENCE_DB` 同款单点定义，CLI `--graph-db` 直接 import）。
+- `tests/unit/test_graph_builder.py`：23 例。
+
+### 关键决策：什么算「到达了一个屏」（本任务最实质的一处判断）
+
+只有**两类观测**算数（E12：不做自动探索，没有证据就没有节点）：
+
+| 证据 | 来源 | 为什么算观测 |
+|---|---|---|
+| `wait_screen` | `wait_for screen:X` 步骤**成功** | wait 引擎校验过 X 的 marker——屏是被**验证**过的 |
+| `recovery_observed` | 恢复期 `stage: screen / outcome: FOUND` | 引擎当场用 marker 识别出了屏 |
+
+**刻意排除的一类**：`steps.target_id` 形如 `Screen.element` 时能读出「目标登记在
+哪个屏」——但那是**元数据声明**，不是运行时观测。把它当 runtime 证据会让 Runtime
+Graph 混进 Source Graph 的信息，设计 12.2 的 diff（runtime vs source）就失去意义。
+（真机 trace 里 `wait_for LoginView.password_field` 正是这一形态，已有专测钉住
+「不产生运行时节点」。）若将来确实需要，应作为第三类证据单独加入**并同步 diff
+口径**。
+
+其他口径：
+
+- **超时的屏 wait 不算到达**（`status` 必须 SUCCESS/RECOVERED）——等待失败就是
+  没到。
+- **转移的 `trigger` = 紧邻「目标屏被观测到」之前的那个步骤**
+  （`<step_type>:<target_id>`）。设计 12.2 的 `CHANGED`（「同一触发条件，目标
+  Screen 变化」）要靠它做连接键，所以它**进唯一键**：同一对屏由不同动作触发是
+  两条不同的转移（有专测）。
+- **同屏连续观测不产生自环转移**（一个屏被连点三次 = 一次访问，但
+  `visit_count` 照实累加）。
+- **时间精度到 testcase_run**：`steps` 表**没有时间戳**（P1 schema 如此），
+  `observed_at` 取所属 `testcase_run` 的 `end_time`（缺则 `start_time`）——可得
+  的最细粒度，不假装更细。
+- **输出排序**：节点按 `screen_id`、转移按 `(from, to, trigger)` 排序——确定性，
+  diff 与落库都靠它稳定。
+
+### 落库语义：按范围**整体替换**而不是累加
+
+图的权威输入是 **trace 全量**（`steps` 表已累积所有 run），所以重跑 `graph build`
+必须得到同一张图（**幂等**）。累加会让第二次 build 把 `visit_count` 翻倍，而图
+本身没有「这次增量是哪几个 run」可用于去重。替换还有个好处：trace 里旧 run 被
+清理后图会跟着收敛，不留幽灵节点。有专测钉住「重跑两次结果相同」。
+
+### 迁移执行器泛化（plan Task 1.2 决策的兑现）
+
+`experience/schema_migrations.py` 的目录从硬编码改为参数（`migrations_dir` /
+`pkg`），experience 侧保持原默认值**零改动**（8 例既有测试全过）；
+`graph/storage.py` 传自己的目录复用同一套幂等/向后追加/fail-loud 语义。
+`graph → experience` 的 import 是**对通用工具**的依赖，不是主线耦合（graph 不读
+experience 的任何模型或存储，设计 §14 的「独立主线 B」仍成立）——已在两侧
+docstring 互相指认。
+
+### 顺带清掉一条 Task 5.3 的接线前置：`runs.app_build` 从未被写入
+
+- 现状：`mta run` 只记 `metadata_build`（metadata 声明的构建），**`runs.app_build`
+  一直是 NULL**（P1 遗留，全仓无消费者）。
+- 影响：M5 的 build-to-build diff（设计 12.3：`mta graph diff --build 1025
+  --base-build 1024`）必须按 build 分图——这一列空着的话所有真实 run 的图都会落进
+  同一个空 scope，diff 无从下手。
+- 修法：`cmd_run` 里 `_resolve_app_build(args)` 算一次、**两个消费者共用**
+  （pipeline 的 E7 + `runs.app_build`），两条路径（真机 / `--fake-driver`）都记。
+  有两条专测（metadata 有 build → 记它；读不到 → 记 `local`）。
+- 该列此前无任何消费者，写入它不改变任何既有行为。
+
+### 实测
+
+- 全量 pytest **1146 passed**（Task 5.1 新增 25：graph 23 + `runs.app_build` 2）。
+- **真机 trace 建图验证**：用 Gate M2 的 `trace_run1.db` / `trace_run2.db` 建图，
+  得 3 节点 2 转移——`LoginView`（`recovery_observed`）→`HomeView`
+  （`tap:login_button` 触发）→`ProfileView`（`tap:go_profile` 触发），与用例实际
+  路径一致。

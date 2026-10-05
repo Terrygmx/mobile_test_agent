@@ -416,9 +416,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     from repository.resolver import Severity
     from testcase.lint import lint as lint_cases, max_severity
 
+    # Task 5.1：本次 run 的 build id 在这里算一次，**两个消费者共用**——
+    # pipeline（E7 validated_builds）与 runs 审计列（`runs.app_build`）。
+    # 后者此前从未被写入（P1 遗留：build identity 只记 metadata_build），
+    # 而 M5 的 build-to-build diff（设计 12.3）必须按 build 分图——没有它
+    # 所有真实 run 的图都会落进同一个空 scope。
+    app_build = _resolve_app_build(args)
     pipeline = SessionPipeline(suites_root=args.suites_root, secrets=secrets,
                                app_id=args.bundle_id or "",
-                               app_build=_resolve_app_build(args))
+                               app_build=app_build)
     try:
         cases = pipeline.discover(suite=args.suite, tag=args.tag,
                                   case=args.case)
@@ -471,6 +477,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     from source import build_identity as bi
 
     bi_fields: dict[str, object] = {}
+    # Task 5.1：本次被测构建**两条路径都记**（fake-driver 也记——它同样是
+    # 「哪一次构建」，只是没有设备身份可校验）。M5 的 build-to-build diff
+    # （设计 12.3）按 build 分图，缺了这一列所有 run 的图都会落进空 scope。
+    bi_fields["app_build"] = app_build
     if not args.fake_driver:
         try:
             udid = args.udid or bi.resolve_booted_udid()
