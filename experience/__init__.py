@@ -13,6 +13,7 @@
 """
 from pathlib import Path
 
+from experience.cache import RecoveryCache, cache_key
 from experience.models import (
     CandidateSeed,
     Experience,
@@ -66,4 +67,6 @@ __all__ = [
     "StalenessPolicy", "is_stale", "sweep_stale_candidates", "STALE_REASON",
     # Task 3.2：多候选排序（设计 5.1）
     "rank_experiences",
+    # Task 3.3：进程内 Recovery Cache（设计 7.3）
+    "RecoveryCache", "cache_key",
 ]

@@ -190,6 +190,8 @@ M1 审计/Schema(1.5d) ─► M2 Store/Guard(4d) ─► M3 验证/降级(3d) ─
 
 ### Task 3.3: P2-08 — Recovery Cache
 
+> **⚠️ 接线定档（2026-10-05，Task 3.3 实现时登记）**：本任务只交付 `experience/cache.py` 模块（plan Files 清单如此），`_try_experiences` 的接线**归 Task 4.2**——其指标需求「lookup/cache/LLM 延迟梯度」要求缓存真实进入执行路径才有数据可测。接线时的两条红线：① 命中路径与未命中路径必须共用同一段 Guard+记账代码（E1：缓存只省 Store 磁盘 lookup，不省 Guard）；② 缓存不得改变 ranker 的输入集语义（缓存的是 ranker 的输入候选集，不是排序结果的应用裁决）。`RecoveryCache.get/put` 均为深拷贝，引擎侧拿到的是副本，记账突变不会污染缓存。
+
 **Objective:** 设计 7.3：进程内 LRU，命中仍强制走 Guard（E1 延伸：缓存不允许绕过安全校验）。
 
 **Files:**
