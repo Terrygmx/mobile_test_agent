@@ -84,8 +84,14 @@ strategies:
 
 
 def test_experience_strategy_survives_replace_mode(tmp_path):
-    """experience override 用 replace mode（promoter 默认）时，generated
-    的 source 策略不进入链（replace 语义）——experience 自身也不被丢。"""
+    """merge 层的 replace 语义本身（P1 既有行为，不改）：experience
+    override 用显式 replace（无 mode 键）时，generated 的 source 策略不进
+    链——但 experience 自身不被丢。
+
+    定档注记（review_p2_task41 P2-2）：promoter 的**真实产物**带
+    `mode: append`（§9.2「排链尾不丢弃」由写入口兑现，见
+    test_promoter.py::test_promoter_diff_uses_append_mode_to_keep_source_chain）；
+    本测试只钉 merge 层对裸文档的既有语义，供 resolver 回归。"""
     d = tmp_path / "overrides" / "elements"
     d.mkdir(parents=True)
     (d / "HomeView.yaml").write_text("""\

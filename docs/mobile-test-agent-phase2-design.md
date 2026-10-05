@@ -58,6 +58,12 @@
 | E12 | Graph 只来自已有 TestCase + 已有 Trace + Source Metadata，不做自动探索；未观察到的状态标 `NOT_OBSERVED`，不得标 `REMOVED`。 |
 | E13 | 所有 Experience 相关的决策逻辑（Guard、状态机转换、排序）必须是可脱离设备的纯函数，并有单测覆盖。 |
 
+> **H15 注记（P2-09，review_p2_task41 P3-1）**：P1 H15「工具不自动写
+> Repository」——9.1 的 promote 在**人工 APPROVE**（proposal 审计闸门，
+> 9.3）之后写 overrides，是人工决策的落地动作，非自动写入；E10 的
+> 「人工 Accept 触发」同义。review accept 的补丁出口（9.5 学习入口）仍
+> 遵守 H15 字面：工具只导出补丁，合入由人工完成。
+
 ---
 
 ## 3. 架构与运行时流程
@@ -431,6 +437,13 @@ manual override  >  source generated  >  promoted experience
 ```
 
 即：如果 `manual`/`source` 的策略在运行时失败，Locator Chain 会继续尝试 `promoted experience` 策略——它是 Locator Chain 里排序最后的一条，而不是被直接丢弃。
+
+> **修订记录（Task 4.1 修订后回填，2026-10-05，review_p2_task41 P2-2）**：
+> 「排链尾不丢弃」由 **promoter 写入口**兑现——生成的 override 文档带
+> `mode: append`（P1 merge 语义：generated/manual/source 链在前，本
+> override 追加链尾）。首版实现曾写 replace 语义（promote 后 source 链
+> 被丢弃，与本文相悖），已定档为 append；resolver 侧另有 origin 稳定
+> 排序（manual > source > experience）与同名冲突 warning 兜底。
 
 ### 9.3 Promotion Proposal
 

@@ -17,6 +17,7 @@ plan step 1 的失败测试清单逐条对应：
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -197,6 +198,92 @@ def test_approve_refuses_to_shadow_existing_manual_override(store, repo_root):
 def test_approve_unknown_proposal_exit(store, repo_root):
     with pytest.raises(ValueError, match="no such promotion proposal"):
         approve_proposal(store, "prop_nope", repo_root=repo_root)
+
+
+def test_approve_git_failure_rolls_back_file_write(store, repo_root,
+                                                   tmp_path):
+    """P2-1（review_p2_task41）：git 身份缺失 → commit 失败 → overrides
+    写入**回滚**、proposal 保持 PENDING——重试不被自己写了一半的文件
+    挡死（首版实锤：文件已写 + 重试被误报「人工 override」）。"""
+    exp_id = _verified(store)
+    p = generate_proposal(store, store.get_experience(exp_id))
+    # 强制 commit 失败的可复现方式：user.useConfigOnly=true + 无 email
+    # ——git 遇到该组合必拒（Apple Git 会用账户名/主机名自动推导身份，
+    # 仅删身份源在本机探不红）。
+    subprocess.run(["git", "-C", str(repo_root), "config",
+                    "user.useConfigOnly", "true"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo_root), "config", "--unset",
+                    "user.email"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo_root), "config", "--unset",
+                    "user.name"], capture_output=True)
+    monkey = pytest.MonkeyPatch()
+    for k, v in dict(GIT_CONFIG_GLOBAL="/dev/null",
+                     GIT_CONFIG_SYSTEM="/dev/null",
+                     HOME=str(tmp_path / "nohome")).items():
+        monkey.setenv(k, v)
+    try:
+        with pytest.raises(RuntimeError, match="已回滚"):
+            approve_proposal(store, p.proposal_id, repo_root=repo_root)
+    finally:
+        monkey.undo()
+        subprocess.run(["git", "-C", str(repo_root), "config", "--unset",
+                        "user.useConfigOnly"], capture_output=True)
+    target = (repo_root / "repository" / "overrides" / "elements"
+              / "HomeView.yaml")
+    assert not target.exists(), "git 失败 → 新建的文件回滚删除"
+    assert store.get_promotion_proposal(p.proposal_id).status == "PENDING"
+    assert store.get_experience(exp_id).promoted is False
+
+    # 修好 git 后重试 = 续传（不被残留文件挡死）
+    approved, sha = approve_proposal(store, p.proposal_id,
+                                     repo_root=repo_root)
+    assert approved.status == "APPROVED" and sha
+    assert target.exists()
+
+
+def test_approve_detects_id_with_trailing_comment(store, repo_root):
+    """P3-2（review_p2_task41）：`id: login_button  # 备注` 也要命中同 id
+    检查——漏检会追加出同 id 双文档（loader 后者胜，静默覆盖）。"""
+    exp_id = _verified(store)
+    lv = repo_root / "repository" / "overrides" / "elements"
+    lv.mkdir(parents=True)
+    (lv / "HomeView.yaml").write_text(
+        "schema_version: \"1.0\"\nkind: element\nid: login_button  # 人工备注\n"
+        "screen: HomeView\ntype: button\nstrategies:\n"
+        "  - {type: accessibility_id, value: manual_v1, origin: manual}\n",
+        encoding="utf-8")
+    p = generate_proposal(store, store.get_experience(exp_id))
+    with pytest.raises(ValueError, match="已存在"):
+        approve_proposal(store, p.proposal_id, repo_root=repo_root)
+
+
+def test_promoter_diff_uses_append_mode_to_keep_source_chain(store,
+                                                             tmp_path):
+    """P2-2（review_p2_task41）定档 (c)：override doc 带 `mode: append`——
+    merge 层把 generated/manual/source 链保留在前、experience 追加链尾，
+    §9.2「排链尾不丢弃」由写入口兑现（首版 replace 会丢 source 链）。"""
+    exp_id = _verified(store)
+    p = generate_proposal(store, store.get_experience(exp_id))
+    assert "mode: append" in p.diff
+
+    # 端到端：promoter 产物与 generated 并存时，source 策略仍在链上
+    ov = tmp_path / "overrides" / "elements"
+    ov.mkdir(parents=True)
+    (ov / "HomeView.yaml").write_text(p.diff, encoding="utf-8")
+    gen = tmp_path / "generated"
+    (gen / "elements").mkdir(parents=True)
+    (gen / "elements" / "HomeView.yaml").write_text(
+        "schema_version: \"1.0\"\nkind: element\nid: login_button\n"
+        "screen: HomeView\ntype: button\nstrategies:\n"
+        "  - {type: accessibility_id, value: src_v1, origin: source}\n",
+        encoding="utf-8")
+    from repository.resolver import Repository
+    eff = Repository.from_dirs(generated_root=str(gen),
+                               overrides_root=str(tmp_path / "overrides")) \
+        .resolve("HomeView.login_button", build="local")
+    assert [(s.origin, s.value) for s in eff.strategies] == [
+        ("source", "src_v1"), ("experience", "v2")], \
+        "promote 后 source 主策略仍在链上（9.2 原文）"
 
 
 # --- CLI：mta experience promote（两段式） ------------------------------------

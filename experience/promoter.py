@@ -43,6 +43,14 @@ def _render_diff(exp: Experience, proposal_id: str, *,
                  manual_override: bool) -> str:
     """可 review 的 YAML 补丁文本（9.3：diff 供人工 review）。
 
+    命名注记（review_p2_task41 P3-4）：产出是**完整 YAML 文档**而非逐行
+    diff——9.3 说的「YAML 补丁文本」落地为「将被追加进 overrides 的那份
+    文档」，review 者看到的就是 approve 会写的内容。
+
+    `mode: append`（review_p2_task41 P2-2 定档 (c)）：merge 层语义是
+    「generated/manual/source 链在前，本 override 追加链尾」——§9.2 的
+    「promoted experience 是链里最后一条，不是被丢弃」由**写入口**兑现，
+    不靠使用方手拼文档；element 未在 generated 登记时 append 无害。
     `type` 字段**有意省略**（接线前置②的定档，review_p2_task23 P3-7）：
     Experience 不携带 element type，override 的 type 省略时 merge 沿用
     generated/manual 层的真实类型（5.3 语义）；连 generated 都没有的
@@ -64,6 +72,7 @@ def _render_diff(exp: Experience, proposal_id: str, *,
         "kind: element",
         f"id: {exp.target_id}",
         f"screen: {exp.screen_id}",
+        "mode: append",
         "strategies:",
         f"  - {{type: {exp.strategy.type}, value: {exp.strategy.value},"
         " origin: experience}",
@@ -122,11 +131,19 @@ def generate_proposal(store: SQLiteExperienceStore, exp: Experience, *,
 
 def approve_proposal(store: SQLiteExperienceStore, proposal_id: str, *,
                      repo_root: Path,
-                     committer: str = "promoter") -> tuple[PromotionProposal,
-                                                           str]:
+                     committer: str | None = None) -> tuple[PromotionProposal,
+                                                            str]:
     """9.3：approve → 写 overrides（origin: experience）+ git commit +
-    promoted 记账。返回 (更新后的 proposal, commit sha)。"""
+    promoted 记账。返回 (更新后的 proposal, commit sha)。
+
+    E10 口径注记（review_p2_task41 P3-3）：commit 由工具辅助生成、落
+    **当前分支**——PR 化（不直推主干）由团队流程负责，工具不强制。
+    """
     import re
+
+    if committer is None:
+        import getpass
+        committer = getpass.getuser()
 
     proposal = store.get_promotion_proposal(proposal_id)
     if proposal is None:
@@ -144,30 +161,45 @@ def approve_proposal(store: SQLiteExperienceStore, proposal_id: str, *,
               / f"{exp.screen_id}.yaml")
     if target.exists():
         existing = target.read_text(encoding="utf-8")
-        if re.search(rf"^id:\s*{re.escape(exp.target_id)}\s*$",
+        # \b 而非 \s*$：行尾注释（`id: x  # 备注`）也要命中（review_p2_task41
+        # P3-2——漏检会追加出同 id 双文档，loader 后者胜，静默覆盖）。
+        if re.search(rf"^id:\s*{re.escape(exp.target_id)}\b",
                      existing, re.MULTILINE):
             # 不可静默覆盖：同 id 的 override 已存在（多半是人工写的）。
             raise ValueError(
                 f"overrides 已存在同 id 元素定义：{exp.target_id!r} in "
                 f"{target}——人工写过的 override 只能人工处置，工具不代改")
+        original = existing
     else:
-        existing = None
+        original = None
         target.parent.mkdir(parents=True, exist_ok=True)
 
-    if existing:
-        target.write_text(existing.rstrip("\n") + "\n---\n"
-                          + proposal.diff, encoding="utf-8")
-    else:
-        target.write_text(proposal.diff, encoding="utf-8")
-
-    rel = target.relative_to(Path(repo_root)).as_posix()
-    _git(repo_root, "add", rel)
-    _git(repo_root, "commit", "-m",
-         f"promote: experience {exp.experience_id} "
-         f"(proposal {proposal_id})\n\n"
-         f"Committer: {committer}\n"
-         f"origin: experience 策略转正（P2-09）；撤销 = git revert <sha>"
-         f"（E10）")
+    # 写文件与 git commit 之间没有事务性（review_p2_task41 P2-1）：git 失败
+    # 时**回滚文件写**（新建的删除、已存在的恢复原内容）——否则重试会被
+    # 自己写了一半的文件挡死，还被误报成「人工 override」。proposal 保持
+    # PENDING，修复 git 后重试即续传。
+    try:
+        if original is not None:
+            target.write_text(original.rstrip("\n") + "\n---\n"
+                              + proposal.diff, encoding="utf-8")
+        else:
+            target.write_text(proposal.diff, encoding="utf-8")
+        rel = target.relative_to(Path(repo_root)).as_posix()
+        _git(repo_root, "add", rel)
+        _git(repo_root, "commit", "-m",
+             f"promote: experience {exp.experience_id} "
+             f"(proposal {proposal_id})\n\n"
+             f"Committer: {committer}\n"
+             f"origin: experience 策略转正（P2-09）；撤销 = git revert <sha>"
+             f"（E10）")
+    except Exception as e:
+        if original is None:
+            target.unlink(missing_ok=True)
+        else:
+            target.write_text(original, encoding="utf-8")
+        raise RuntimeError(
+            f"git 提交失败，overrides 写入已回滚（proposal 仍为 PENDING，"
+            f"修复 git 后重试 approve 即续传）：{e}") from e
     sha = _git(repo_root, "rev-parse", "HEAD").strip()
 
     store.set_promotion_proposal_status(proposal_id, "APPROVED",
