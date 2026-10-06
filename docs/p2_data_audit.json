@@ -1,12 +1,12 @@
 {
   "summary": {
-    "runs_total": 102,
-    "tc_runs_total": 90,
-    "steps_total": 249,
-    "steps_with_failure": 1,
-    "llm_enabled_null": 101,
+    "runs_total": 251,
+    "tc_runs_total": 239,
+    "steps_total": 1139,
+    "steps_with_failure": 149,
+    "llm_enabled_null": 102,
     "date_min": "2026-09-24",
-    "date_max": "2026-10-03"
+    "date_max": "2026-10-06"
   },
   "seedable_accepts": [
     {
@@ -27,15 +27,164 @@
       "candidate_type": "button",
       "app_build": "local",
       "seed_ready": true
+    },
+    {
+      "seed_recovery_review_id": 2,
+      "review_status": "ACCEPT",
+      "reviewer": "terrygmx",
+      "reviewed_at": "2026-10-06T14:46:39Z",
+      "note": "p2-seed round=4 scenario=go_search->search_entry_button run_id=run_e702d7d1",
+      "recovery_id": 51,
+      "kind": "LLM",
+      "seed_step_id": 748,
+      "seed_run_id": "run_e702d7d1",
+      "seed_tc_run_id": 183,
+      "app_id": "com.phaset0.logindemo",
+      "screen": "HomeView",
+      "target_id": "go_search",
+      "candidate_target": "search_entry_button",
+      "candidate_type": "button",
+      "app_build": "local",
+      "seed_ready": true
+    },
+    {
+      "seed_recovery_review_id": 3,
+      "review_status": "ACCEPT",
+      "reviewer": "terrygmx",
+      "reviewed_at": "2026-10-06T14:50:59Z",
+      "note": "p2-seed round=11 scenario=go_search->go_search_v2 run_id=run_7dfb5745",
+      "recovery_id": 52,
+      "kind": "LLM",
+      "seed_step_id": 789,
+      "seed_run_id": "run_7dfb5745",
+      "seed_tc_run_id": 190,
+      "app_id": "com.phaset0.logindemo",
+      "screen": "HomeView",
+      "target_id": "go_search",
+      "candidate_target": "go_search_v2",
+      "candidate_type": "button",
+      "app_build": "local",
+      "seed_ready": true
+    },
+    {
+      "seed_recovery_review_id": 4,
+      "review_status": "ACCEPT",
+      "reviewer": "terrygmx",
+      "reviewed_at": "2026-10-06T14:54:31Z",
+      "note": "p2-seed round=17 scenario=username_field->username_field_v2 run_id=run_06bf1cd6",
+      "recovery_id": 54,
+      "kind": "LLM",
+      "seed_step_id": 831,
+      "seed_run_id": "run_06bf1cd6",
+      "seed_tc_run_id": 196,
+      "app_id": "com.phaset0.logindemo",
+      "screen": "LoginView",
+      "target_id": "username_field",
+      "candidate_target": "username_field_v2",
+      "candidate_type": "button",
+      "app_build": "local",
+      "seed_ready": true
+    },
+    {
+      "seed_recovery_review_id": 5,
+      "review_status": "ACCEPT",
+      "reviewer": "terrygmx",
+      "reviewed_at": "2026-10-06T14:56:30Z",
+      "note": "p2-seed round=21 scenario=go_profile->go_profile_v2 run_id=run_f8e594be",
+      "recovery_id": 57,
+      "kind": "LLM",
+      "seed_step_id": 860,
+      "seed_run_id": "run_f8e594be",
+      "seed_tc_run_id": 200,
+      "app_id": "com.phaset0.logindemo",
+      "screen": "HomeView",
+      "target_id": "go_profile",
+      "candidate_target": "go_profile_v2",
+      "candidate_type": "button",
+      "app_build": "local",
+      "seed_ready": true
+    },
+    {
+      "seed_recovery_review_id": 6,
+      "review_status": "ACCEPT",
+      "reviewer": "terrygmx",
+      "reviewed_at": "2026-10-06T15:08:36Z",
+      "note": "p2-seed round=46 scenario=go_profile->profile_entry_button run_id=run_321f719c",
+      "recovery_id": 70,
+      "kind": "LLM",
+      "seed_step_id": 1033,
+      "seed_run_id": "run_321f719c",
+      "seed_tc_run_id": 225,
+      "app_id": "com.phaset0.logindemo",
+      "screen": "HomeView",
+      "target_id": "go_profile",
+      "candidate_target": "profile_entry_button",
+      "candidate_type": "button",
+      "app_build": "local",
+      "seed_ready": true
+    },
+    {
+      "seed_recovery_review_id": 7,
+      "review_status": "ACCEPT",
+      "reviewer": "terrygmx",
+      "reviewed_at": "2026-10-06T15:10:52Z",
+      "note": "p2-seed round=50 scenario=username_field->user_login_field run_id=run_99b3fd0f",
+      "recovery_id": 72,
+      "kind": "LLM",
+      "seed_step_id": 1058,
+      "seed_run_id": "run_99b3fd0f",
+      "seed_tc_run_id": 229,
+      "app_id": "com.phaset0.logindemo",
+      "screen": "LoginView",
+      "target_id": "username_field",
+      "candidate_target": "user_login_field",
+      "candidate_type": "button",
+      "app_build": "local",
+      "seed_ready": true
     }
   ],
   "screen_target_pairs": [
     {
+      "screen": "HomeView",
+      "expected_target": "go_profile",
+      "candidate_target": "go_profile_v2",
+      "n": 1,
+      "distinct_runs": 1
+    },
+    {
+      "screen": "HomeView",
+      "expected_target": "go_profile",
+      "candidate_target": "profile_entry_button",
+      "n": 1,
+      "distinct_runs": 1
+    },
+    {
+      "screen": "HomeView",
+      "expected_target": "go_search",
+      "candidate_target": "go_search_v2",
+      "n": 1,
+      "distinct_runs": 1
+    },
+    {
+      "screen": "HomeView",
+      "expected_target": "go_search",
+      "candidate_target": "search_entry_button",
+      "n": 1,
+      "distinct_runs": 1
+    },
+    {
+      "screen": "LoginView",
+      "expected_target": "username_field",
+      "candidate_target": "user_login_field",
+      "n": 1,
+      "distinct_runs": 1
+    },
+    {
       "screen": "LoginView",
       "expected_target": "username_field",
       "candidate_target": "username_field_v2",
-      "n": 1,
-      "distinct_runs": 1
+      "n": 2,
+      "distinct_runs": 2
     }
   ]
 }

@@ -1740,3 +1740,78 @@ NOT_OBSERVED screen Spike*       → —（声明了但没有任何用例引用�
 
 - 全量 pytest **1234 passed**（Task 5.4 新增 18）。
 - 真机端到端（真实 suites 20 个用例）见上。
+
+
+---
+
+# 补齐批次审计（2026-10-06，Task 5.5 数据基线）
+
+
+## 汇总
+
+- runs：251（2026-09-24 ~ 2026-10-06）
+- testcase_runs：239
+- steps：1139（含失败 149）
+- runs.llm_enabled 为 NULL：102
+
+## Locator Failure 重复出现（top）
+
+| target_id | failure_type | 次数 | 跨 run 数 |
+|---|---|---|---|
+| username_field | LLM_PROVIDER_ERROR | 30 | 30 |
+| go_profile | LLM_PROVIDER_ERROR | 28 | 28 |
+| go_search | LLM_PROVIDER_ERROR | 23 | 23 |
+| search_field | LLM_PROVIDER_ERROR | 18 | 18 |
+| ProfileView.profile_title | ELEMENT_NOT_FOUND | 17 | 17 |
+| go_search | ELEMENT_NOT_FOUND | 15 | 15 |
+| username_field | ELEMENT_NOT_FOUND | 9 | 9 |
+| go_profile | ELEMENT_NOT_FOUND | 7 | 7 |
+| go_profile | LLM_LOW_CONFIDENCE | 1 | 1 |
+| username_field | LLM_LOW_CONFIDENCE | 1 | 1 |
+
+## Recovery 分布
+
+| kind | result | accepted | 条数 |
+|---|---|---|---|
+| LLM |  | 1 | 30 |
+| EXPERIENCE | RECOVERED | 1 | 24 |
+| LLM |  | 0 | 12 |
+| None |  | 1 | 7 |
+| LLM | RECOVERED | 1 | 7 |
+
+## Review 分布
+
+| review_status | 条数 |
+|---|---|
+| ACCEPT | 7 |
+
+## (screen, target) 去重对（Experience 主键维度）
+
+| screen | expected | candidate | 条数 | 跨 run 数 |
+|---|---|---|---|---|
+| HomeView | go_profile | go_profile_v2 | 1 | 1 |
+| HomeView | go_profile | profile_entry_button | 1 | 1 |
+| HomeView | go_search | go_search_v2 | 1 | 1 |
+| HomeView | go_search | search_entry_button | 1 | 1 |
+| LoginView | username_field | user_login_field | 1 | 1 |
+| LoginView | username_field | username_field_v2 | 2 | 2 |
+
+## 追溯链质量
+
+- recoveries 总数：80
+- step_id 悬空 dangling（关联不到 steps）：42
+- 有 review 记录的 recovery：7
+
+## 可做 Experience 种子的 ACCEPT 清单（E5）
+
+| review_id | app_id | seed_run_id | seed_step_id | screen | target_id | candidate | seed_ready |
+|---|---|---|---|---|---|---|---|
+| 1 | com.phaset0.logindemo | run_e049fb5e | 246 | LoginView | username_field | username_field_v2 | True |
+| 2 | com.phaset0.logindemo | run_e702d7d1 | 748 | HomeView | go_search | search_entry_button | True |
+| 3 | com.phaset0.logindemo | run_7dfb5745 | 789 | HomeView | go_search | go_search_v2 | True |
+| 4 | com.phaset0.logindemo | run_06bf1cd6 | 831 | LoginView | username_field | username_field_v2 | True |
+| 5 | com.phaset0.logindemo | run_f8e594be | 860 | HomeView | go_profile | go_profile_v2 | True |
+| 6 | com.phaset0.logindemo | run_321f719c | 1033 | HomeView | go_profile | profile_entry_button | True |
+| 7 | com.phaset0.logindemo | run_99b3fd0f | 1058 | LoginView | username_field | user_login_field | True |
+
+**seed_ready=True 的种子：7 条**（成功标准要求 50+ 条真实 Recovery 事件基线）
