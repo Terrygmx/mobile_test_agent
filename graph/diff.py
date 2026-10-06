@@ -155,11 +155,22 @@ def _nodes_of(graph: RuntimeGraph | None) -> dict[str, ScreenNode]:
     return {n.screen_id: n for n in (graph.nodes if graph else ())}
 
 
-def _trans_of(graph: RuntimeGraph | None) -> dict[tuple[str, str], ScreenTransition]:
-    """转移按 `(from_screen, trigger)` 索引——CHANGED 的连接键正是这两者。"""
-    out: dict[tuple[str, str], ScreenTransition] = {}
+def _trans_of(graph: RuntimeGraph | None
+              ) -> dict[tuple[str, str], list[ScreenTransition]]:
+    """转移按 `(from_screen, trigger)` 索引 → **目标列表**。
+
+    CHANGED 的连接键正是 `(from_screen, trigger)`，但 schema 的唯一键含
+    `to_screen`——**允许**同一 `(from, trigger)` 有多个目标共存（同一个动作在
+    不同 run 里去了不同地方，或应用真有分支）。早先这里用单值字典
+    `out[key] = t`，同键第二条**静默覆盖**第一条（review_p2_task53 P3-1 实测：
+    `(A,tap:go)→B` 与 `(A,tap:go)→C` 共存时 B 彻底消失，**真删一条转移也发现
+    不了**）。改成列表后由 `_diff_transitions` 显式处理多目标。
+    """
+    out: dict[tuple[str, str], list[ScreenTransition]] = {}
     for t in (graph.transitions if graph else ()):
-        out[(t.from_screen, t.trigger)] = t
+        out.setdefault((t.from_screen, t.trigger), []).append(t)
+    for v in out.values():
+        v.sort(key=lambda x: x.to_screen)
     return out
 
 
@@ -197,7 +208,14 @@ def diff_graphs(base: RuntimeGraph | None, new: RuntimeGraph | None, *,
                 f"（build-to-build diff，设计 12.3）；否则 scope 不重叠会安静地"
                 f"报满屏 NOT_OBSERVED")
 
-    # --- UNKNOWN：参照面缺失/为空 -----------------------------------------
+    # --- UNKNOWN：任一面缺失/为空 -----------------------------------------
+    # **两面同等保守**（review_p2_task53 P2-1）。早先只对参照面做保守处理，
+    # 于是「当前面没有数据」会走正常分支、参照面条目全判 NOT_OBSERVED 且
+    # `changed=True`（CLI exit 1）——而「空图不留行」让「没构建过」与「构建了
+    # 但为空」在库里不可区分，用户拿到的是一个**自信的错误结论**（「用例没走到
+    # 这些屏」），真相是「你还没建运行时图」。
+    # 代价：真·「观测到 0 个屏」也会变 UNKNOWN——但那个信号在 `graph build`
+    # 时已经用 `GRAPH WARN: 运行时图为空` 给过一次了。
     if base is None or new is None:
         side = "参照面" if base is None else "当前面"
         return _all_unknown(diff, base, new,
@@ -207,6 +225,12 @@ def diff_graphs(base: RuntimeGraph | None, new: RuntimeGraph | None, *,
             diff, base, new,
             "参照面为空（没有声明/没有观测）——当前面独有的条目既可能是"
             "「新增」也可能是「参照缺失」，无法判定")
+    if not new.nodes and not new.transitions:
+        return _all_unknown(
+            diff, base, new,
+            "当前面为空（没有观测到任何屏，或该 build 的运行时图还没建）——"
+            "参照面独有的条目既可能是「用例没走到」也可能是「没有数据」，"
+            "无法判定；先确认 `mta graph build` 是否建过这一面")
 
     # --- 节点 -------------------------------------------------------------
     base_nodes, new_nodes = _nodes_of(base), _nodes_of(new)
@@ -226,29 +250,64 @@ def diff_graphs(base: RuntimeGraph | None, new: RuntimeGraph | None, *,
                     "absent_confirmations": conf}))
 
     # --- 转移（连接键 = (from_screen, trigger)，见设计 12.2 的 CHANGED） ----
-    base_trans, new_trans = _trans_of(base), _trans_of(new)
-    for key in sorted(set(base_trans) | set(new_trans)):
-        b, n = base_trans.get(key), new_trans.get(key)
-        if n is not None and b is None:
-            entries.append(DiffEntry(
-                ADDED, from_screen=n.from_screen, to_screen=n.to_screen,
-                trigger=n.trigger, detail={"count": n.count}))
-        elif b is not None and n is None:
-            conf = absent.get(transition_key(b.from_screen, b.to_screen,
-                                             b.trigger), 0)
-            kind = REMOVED if conf >= removal_min_confirmations else NOT_OBSERVED
-            entries.append(DiffEntry(
-                kind, from_screen=b.from_screen, to_screen=b.to_screen,
-                trigger=b.trigger, detail={"absent_confirmations": conf}))
-        elif b is not None and n is not None and b.to_screen != n.to_screen:
-            entries.append(DiffEntry(
-                CHANGED, from_screen=n.from_screen, to_screen=n.to_screen,
-                trigger=n.trigger,
-                detail={"was_to": b.to_screen, "count": n.count}))
+    entries.extend(_diff_transitions(base, new, absent,
+                                     removal_min_confirmations))
 
     return GraphDiff(app_id=diff.app_id, base_build=diff.base_build,
                      build=diff.build, base_source_of=diff.base_source_of,
                      source_of=diff.source_of, entries=tuple(entries))
+
+
+def _diff_transitions(base: RuntimeGraph, new: RuntimeGraph,
+                      absent: dict[str, int],
+                      removal_min: int) -> list[DiffEntry]:
+    """转移级差异：按 `(from_screen, trigger)` 连接，**按目标集合比较**。
+
+    - 两面都只有**一个**目标且不同 → `CHANGED`（设计 12.2 的原义，带 `was_to`）；
+    - 其余情况（某面缺该键、或任一面有**多目标**）→ 逐目标判 `ADDED` /
+      `NOT_OBSERVED` / `REMOVED`。
+
+    为什么多目标要降级成逐目标判定：CHANGED 的模型是「一个触发条件一个目标」，
+    而 schema 允许同键多目标共存。多目标时**不编一个 CHANGED**、也**不丢任何
+    一条**——逐目标报出来，读者自己看「这个动作去了两处」（那本身就是有价值
+    的信号：应用不稳定或真有分支）。
+    """
+    out: list[DiffEntry] = []
+    base_trans, new_trans = _trans_of(base), _trans_of(new)
+    for key in sorted(set(base_trans) | set(new_trans)):
+        bs = base_trans.get(key, [])
+        ns = new_trans.get(key, [])
+        base_tos = {t.to_screen for t in bs}
+        new_tos = {t.to_screen for t in ns}
+
+        if len(bs) == 1 and len(ns) == 1 and bs[0].to_screen != ns[0].to_screen:
+            out.append(DiffEntry(
+                CHANGED, from_screen=ns[0].from_screen,
+                to_screen=ns[0].to_screen, trigger=ns[0].trigger,
+                detail={"was_to": bs[0].to_screen, "count": ns[0].count}))
+            continue
+
+        multi = len(bs) > 1 or len(ns) > 1
+        for t in ns:
+            if t.to_screen in base_tos:
+                continue
+            out.append(DiffEntry(
+                ADDED, from_screen=t.from_screen, to_screen=t.to_screen,
+                trigger=t.trigger,
+                detail={"count": t.count, **({"multi_target": True} if multi
+                                             else {})}))
+        for t in bs:
+            if t.to_screen in new_tos:
+                continue
+            conf = absent.get(transition_key(t.from_screen, t.to_screen,
+                                             t.trigger), 0)
+            kind = REMOVED if conf >= removal_min else NOT_OBSERVED
+            out.append(DiffEntry(
+                kind, from_screen=t.from_screen, to_screen=t.to_screen,
+                trigger=t.trigger,
+                detail={"absent_confirmations": conf,
+                        **({"multi_target": True} if multi else {})}))
+    return out
 
 
 def _all_unknown(diff: GraphDiff, base: RuntimeGraph | None,

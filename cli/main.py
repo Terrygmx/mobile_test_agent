@@ -1417,6 +1417,11 @@ def _graph_diff(args: argparse.Namespace) -> int:
           f"（base={diff.base_source_of or '-'} → new={diff.source_of or '-'}）")
     if diff.reason:
         print(f"  判定：UNKNOWN —— {diff.reason}")
+        # 首次使用最容易踩的路径：只建了一面就来 diff。给出可操作的下一步，
+        # 别让人把 UNKNOWN 读成「用例没走到」。
+        print(f"  下一步：先 `mta graph build --graph-db {args.graph_db} "
+              f"--bundle-id {args.bundle_id or '<id>'} "
+              f"--build {args.build!r}` 把两面都建出来再比")
     for e in diff.entries:
         print("  " + e.render())
     print("  合计：" + ", ".join(f"{k}={counts[k]}" for k in

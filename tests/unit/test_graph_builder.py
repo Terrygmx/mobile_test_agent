@@ -313,17 +313,29 @@ def test_is_screen_wait_and_observed_screens():
 
 def test_graph_store_migrates_its_own_chain(tmp_path):
     store = GraphStore(tmp_path / "graph.db")
-    assert GRAPH_SCHEMA_VERSION == "001_graph_schema"
+    # 版本串**从链尾派生**（加 003 时这条不会红）——只断言「库里记的就是最新那条」
+    from experience.schema_migrations import latest_version
+    from graph.storage import GRAPH_MIGRATIONS_DIR
+    assert GRAPH_SCHEMA_VERSION == latest_version(GRAPH_MIGRATIONS_DIR,
+                                                  "graph.migrations")
     conn = store._connect()
     try:
         tables = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
-        version = conn.execute(
-            "SELECT version FROM schema_migrations").fetchone()[0]
+        applied = [r[0] for r in conn.execute(
+            "SELECT version FROM schema_migrations ORDER BY version")]
+        diff_cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(graph_diffs)")}
     finally:
         conn.close()
     assert {"screen_nodes", "screen_transitions", "graph_diffs"} <= tables
-    assert version == GRAPH_SCHEMA_VERSION
+    # **整条链都跑过**（不是「第一行等于最新版」——链长了那条断言会撒谎）
+    from experience.schema_migrations import available_migrations
+    assert applied == [n.removesuffix(".sql")
+                       for _, n in available_migrations(GRAPH_MIGRATIONS_DIR,
+                                                        "graph.migrations")]
+    # 002 加的列（「比的是哪两面」）
+    assert {"base_source_of", "source_of"} <= diff_cols
 
 
 def test_upsert_then_load_roundtrip(tmp_path):

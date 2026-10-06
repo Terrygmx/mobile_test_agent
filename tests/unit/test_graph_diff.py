@@ -154,9 +154,13 @@ def test_same_screens_different_trigger_is_not_changed():
 
 
 def test_transition_removed_uses_transition_key():
-    """转移的负证据键 = `from->to@trigger`（与 `DiffEntry.key` 同域）。"""
+    """转移的负证据键 = `from->to@trigger`（与 `DiffEntry.key` 同域）。
+
+    当前面必须**非空**（P2-1 之后空当前面判 UNKNOWN，走不到转移判定）——给一个
+    别的屏即可。
+    """
     base = _graph(transitions=[("A", "B", "tap:go")])
-    new = _graph(source_of=RUNTIME)
+    new = _graph(source_of=RUNTIME, screens=("Z",))
     key = transition_key("A", "B", "tap:go")
 
     assert diff_graphs(base, new).of_kind(NOT_OBSERVED)[0].key == key
@@ -192,7 +196,7 @@ def test_unknown_dedupes_items_listed_by_both_sides():
     """两面都列出同一条目时只报一次（去重按条目身份串）。"""
     base = _graph(screens=("A",))
     new = _graph(source_of=RUNTIME, screens=("A",))
-    diff = diff_graphs(base, None if False else new)   # 两面都在 → 走正常分支
+    diff = diff_graphs(base, new)          # 两面都在 → 走正常分支
     assert diff.entries == (), "两面都有 → 无差异"
 
     unknown = diff_graphs(None, new)
@@ -474,3 +478,173 @@ def test_cli_build_defaults_to_both_sides(tmp_path, capsys, monkeypatch):
                                "--bundle-id", APP, "--db", trace)
     assert code == 0
     assert "runtime:" in out and "source:" in out, "两面都建"
+
+
+# --- review_p2_task53 的修订钉子（1×P2 + 3×P3） -----------------------------
+
+
+def test_empty_current_side_is_unknown_like_empty_reference():
+    """P2-1：**当前面为空与参照面同等保守**（都判 UNKNOWN）。
+
+    早先只对参照面做保守处理 → 「当前面没有数据」走正常分支，参照面条目全判
+    `NOT_OBSERVED` 且 `changed=True`（CLI exit 1）。而「空图不留行」让「没构建过」
+    与「构建了但为空」在库里不可区分——**首次使用路径**（只建源图就 diff）会拿到
+    一个自信的错误结论：「用例没走到这些屏」，真相是「你还没建运行时图」。
+
+    对称性判据：同一件事（当前面没有数据）不该因为传**空图**还是 `None` 得到相反
+    结论——下面两行必须一致。
+    """
+    base = _graph(screens=("LoginView", "SearchView"))
+    empty = _graph(source_of=RUNTIME)          # 非 None 但没有任何节点
+
+    as_empty = diff_graphs(base, empty)
+    as_none = diff_graphs(base, None)
+    for diff in (as_empty, as_none):
+        assert diff.of_kind(NOT_OBSERVED) == (), "空当前面不许判 NOT_OBSERVED"
+        assert diff.of_kind(ADDED) == ()
+        assert diff.reason and "当前面为空" in diff.reason or "当前面没有图" \
+            in diff.reason
+        assert diff.changed is False, "没数据 ≠ 有变化（exit 0）"
+        assert all(e.kind == UNKNOWN for e in diff.entries)
+
+
+def test_empty_current_side_still_lists_both_sides_items():
+    """UNKNOWN 时两面条目都要列出来（带原因），不是空列表。"""
+    diff = diff_graphs(_graph(screens=("A", "B")), _graph(source_of=RUNTIME))
+    assert {e.key for e in diff.entries} == {"A", "B"}
+    assert all(e.kind == UNKNOWN for e in diff.entries)
+
+
+def test_multi_target_transition_is_not_silently_dropped():
+    """P3-1：同一 `(from, trigger)` 多目标时**一条都不许丢**。
+
+    早先 `_trans_of` 用单值字典，同键第二条**静默覆盖**第一条——探针实测
+    `(A,tap:go)→B` 与 `(A,tap:go)→C` 共存时 B 彻底消失，**真删一条转移也发现
+    不了**。schema 的唯一键含 `to_screen`，本来就允许共存。
+    """
+    base = _graph(transitions=[("A", "B", "tap:go"), ("A", "C", "tap:go")])
+    new = _graph(source_of=RUNTIME, screens=("Z",))
+    diff = diff_graphs(base, new)
+
+    no = {(e.from_screen, e.to_screen, e.trigger)
+          for e in diff.of_kind(NOT_OBSERVED)}
+    assert no == {("A", "B", "tap:go"), ("A", "C", "tap:go")}, "两条都要报"
+    assert diff.of_kind(CHANGED) == (), "多目标不编 CHANGED"
+    assert all(e.detail.get("multi_target") for e in diff.of_kind(NOT_OBSERVED))
+
+
+def test_multi_target_marks_added_side_too():
+    """多目标在**当前面**时同理：逐目标 ADDED，不丢。"""
+    base = _graph(screens=("Z",))
+    new = _graph(source_of=RUNTIME,
+                 transitions=[("A", "B", "tap:go"), ("A", "C", "tap:go")])
+    diff = diff_graphs(base, new)
+
+    added = {(e.from_screen, e.to_screen) for e in diff.of_kind(ADDED)}
+    assert added == {("A", "B"), ("A", "C")}
+    assert all(e.detail.get("multi_target") for e in diff.of_kind(ADDED))
+
+
+def test_single_target_change_is_still_changed():
+    """单目标 → 目标变化仍是 `CHANGED`（多目标改造没破坏原语义）。
+
+    两面都带同一个屏 Z，让差异**只**来自转移（否则 Z 会变成节点级 ADDED，
+    掩盖本测试的判据）。
+    """
+    base = _graph(screens=("Z",), transitions=[("A", "B", "tap:go")])
+    new = _graph(source_of=RUNTIME, screens=("Z",),
+                 transitions=[("A", "C", "tap:go")])
+    diff = diff_graphs(base, new)
+    assert diff.of_kind(CHANGED)[0].detail["was_to"] == "B"
+    assert diff.of_kind(ADDED) == () and diff.of_kind(NOT_OBSERVED) == ()
+
+
+def test_multi_target_change_is_reported_as_add_and_remove():
+    """多目标**且**目标变了 → 逐目标报（不丢、不编 CHANGED）。"""
+    base = _graph(screens=("Z",), transitions=[("A", "B", "tap:go")])
+    new = _graph(source_of=RUNTIME, screens=("Z",),
+                 transitions=[("A", "C", "tap:go"), ("A", "D", "tap:go")])
+    diff = diff_graphs(base, new)
+
+    assert diff.of_kind(CHANGED) == ()
+    assert {e.to_screen for e in diff.of_kind(ADDED)} == {"C", "D"}
+    assert {e.to_screen for e in diff.of_kind(NOT_OBSERVED)} == {"B"}
+
+
+def test_diff_persists_which_two_sides_were_compared(tmp_path):
+    """P3-2：`graph_diffs` 要记住「比的是哪两面」（迁移 002 的两列）。
+
+    否则「源图 vs 运行时」（两面来源不同、build 相同）与「build-to-build」
+    （来源相同、build 不同）在库里长得一样，回读时分不清。CLI 打印时是知道的
+    ——信息不该在落库时丢掉。
+    """
+    store = GraphStore(tmp_path / "graph.db")
+    # 要有**真实差异**才落行：源声明了 B，运行时没到（→ NOT_OBSERVED）
+    src_vs_rt = diff_graphs(_graph(screens=("A", "B")),
+                            _graph(source_of=RUNTIME, screens=("A",)))
+    store.record_diff(src_vs_rt)
+    [row] = store.load_diff(APP, "1026", "1026")
+    assert (row["base_source_of"], row["source_of"]) == (SOURCE, RUNTIME)
+    assert (row["kind"], row["screen_id"]) == (NOT_OBSERVED, "B")
+
+
+def test_diff_replace_key_includes_both_sides(tmp_path):
+    """两面来源进替换键：同 build 对下的两种比较互不覆盖。"""
+    store = GraphStore(tmp_path / "graph.db")
+    src_vs_rt = diff_graphs(_graph(screens=("A", "B")),
+                            _graph(source_of=RUNTIME, screens=("A",)))
+    store.record_diff(src_vs_rt)
+
+    # 同一 (app_id, 1026, 1026) 下的 build-to-build（两面都是 runtime）
+    b2b = diff_graphs(_graph(source_of=RUNTIME, screens=("A",)),
+                      _graph(source_of=RUNTIME, screens=("A", "B")),
+                      allow_build_change=True)
+    store.record_diff(b2b)
+
+    assert len(store.load_diff(APP, "1026", "1026")) == 2, "两种比较共存"
+    only_b2b = store.load_diff(APP, "1026", "1026", RUNTIME, RUNTIME)
+    assert [r["kind"] for r in only_b2b] == [ADDED], "按两面来源可精确过滤"
+
+
+def test_cli_diff_save_build_to_build(tmp_path, capsys):
+    """评审 §4 的「未验证」项：`--save` 在 build-to-build 下落库的内容。"""
+    gdb = str(tmp_path / "graph.db")
+    _run_graph_cli(capsys, "build", "--graph-db", gdb, "--bundle-id", APP,
+                   "--from-trace", _trace_db(tmp_path, build="1024",
+                                             name="t1024.db"))
+    _run_graph_cli(capsys, "build", "--graph-db", gdb, "--bundle-id", APP,
+                   "--from-trace", _trace_db(tmp_path, build="1025",
+                                             name="t1025.db"))
+    code, out = _run_graph_cli(capsys, "diff", "--graph-db", gdb,
+                               "--bundle-id", APP, "--build", "1025",
+                               "--base-build", "1024", "--save")
+    assert code == 0 and "已落库 graph_diffs：0 行" in out
+
+    # 造一个有真实差异的 build-to-build：1025 的图删掉一个屏
+    store = GraphStore(gdb)
+    from graph.models import RUNTIME as R, RuntimeGraph, ScreenNode
+    store.upsert_graph(RuntimeGraph(
+        app_id=APP, app_build="1024", source_of=R,
+        nodes=(ScreenNode("LoginView", R, 1), ScreenNode("HomeView", R, 1))))
+    store.upsert_graph(RuntimeGraph(
+        app_id=APP, app_build="1025", source_of=R,
+        nodes=(ScreenNode("LoginView", R, 1),)))
+    code, out = _run_graph_cli(capsys, "diff", "--graph-db", gdb,
+                               "--bundle-id", APP, "--build", "1025",
+                               "--base-build", "1024", "--save")
+    assert code == 1
+    rows = store.load_diff(APP, "1024", "1025", RUNTIME, RUNTIME)
+    assert [(r["kind"], r["screen_id"]) for r in rows] == \
+        [(NOT_OBSERVED, "HomeView")], "build-to-build 的差异按两面来源落库"
+
+
+def test_cli_diff_prints_next_step_when_unknown(tmp_path, capsys):
+    """UNKNOWN 时 CLI 要给出下一步（首次使用最容易踩：忘了建运行时图）。"""
+    gdb = str(tmp_path / "graph.db")
+    _run_graph_cli(capsys, "build", "--graph-db", gdb, "--bundle-id", APP,
+                   "--from-source", _metadata_file(tmp_path))
+    code, out = _run_graph_cli(capsys, "diff", "--graph-db", gdb,
+                               "--bundle-id", APP, "--build", "1026")
+    assert code == 0
+    assert "判定：UNKNOWN" in out
+    assert "下一步" in out and "graph build" in out

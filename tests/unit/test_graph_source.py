@@ -221,7 +221,7 @@ def test_store_keeps_source_and_runtime_scopes_separate(tmp_path):
     assert store.load_graph(APP, "1026", SOURCE).screens == (
         "HomeView", "LoginView", "ProfileView")
     assert (APP, "1026", SOURCE) in store.list_scopes()
-    assert GRAPH_SCHEMA_VERSION == "001_graph_schema"
+    assert GRAPH_SCHEMA_VERSION, "迁移跑过（具体串从链尾派生，不硬编码）"
 
 
 def test_source_upsert_is_replace_not_accumulate(tmp_path):

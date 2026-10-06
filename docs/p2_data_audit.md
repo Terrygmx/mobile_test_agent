@@ -1583,3 +1583,80 @@ ADDED         transition HomeView -> ProfileView (trigger=tap:go_profile)
 
 - 全量 pytest **1206 passed**（Task 5.3 新增 29）。
 - 真机端到端见上；`graph_diffs` 落库 9 行，重跑按范围整体替换（幂等）。
+
+---
+
+## Task 5.3 评审修订记录（review_p2_task53 收口，2026-10-06）
+
+评审「有条件通过」，**1×P2 + 3×P3**。P2-1 被建议「Task 5.4/5.5 前定」（5.5 的 10 步
+演示若走「先建源图再 diff」的顺序会当场踩到）。
+
+### P2-1 「当前面为空」不判 UNKNOWN —— 首次使用得到 `exit 1` + 满屏 `NOT_OBSERVED`
+
+- 症状：`diff_graphs` 只对**参照面**做保守处理（`None` / 空图 → UNKNOWN），
+  **当前面为空图时走正常分支** → 参照面每个条目落进 `NOT_OBSERVED`、
+  `changed=True` → CLI exit 1。而「空图不留行」让「没构建过」与「构建了但为空」
+  在库里不可区分（这正是本模块 docstring 口径 2 自己承认的前提）——口径 2 只用
+  在参照面上，当前面却默认「为空 = 确实什么都没观测到」。
+- 后果（首次使用路径：只建源图就 diff）：CI 把 exit 1 读成「图变了」，人读成
+  「用例没走到这些屏」，**真相是「你还没建运行时图」**。CLI 的 scope 对齐守卫只在
+  「那一面在别的 build 上有图」时触发——首次使用时库里根本没有运行时行 → 守卫落空。
+- 修法（**两面同等保守**）：新增 `if not new.nodes and not new.transitions →
+  全 UNKNOWN`，原因写明「当前面为空（没有观测到任何屏，或该 build 的运行时图还没
+  建）…先确认 `mta graph build` 是否建过这一面」；CLI 在 UNKNOWN 时**再打印一条
+  可操作的下一步**（把 build / bundle-id / graph-db 填好，可直接复制执行）。
+- 代价（已在代码注释里写明）：真·「观测到 0 个屏」也会变 UNKNOWN，失去
+  `NOT_OBSERVED` 信号——但那个信号在 `graph build` 时已经用
+  `GRAPH WARN: 运行时图为空` 给过一次了。
+- 复现（真 CLI）：只建源图（2 个屏）→ `graph diff --build 1026` →
+  **`exit 0` + `判定：UNKNOWN —— 当前面为空…` + `下一步：先 mta graph build …`**
+  （修复前是 exit 1 + 两条 `NOT_OBSERVED`）。纯函数对称性也有专测：
+  `new=空图` 与 `new=None` 结论**必须一致**。
+
+### P3-1 `_trans_of` 只按 `(from_screen, trigger)` 索引 → 同键多目标**静默丢弃**
+
+- 症状：`out[(from, trigger)] = t` 是单值字典，同键第二条**静默覆盖**第一条。
+  而 schema 的唯一键含 `to_screen`——**允许**同键多目标共存。探针实测
+  `(A,tap:go)→B` 与 `(A,tap:go)→C` 共存时只报 C，**B 彻底消失**（真删一条转移
+  也发现不了）。而运行时图里同键多目标 = 同一动作在不同 run 去了不同地方
+  （应用不稳定或真有分支），是真会发生的形态。
+- 修法：索引改「键 → **目标列表**」，转移比较抽出 `_diff_transitions` 按**目标
+  集合**判定：
+  - 两面都**只有一个**目标且不同 → `CHANGED`（设计 12.2 原义，带 `was_to`）；
+  - 其余（某面缺该键、或任一面**多目标**）→ 逐目标判 `ADDED`/`NOT_OBSERVED`/
+    `REMOVED`，并给条目打 `multi_target: True` 说明为什么没走 CHANGED。
+  **多目标时不编 CHANGED、也不丢任何一条**——「这个动作去了两处」本身就是有价值
+  的信号。补 4 条专测（多目标不丢 / 当前面多目标同样不丢 / 单目标仍 CHANGED /
+  多目标且变化时逐目标报）。
+
+### P3-2 `graph_diffs` 不持久化「比的是哪两面」
+
+- 症状：`record_diff` 落 `(app_id, base_build, build)` + 条目列，**没有
+  `base_source_of`/`source_of`** → 「源图 vs 运行时」（两面来源不同、build 相同）
+  与「build-to-build」（来源相同、build 不同）在库里长得一样，回读时分不清。
+  信息在 CLI **打印时存在、落库时丢失**。
+- 修法：新增 **graph 迁移链 002**（`002_graph_diff_sources.sql`）加两列
+  （`base_source_of` / `source_of`，`NOT NULL DEFAULT ''`）+ 索引；两列**进替换键**
+  （同一 build 对下的两种比较互不覆盖）；`load_diff` 可**按两面来源精确过滤**
+  （缺省 `None` = 不过滤，行里带来源供分辨）。
+  `graph_diffs` 是 Task 5.1 冻结的三表之一、当时没有这个需求（plan 要求三表同批
+  冻结）——**需求后到**，所以走 002 加列而不改 001。
+- 顺带修了两条**硬编码版本串**的断言（`== "001_graph_schema"`）→ 改成从链尾派生 /
+  断言「整条链都跑过」（否则加 003 时它们会撒谎）。
+
+### P3-3 `test_graph_diff.py` 的死条件
+
+- `diff_graphs(base, None if False else new)` 恒等于 `new`——编辑残留，会让人读成
+  「这里有个条件分支」。已删。
+
+### 补一条评审 §4 的「未验证」项
+
+- `--save` 在 **build-to-build** 下的落库内容原先没验证 → 补专测：造两个 build 的
+  运行时图（1025 少一个屏）→ `--save` → `load_diff(app, 1024, 1025, runtime,
+  runtime)` 得 `[(NOT_OBSERVED, HomeView)]`，且与「源图 vs 运行时」的同 build 对
+  **互不覆盖**。
+
+### 实测
+
+- 全量 pytest **1216 passed**（Task 5.3 首次交付 1206 → 修订后 +10）。
+- P2-1 的原始场景（首次使用：只建源图就 diff）已用真 CLI 复现修复效果。

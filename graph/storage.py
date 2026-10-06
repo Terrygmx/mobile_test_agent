@@ -102,23 +102,32 @@ class GraphStore:
     # --- diff 落库（`graph_diffs` 表，Task 5.3 的消费者） ---
 
     def record_diff(self, diff) -> int:
-        """把一次 Graph Diff 落库（按 `(app_id, base_build, build)` **整体替换**）。
+        """把一次 Graph Diff 落库（按 `(app_id, base_build, build,
+        base_source_of, source_of)` **整体替换**）。
 
         与图同样的替换语义（重跑 `graph diff` 必须幂等），并且同样在**单事务**里
         换掉——读者看不到「一半新一半旧」的差异列表。
+
+        两面来源（`base_source_of`/`source_of`）**进替换键**（review_p2_task53
+        P3-2）：否则同一 `(app_id, base_build, build)` 下「源图 vs 运行时」与
+        「build-to-build」会互相覆盖，而它们在库里本来就长得一样。
         """
         conn = self._connect()
         try:
             with conn:
                 conn.execute(
                     "DELETE FROM graph_diffs WHERE app_id=? AND base_build=?"
-                    " AND build=?", (diff.app_id, diff.base_build, diff.build))
+                    " AND build=? AND base_source_of=? AND source_of=?",
+                    (diff.app_id, diff.base_build, diff.build,
+                     diff.base_source_of, diff.source_of))
                 conn.executemany(
-                    "INSERT INTO graph_diffs (app_id, base_build, build, kind,"
-                    " screen_id, from_screen, to_screen, trigger, detail_json,"
-                    " created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    [(diff.app_id, diff.base_build, diff.build, e.kind,
-                      e.screen_id, e.from_screen, e.to_screen, e.trigger,
+                    "INSERT INTO graph_diffs (app_id, base_build, build,"
+                    " base_source_of, source_of, kind, screen_id, from_screen,"
+                    " to_screen, trigger, detail_json, created_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    [(diff.app_id, diff.base_build, diff.build,
+                      diff.base_source_of, diff.source_of, e.kind, e.screen_id,
+                      e.from_screen, e.to_screen, e.trigger,
                       json.dumps(e.detail, ensure_ascii=False), _now())
                      for e in diff.entries])
         finally:
@@ -126,19 +135,34 @@ class GraphStore:
         return len(diff.entries)
 
     def load_diff(self, app_id: str = "", base_build: str = "",
-                  build: str = "") -> list[dict]:
-        """读回差异行（按 kind 排序，便于报告稳定呈现）。"""
+                  build: str = "", base_source_of: str | None = None,
+                  source_of: str | None = None) -> list[dict]:
+        """读回差异行（按 kind 排序，便于报告稳定呈现）。
+
+        两面来源缺省 `None` = **不过滤**（列出该 build 对下的全部差异，行里带
+        `base_source_of`/`source_of` 供调用方分辨是哪种比较）。
+        """
+        where = "app_id=? AND base_build=? AND build=?"
+        params: list = [app_id, base_build, build]
+        if base_source_of is not None:
+            where += " AND base_source_of=?"
+            params.append(base_source_of)
+        if source_of is not None:
+            where += " AND source_of=?"
+            params.append(source_of)
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT kind, screen_id, from_screen, to_screen, trigger,"
-                " detail_json, created_at FROM graph_diffs"
-                " WHERE app_id=? AND base_build=? AND build=?"
-                " ORDER BY kind, screen_id, from_screen, to_screen",
-                (app_id, base_build, build)).fetchall()
+                "SELECT base_source_of, source_of, kind, screen_id,"
+                " from_screen, to_screen, trigger, detail_json, created_at"
+                " FROM graph_diffs WHERE " + where
+                + " ORDER BY kind, screen_id, from_screen, to_screen",
+                params).fetchall()
         finally:
             conn.close()
-        return [{"kind": r["kind"], "screen_id": r["screen_id"],
+        return [{"base_source_of": r["base_source_of"],
+                 "source_of": r["source_of"],
+                 "kind": r["kind"], "screen_id": r["screen_id"],
                  "from_screen": r["from_screen"], "to_screen": r["to_screen"],
                  "trigger": r["trigger"],
                  "detail": json.loads(r["detail_json"]) if r["detail_json"]
