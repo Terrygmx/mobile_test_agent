@@ -345,6 +345,14 @@ M1 审计/Schema(1.5d) ─► M2 Store/Guard(4d) ─► M3 验证/降级(3d) ─
 
 ### Task 5.4: P2-14 — Impact Analysis + UI Change Report
 
+> **修订记录（Task 5.4 实现后回填，2026-10-06，review_p2_task54 P3-2）**：
+> element→testcase 索引的实际位置不在 `testcase/lint.py`，在
+> `source/coverage.py`（P1 反查的本体）——本任务未按 plan 原文再抽一套，
+> 而是把 coverage 的三处并行遍历/fold 收敛成两个原语（`collect_case_refs`
+> / `ref_to_cases`，旧函数降为视图）+ `graph/impact.py` 纯查询。「不建
+> 第二套」以此形状兑现。统一后形状：collect（遍历单点）→ fold（计数
+> 单点）→ affected_testcases / cases_touching_screen（视图查询）。
+
 **Objective:** 设计 11.3 / 12.3：复用 P1 反向索引，不建第二套。
 
 **Files:**

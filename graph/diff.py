@@ -92,6 +92,14 @@ class DiffEntry:
             raise ValueError(f"未知 diff kind: {self.kind!r}")
         if self.screen_id is None and not (self.from_screen and self.to_screen):
             raise ValueError("DiffEntry 必须给出 screen_id 或 from/to")
+        if not isinstance(self.detail, dict):
+            # review_p2_task54 P3-1：builder 恒传 dict，但 dataclass 不强制
+            # 类型——下游/脚本直构 `detail=None` 的 CHANGED 行会在 render 的
+            # detail.get 上 AttributeError（构造入口不设防，消费端裸假设，
+            # 与 4.2 review P3-1 的 effective_risk 类型地雷同族）。
+            raise TypeError(
+                f"detail must be dict, got {type(self.detail).__name__}:"
+                f" {self.detail!r}")
 
     @property
     def is_node(self) -> bool:

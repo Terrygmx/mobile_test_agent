@@ -228,8 +228,15 @@ def format_report(report: ImpactReport) -> str:
                  + (f" → {', '.join(report.affected_cases)}"
                     if report.affected_cases else ""))
     if report.unaffected_cases:
-        lines.append(f"  未受影响（本轮不必回归）: "
-                    f"{', '.join(report.unaffected_cases)}")
+        # P3-3（review_p2_task54）：unmapped 用例会被集合差算进
+        # unaffected——人读文本里同时出现「未受影响」与「无法判定」是矛盾
+        # 呈现。文本层排除（summary() 的数据口径不变，消费方可自行相减）。
+        unmapped = set(report.unmapped_cases)
+        shown = [c for c in report.unaffected_cases if c not in unmapped]
+        if shown:
+            note = "（不含「无法判定」者）" if unmapped else ""
+            lines.append(f"  未受影响（本轮不必回归）{note}: "
+                         f"{', '.join(shown)}")
     if report.unmapped_cases:
         # 这些用例没有被任何引用覆盖 → 无法判定影响面，必须说出来
         # （「没算出来」不能被读成「没受影响」）

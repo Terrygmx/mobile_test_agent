@@ -255,6 +255,16 @@ def test_diff_entry_validates_kind_and_identity():
         DiffEntry(ADDED)
 
 
+def test_diff_entry_detail_must_be_dict():
+    """P3-1（review_p2_task54）：builder 恒传 dict，但 dataclass 不强制
+    类型——下游直构 `detail=None` 的 CHANGED 行会在 render 的 detail.get
+    上 AttributeError。构造入口 fail-loud（类型地雷同族）。"""
+    with pytest.raises(TypeError, match="detail must be dict"):
+        DiffEntry(CHANGED, from_screen="A", to_screen="B", detail=None)
+    with pytest.raises(TypeError, match="detail must be dict"):
+        DiffEntry(CHANGED, from_screen="A", to_screen="B", detail="")
+
+
 def test_diff_entry_render_shapes():
     assert DiffEntry(ADDED, screen_id="A").render() == "ADDED         screen A"
     line = DiffEntry(ADDED, from_screen="A", to_screen="B",

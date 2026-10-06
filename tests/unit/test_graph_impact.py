@@ -225,6 +225,13 @@ def test_report_reports_unmapped_cases():
     report = build_change_report(diff, cases=cases)
     assert report.unmapped_cases == ("c2",)
     assert "无法判定" in format_report(report)
+    # P3-3（review_p2_task54）：文本层 unmapped 不再同时出现在「未受影响」
+    # ——人读清单去矛盾（summary() 的数据口径不变，消费方可自行相减）。
+    text = format_report(report)
+    unaffected_line = next((ln for ln in text.splitlines()
+                            if "未受影响" in ln), "")
+    assert "c2" not in unaffected_line, \
+        "无法判定的用例不得同时出现在「未受影响」清单里"
 
 
 def test_report_empty_diff_has_no_impact():
