@@ -24,6 +24,7 @@ from experience.models import (
     VerificationPolicy,
 )
 from experience.promoter import approve_proposal, generate_proposal
+from experience.knowledge import KnowledgeSources, P2KnowledgeSources
 from experience.ranker import rank_experiences
 from experience.schema_migrations import migrate, current_version
 from experience.store import (
@@ -72,4 +73,6 @@ __all__ = [
     "RecoveryCache", "cache_key",
     # Task 4.1：Promotion（设计 9.1–9.3/9.5/E10）
     "generate_proposal", "approve_proposal",
+    # Task 5.5：KnowledgeSources 四查询接口（设计 19）
+    "KnowledgeSources", "P2KnowledgeSources",
 ]
