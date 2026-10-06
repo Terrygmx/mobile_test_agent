@@ -148,21 +148,48 @@ def _index(metadata: dict) -> dict:
     return {"by_pair": resolved, "by_short": by_short, "prefixes": prefixes}
 
 
-def collect_refs(cases: Iterable[Any]) -> list[tuple[str, str]]:
-    """TestCase 列表 → [(case_id, 原始 ref 字符串)]，按出现顺序、去 screen。
+def collect_case_refs(cases: Iterable[Any]) -> list[tuple[str, Any]]:
+    """**唯一的引用收集点**：`[(case_id, TargetRef)]`，按用例/步骤顺序。
 
-    三种步骤形态（6.3）+ postcondition 都算引用。**用 hasattr 分派**而不是
-    `step.action`：WaitStep/AssertionStep 没有 action 字段，直接摸会
-    AttributeError（skill 坑 17 同源——那里是被 except 静默吞掉）。
+    `collect_refs`（元素引用，去 screen）与 `iter_refs`（全量 TargetRef）都是
+    它的**视图**——同一种遍历只许有一处实现。Task 5.4 统一：此前这两个函数各写
+    一遍 for 循环，而 `graph/impact.py` 的影响面分析又要第三种「带 case_id 的
+    全量」形态，正是「两套实现必然漂移」的温床。
+
+    分派逻辑单点在 `_step_refs`：**用 hasattr 而不是 `step.action`**——
+    WaitStep/AssertionStep 没有 action 字段，直接摸会 AttributeError。
     """
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, Any]] = []
     for tc in cases:
         cid = getattr(tc, "id", "?")
         for step in getattr(tc, "steps", []) or []:
             for ref in _step_refs(step):
-                if ref.type == "screen":
-                    continue        # screen 走 screen_coverage，不进分母
-                out.append((cid, ref.id))
+                out.append((cid, ref))
+    return out
+
+
+def collect_refs(cases: Iterable[Any]) -> list[tuple[str, str]]:
+    """TestCase 列表 → [(case_id, 原始 ref 字符串)]，按出现顺序、去 screen。
+
+    三种步骤形态（6.3）+ postcondition 都算引用（见 `collect_case_refs`）。
+    screen 引用走 screen_coverage，不进 identifier 分母。
+    """
+    return [(cid, ref.id) for cid, ref in collect_case_refs(cases)
+            if ref.type != "screen"]
+
+
+def ref_to_cases(cases: Iterable[Any]) -> dict[str, set[str]]:
+    """元素引用字符串 → 引用它的用例 id 集合（`collect_case_refs` 的索引视图）。
+
+    键就是**用例里写的形态**（`Screen.elem` 或裸 `elem`）——**不做解析**：解析归
+    `_index(metadata)`，索引只负责「谁引用了什么」。两个消费方共用它（`build_diff`
+    限定引用、`graph/impact.py` 影响面），不再各自 fold 一遍。
+    """
+    out: dict[str, set[str]] = {}
+    for cid, ref in collect_case_refs(cases):
+        if ref.type == "screen":
+            continue        # 屏引用走 screen 维度，不是元素引用
+        out.setdefault(ref.id, set()).add(cid)
     return out
 
 
@@ -255,13 +282,9 @@ def compute_coverage(metadata: dict, cases: Iterable[Any]) -> CoverageReport:
 def iter_refs(cases: Iterable[Any]) -> list:
     """全部 TargetRef（含 screen），按步骤顺序。collect_refs 的无过滤版 ——
     公共入口：build_diff 的「用例到达了哪些 Screen」要用它（需要 screen
-    引用，collect_refs 恰好把 screen 滤掉了）。单点真源：过滤/不分派逻辑
-    只在 _step_refs 一处。"""
-    out: list = []
-    for tc in cases:
-        for step in getattr(tc, "steps", []) or []:
-            out += _step_refs(step)
-    return out
+    引用，collect_refs 恰好把 screen 滤掉了）。遍历单点在
+    `collect_case_refs`（此处只取第二列）。"""
+    return [ref for _, ref in collect_case_refs(cases)]
 
 
 def _prefix_hit(prefixes: list, screen: str | None, ident: str):

@@ -36,6 +36,14 @@ from graph.diff import (
     GraphDiff,
     diff_graphs,
 )
+from graph.impact import (
+    ImpactReport,
+    ImpactRow,
+    affected_testcases,
+    build_change_report,
+    cases_touching_screen,
+    ref_index,
+)
 from graph.models import (
     RUNTIME,
     SOURCE,
@@ -66,4 +74,7 @@ __all__ = [
     # diff（Task 5.3）
     "ADDED", "REMOVED", "CHANGED", "NOT_OBSERVED", "UNKNOWN",
     "DiffEntry", "GraphDiff", "diff_graphs",
+    # impact（Task 5.4）
+    "ref_index", "affected_testcases", "cases_touching_screen",
+    "ImpactRow", "ImpactReport", "build_change_report",
 ]

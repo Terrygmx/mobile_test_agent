@@ -342,6 +342,9 @@ def build_parser() -> argparse.ArgumentParser:
                           help="参照面 build（给了即 build-to-build）")
     gph_diff.add_argument("--save", action="store_true",
                           help="把差异落 graph_diffs 表（重跑按范围整体替换）")
+    gph_diff.add_argument("--cases", metavar="DIR", default=None,
+                          help="用例根目录；给了就再算**影响面**并打印 "
+                               "UI Change Report（12.3 = diff × 影响用例）")
 
     gph_show = gph_sub.add_parser("show", help="打印库里的图（范围 + 节点 + 转移）")
     _add_graph_scope(gph_show)
@@ -1430,6 +1433,26 @@ def _graph_diff(args: argparse.Namespace) -> int:
     if args.save:
         n = store.record_diff(diff)
         print(f"  已落库 graph_diffs：{n} 行（按范围整体替换）")
+
+    if args.cases:
+        # 设计 12.3：diff 关联 Impact Analysis → UI Change Report。
+        # 用例读不到（目录不存在 / preflight 失败）→ 3（配置错误，fail-loud：
+        # 把「没读到用例」显示成「影响面为空」会把配置问题伪装成无需回归）。
+        from pathlib import Path as _P
+        root = _P(args.cases)
+        if not root.is_dir():
+            print(f"GRAPH ERROR: suites root 不存在: {root}")
+            return 3
+        try:
+            from cli.pipeline import SessionPipeline
+            cases = SessionPipeline(suites_root=root).discover()
+        except Exception as e:  # noqa: BLE001 — preflight 失败同 3
+            print(f"GRAPH ERROR: 用例加载失败: {e}")
+            return 3
+        from graph.impact import build_change_report, format_report
+        report = build_change_report(diff, cases=cases)
+        print()
+        print(format_report(report))
     # 退出码：有真实变化（非 UNKNOWN）→ 1（CI 可用它判断「图变了」）；
     # 无变化或仅 UNKNOWN → 0（UNKNOWN 是「没判定」，不是「有变化」）。
     return 1 if diff.changed else 0

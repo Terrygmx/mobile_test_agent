@@ -31,7 +31,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from source.coverage import RESOLVED_TYPES, collect_refs, iter_refs
+from source.coverage import (RESOLVED_TYPES, collect_refs, iter_refs,
+                             ref_to_cases)
 
 # diff 判定的四类（RENAMED? 刻意不在其中——它是候选，不是判定结论）
 DETERMINED = ("ADDED", "REMOVED", "UNCHANGED", "UNKNOWN")
@@ -190,10 +191,9 @@ def diff_builds(old: dict, new: dict, cases: Iterable[Any], *,
                 removed.append((screen, ident))
         renamed += _rename_candidates(screen, o, n)
 
-    for cid, ref in refs:
-        screen, _, ident = ref.partition(".")
-        if screen and ident:
-            cases_by_ref.setdefault(f"{screen}.{ident}", set()).add(cid)
+    # 索引 fold 单点在 `source.coverage.ref_to_cases`（Task 5.4 统一）：这里只
+    # 按 12.6 的口径取**限定引用**（裸名不参与 element 级 diff 的关联展示）。
+    cases_by_ref = {k: v for k, v in ref_to_cases(cases).items() if "." in k}
 
     return SourceDiffReport(
         scope_screens=scope,

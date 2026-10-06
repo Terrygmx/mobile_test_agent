@@ -1660,3 +1660,83 @@ ADDED         transition HomeView -> ProfileView (trigger=tap:go_profile)
 
 - 全量 pytest **1216 passed**（Task 5.3 首次交付 1206 → 修订后 +10）。
 - P2-1 的原始场景（首次使用：只建源图就 diff）已用真 CLI 复现修复效果。
+
+---
+
+## Task 5.4 完成记录（P2-14 Impact Analysis + UI Change Report，2026-10-06）
+
+**Objective**：设计 11.3 / 12.3：复用 P1 反向索引，不建第二套。
+
+### 交付
+
+- `graph/impact.py`（新）：`ref_index` / `affected_testcases`（设计 11.3 的原签名）/
+  `cases_touching_screen` / `trigger_element` / `ImpactRow` / `ImpactReport` /
+  `build_change_report` / `format_report`。
+- `cli/main.py`：`mta graph diff --cases <用例根目录>` → 打印 **UI Change Report**
+  （设计 12.3：diff 关联 Impact Analysis）。用例读不到 → exit 3（配置错误，
+  fail-loud：把「没读到用例」显示成「影响面为空」会把配置问题伪装成无需回归）。
+- `source/coverage.py`：**统一引用收集点**——新增 `collect_case_refs`（唯一遍历），
+  `collect_refs` / `iter_refs` 降为它的视图；新增 `ref_to_cases`（索引 fold 的
+  唯一实现）。
+- `source/build_diff.py`：改用 `ref_to_cases`（去掉第二处 fold，行为不变）。
+- `tests/unit/test_graph_impact.py`：18 例。
+
+### plan 的 Files 描述与磁盘不符（勘误）
+
+plan 写的是「把 **`testcase/lint.py`** 的 element→testcase 索引构建抽成可复用函数」。
+**实际索引原语不在 `lint.py`**（它只做步骤级检查），而在 **`source/coverage.py`**；
+且当时的形状是：
+
+- `collect_refs`（元素引用，去 screen）与 `iter_refs`（全量 TargetRef）**各写一遍**
+  用例遍历；
+- `source/build_diff.py` 又自己 fold 了一遍 `cases_by_ref`。
+
+所以「抽成可复用函数」这一步比 plan 描述的更值钱：现在**遍历只有一处**
+（`collect_case_refs`）、**索引 fold 只有一处**（`ref_to_cases`），三个消费方都是
+视图。两侧重构后 `test_coverage` / `test_build_diff` / `test_cli_coverage` /
+`test_report_coverage` 共 40+ 例**逐条不变**（行为保持）。
+
+### 三处必须写清的判断
+
+1. **屏引用必须进索引**。`ref_to_cases` 按 12.7 口径把 screen 引用滤掉了（它进
+   screen_coverage 的分母），但影响面**不能**：一个只 `wait_for screen:X`、不碰 X 上
+   任何元素的用例**同样**会因 X 的变化而失败。所以 `ref_index` 走同一个
+   `collect_case_refs` 原语、把屏引用键写成 `screen:X` 与元素引用区分。
+   （有专测断言：元素维度与 P1 的 `ref_to_cases` 逐键一致——**不新建第二套**的落点。）
+2. **匹配规则宁可多包含**。
+   - 裸名查询（`go_profile`）覆盖任意屏上的同名引用；
+   - **限定查询（`HomeView.go_profile`）也覆盖裸名引用**——裸名指向哪一屏由运行时
+     解析决定，事先不知道。影响面是「回归范围选择」，**多包含一个用例的成本远低于
+     漏掉一个会失败的用例**（12.2 同源：宁可可见，不可静默）。
+   - **不做模糊匹配**：`login_button` 不会命中 `login_button_2`（有专测）。
+3. **转移类差异的影响面** = `from`/`to` 两屏的引用 ∪ **执行 trigger 那个元素**
+   的引用（trigger 形如 `tap:login_button`）。导航改了目标，正是「执行了这个动作」
+   的用例会失败。
+
+### 两条诚实性要求（都写进了报告）
+
+- **UNKNOWN 行的影响面标「候选」**：差异本身没判定，影响面就不能当「确定受影响」。
+- **无法判定的用例必须报出来**：没有任何 element/screen 引用的用例无法判定影响面——
+  「没算出来」不能被读成「没受影响」（与 12.2「没扫到 ≠ 不存在」同源）。报告末尾
+  单独列 `无法判定（用例未引用任何 element/screen）`。
+
+### 真机端到端（Gate M2 的 trace + metadata + **仓库真实 suites**，20 个用例）
+
+```
+ADDED    transition LoginView -> HomeView (trigger=tap:login_button)
+         影响用例: 20 个（smoke 用例都要先登录——这个转移确实被每个用例用到）
+ADDED    transition HomeView  -> ProfileView (trigger=tap:go_profile)
+         影响用例: 18 个
+NOT_OBSERVED screen DetailView   → chain_nav_001, detail_back_001, open_detail_001
+NOT_OBSERVED screen SearchView   → search_001..005, search_filter_001, chain_nav_001
+NOT_OBSERVED screen Spike*       → —（声明了但没有任何用例引用，如实为空）
+合计：ADDED=2, NOT_OBSERVED=7, REMOVED=0, CHANGED=0, UNKNOWN=0
+```
+
+节点级的影响面区分度很好（DetailView 只 3 个用例）；转移级偏宽是**规则本身**的结果
+（登录转移被所有用例共用），不是计算错误。
+
+### 实测
+
+- 全量 pytest **1234 passed**（Task 5.4 新增 18）。
+- 真机端到端（真实 suites 20 个用例）见上。
