@@ -155,3 +155,19 @@ def test_trace_history_reads_steps_with_filters(knowledge):
     assert len(limited) == 2
     with pytest.raises(ValueError, match="未知过滤键"):
         ks.trace_history({"bogus": 1})
+
+
+def test_uninitialized_trace_db_is_domain_error(tmp_path):
+    """P3-2（review_p2_task55）：指向未初始化的空文件 → 可诊断的域错误，
+    不是裸 `sqlite3.OperationalError: no such table`（P3 规划能力会远程
+    消费本接口）。"""
+    from experience.knowledge import P2KnowledgeSources
+
+    empty = tmp_path / "empty_trace.db"
+    empty.write_bytes(b"")
+    ks = P2KnowledgeSources(experience_store=SQLiteExperienceStore(
+        str(tmp_path / "experience.db")), trace_db=str(empty), cases=[])
+    with pytest.raises(ValueError, match="trace 库不可读"):
+        ks.graph_query(APP)
+    with pytest.raises(ValueError, match="trace 库不可读"):
+        ks.trace_history({})

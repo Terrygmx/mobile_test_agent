@@ -34,6 +34,16 @@
 - 非幂等目标无论成功多少次，都不会被自动标记 VERIFIED。
 - 50+ 条真实 Recovery 事件作为真实数据基础；Candidate→Verified→Degraded 完整状态转换至少演示一次。
 
+> **修订记录（Gate M5 收口拍板，2026-10-07，review_p2_task55 P3-1）**：
+> 本条「50+ 条真实 Recovery **事件**」的达标口径为 **`recoveries` 行数**
+> （真实事件，Gate M5 实测 80 条）。plan Task 1.1 演化出的「50 条人工
+> ACCEPT」是更严的过程指标，**不作为 1.2 的达标口径**——Experience 系统
+> 落地后，同一目标的重复漂移由 Experience 命中接管（RECOVERED_EXPERIENCE
+> 记真实事件、按设计不建 review），重复 ACCEPT 收敛是「越跑越少依赖
+> LLM」的成功态而非缺口（见总纲目标）。若 P3 需要扩充 ACCEPT 多样性：
+> ACCEPT 数的真实上限是**漂移场景表的宽度**（现有 7 场景轮换，同场景
+> 重复跑只会被 Experience 吃掉）——扩场景表即可继续积累，机制已就绪。
+
 ### 1.3 明确不做（留给 P3）
 
 自动生成用例、自动探索 App、自主测试规划、Multi-Agent/Subagent、强化学习、复杂 Vision Agent、Android、大规模设备调度。P2 只为 P3 准备数据（Experience / Graph / Impact Analysis），不实现规划能力本身。

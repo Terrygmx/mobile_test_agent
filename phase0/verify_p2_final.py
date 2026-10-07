@@ -550,6 +550,29 @@ def s9_p1_baseline(proj: Path) -> bool:
                  f"exit={r.returncode} tc={f['tc_status']}")
 
 
+def s10_knowledge_sources(proj: Path, exp_db: Path, exp_id: str) -> bool:
+    """设计 19 的四查询接口在本 Gate 现场自证（只读；review_p2_task55
+    P3-4——gate 产物自证，不单靠 G1 的集成测试转述）。"""
+    from experience import P2KnowledgeSources, SQLiteExperienceStore
+
+    ks = P2KnowledgeSources(
+        experience_store=SQLiteExperienceStore(str(exp_db)),
+        trace_db=str(proj / "state" / "trace_s8.db"),
+        cases=[])
+    hits = ks.experience_lookup(BUNDLE, "LoginView", "username_field")
+    graph = ks.graph_query(BUNDLE)
+    history = ks.trace_history({"limit": 5})
+    ok = check(
+        "S10_knowledge_sources_readonly_queries",
+        any(e.experience_id == exp_id for e in hits)
+        and graph.app_id == BUNDLE and graph.nodes
+        and len(history) <= 5,
+        f"lookup 命中 exp_id={exp_id in [e.experience_id for e in hits]}；"
+        f"graph nodes={len(graph.nodes)}；history={len(history)} 条"
+        "（设计 19 四接口在真实现场可查）")
+    return ok
+
+
 def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     pre_ok = preflight()
@@ -608,6 +631,8 @@ def main() -> int:
                     device_ok = s8_revert(proj, exp_db, exp_id, sha)
                 if device_ok:
                     device_ok = s9_p1_baseline(proj)
+                if device_ok and exp_id:
+                    device_ok = s10_knowledge_sources(proj, exp_db, exp_id)
         finally:
             restore()
     ok = pre_ok and g1_ok and device_ok
