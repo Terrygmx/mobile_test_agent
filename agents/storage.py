@@ -1,0 +1,218 @@
+"""storage.py — agent.db 的读写入口（SQLiteAgentStore；Task 1.1 / P3-01）。
+
+设计 §11：独立库文件（默认 out/agent.db，CLI --agent-db 可覆盖），延续
+P2「按写者边界分库」与 E9 单写者纪律（进程锁 + BEGIN IMMEDIATE）。
+迁移复用 P2 泛化执行器（graph.db 同款用法），幂等可重放；迁移链
+agents/migrations/ 按里程碑增量（001 → 002/003/004 随 M3/M4/M5 定型）。
+
+append-only：agent_trace 只 insert 不 update——每步留痕是审计根基。
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+
+from agents.models import AgentState, AgentTask, AgentTraceEntry
+from experience.schema_migrations import latest_version, migrate
+
+__all__ = ["AGENT_MIGRATIONS_DIR", "AGENT_SCHEMA_VERSION", "SQLiteAgentStore"]
+
+AGENT_MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+AGENT_SCHEMA_VERSION = latest_version(AGENT_MIGRATIONS_DIR, "agents.migrations")
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+class SQLiteAgentStore:
+    """agent.db 读写入口。构造即迁移（幂等）。写 = 进程锁 + BEGIN
+    IMMEDIATE（E9）；读 = 每调用独立连接，可并发。"""
+
+    def __init__(self, db_path: str | Path) -> None:
+        self._path = str(db_path)
+        parent = Path(self._path).parent
+        if parent and not parent.exists():
+            parent.mkdir(parents=True, exist_ok=True)
+        self._write_lock = threading.Lock()
+        conn = self._connect()
+        try:
+            migrate(conn, migrations_dir=AGENT_MIGRATIONS_DIR,
+                    pkg="agents.migrations")
+        finally:
+            conn.close()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+
+    def _write_tx(self):
+        """E9 单写者：进程锁串行化全部写方法（沿 experience/store.py 同款）。"""
+        store = self
+
+        class _Tx:
+            def __enter__(self) -> sqlite3.Connection:
+                store._write_lock.acquire()
+                store._conn = store._connect()
+                store._conn.execute("BEGIN IMMEDIATE")
+                return store._conn
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                try:
+                    if exc_type is None:
+                        store._conn.commit()
+                    else:
+                        store._conn.rollback()
+                finally:
+                    store._conn.close()
+                    store._write_lock.release()
+
+        return _Tx()
+
+    # --- agent_tasks ----------------------------------------------------------
+
+    def create_task(self, task_id: str, *, agent_type: str, goal: str,
+                    constraints: dict | None = None) -> AgentTask:
+        now = _now()
+        with self._write_tx() as conn:
+            conn.execute(
+                "INSERT INTO agent_tasks (task_id, agent_type, goal,"
+                " constraints_json, state, start_time)"
+                " VALUES (?,?,?,?, 'IDLE', ?)",
+                (task_id, agent_type, goal,
+                 json.dumps(constraints or {}, ensure_ascii=False), now))
+        return self.get_task(task_id)
+
+    def get_task(self, task_id: str) -> AgentTask | None:
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT * FROM agent_tasks WHERE task_id=?",
+                               (task_id,)).fetchone()
+            return self._task_from_row(row) if row else None
+        finally:
+            conn.close()
+
+    def update_task_state(self, task_id: str, state: AgentState | str,
+                          *, outcome: str | None = None,
+                          end_time: str | None = None) -> None:
+        state_value = state.value if isinstance(state, AgentState) else state
+        if state_value not in {s.value for s in AgentState}:
+            raise ValueError(
+                f"state 只接受 AgentState 枚举值，got {state_value!r}")
+        with self._write_tx() as conn:
+            cur = conn.execute(
+                "UPDATE agent_tasks SET state=?, outcome=COALESCE(?, outcome),"
+                " end_time=COALESCE(?, end_time) WHERE task_id=?",
+                (state_value, outcome, end_time, task_id))
+            if cur.rowcount == 0:
+                raise ValueError(f"no such agent task: {task_id}")
+
+    @staticmethod
+    def _task_from_row(row: sqlite3.Row) -> AgentTask:
+        return AgentTask(
+            task_id=row["task_id"], agent_type=row["agent_type"],
+            goal=row["goal"],
+            constraints=json.loads(row["constraints_json"] or "{}"),
+            state=AgentState(row["state"]),
+            start_time=row["start_time"], end_time=row["end_time"],
+            outcome=row["outcome"])
+
+    # --- agent_trace（追加式） ---------------------------------------------------
+
+    def append_trace(self, task_id: str, *, step_index: int | None = None,
+                     state: AgentState | None = None,
+                     goal: str | None = None,
+                     observation: dict | None = None,
+                     decision: dict | None = None,
+                     guard_result: str | None = None,
+                     result: str | None = None,
+                     novelty: float | None = None,
+                     llm_calls_used: int = 0) -> AgentTraceEntry:
+        if self.get_task(task_id) is None:
+            raise ValueError(f"no such agent task: {task_id}")
+        entry = AgentTraceEntry(
+            task_id=task_id, step_index=step_index, state=state, goal=goal,
+            observation=observation or {}, decision=decision or {},
+            guard_result=guard_result, result=result, novelty=novelty,
+            llm_calls_used=llm_calls_used)
+        with self._write_tx() as conn:
+            conn.execute(
+                "INSERT INTO agent_trace (task_id, step_index, state, goal,"
+                " observation_json, decision_json, guard_result, result,"
+                " novelty, llm_calls_used, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (entry.task_id, entry.step_index,
+                 entry.state.value if entry.state else None, entry.goal,
+                 json.dumps(entry.observation, ensure_ascii=False),
+                 json.dumps(entry.decision, ensure_ascii=False),
+                 entry.guard_result, entry.result, entry.novelty,
+                 entry.llm_calls_used, entry.created_at
+                 .strftime("%Y-%m-%dT%H:%M:%S.%fZ")))
+        return entry
+
+    def get_trace(self, task_id: str) -> list[AgentTraceEntry]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM agent_trace WHERE task_id=? ORDER BY id ASC",
+                (task_id,)).fetchall()
+            return [AgentTraceEntry(
+                task_id=r["task_id"], step_index=r["step_index"],
+                state=AgentState(r["state"]) if r["state"] else None,
+                goal=r["goal"],
+                observation=json.loads(r["observation_json"] or "{}"),
+                decision=json.loads(r["decision_json"] or "{}"),
+                guard_result=r["guard_result"], result=r["result"],
+                novelty=r["novelty"], llm_calls_used=r["llm_calls_used"],
+                created_at=datetime.strptime(
+                    r["created_at"], "%Y-%m-%dT%H:%M:%S.%fZ"
+                ).replace(tzinfo=timezone.utc)) for r in rows]
+        finally:
+            conn.close()
+
+    # --- test_plans ---------------------------------------------------------------
+
+    def save_plan(self, plan_id: str, *, app_build: str | None,
+                  git_commit: str | None, tasks: list[dict]) -> None:
+        with self._write_tx() as conn:
+            conn.execute(
+                "INSERT INTO test_plans (plan_id, app_build, git_commit,"
+                " created_at, tasks_json) VALUES (?,?,?,?,?)"
+                " ON CONFLICT(plan_id) DO UPDATE SET app_build=excluded.app_build,"
+                " git_commit=excluded.git_commit, tasks_json=excluded.tasks_json",
+                (plan_id, app_build, git_commit, _now(),
+                 json.dumps(tasks, ensure_ascii=False)))
+
+    def get_plan(self, plan_id: str) -> dict | None:
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT * FROM test_plans WHERE plan_id=?",
+                               (plan_id,)).fetchone()
+            if row is None:
+                return None
+            return {"plan_id": row["plan_id"],
+                    "app_build": row["app_build"],
+                    "git_commit": row["git_commit"],
+                    "created_at": row["created_at"],
+                    "tasks": json.loads(row["tasks_json"] or "[]")}
+        finally:
+            conn.close()
+
+    def list_plans(self) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM test_plans ORDER BY created_at DESC,"
+                " rowid DESC").fetchall()
+            return [{"plan_id": r["plan_id"], "app_build": r["app_build"],
+                     "git_commit": r["git_commit"],
+                     "created_at": r["created_at"],
+                     "tasks": json.loads(r["tasks_json"] or "[]")}
+                    for r in rows]
+        finally:
+            conn.close()
