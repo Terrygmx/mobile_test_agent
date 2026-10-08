@@ -5,10 +5,9 @@
 Task 1.3 的 `ALLOWED_TOOLS` 从这里派生（`frozenset(TOOL_ASSET_TIER)`），
 两处永不漂移。
 
-禁用名单（`delete_testcase` 等 8 项）当前由 `tests/unit/test_agent_models.py`
-的断言钉住；**CI 门禁测试 `tests/unit/test_tool_allowlist_gate.py` 归 Task 1.3**
-（review_p3_task11 P3-1：此处早先写成「已由 CI 门禁钉死」，而那个文件当时还
-不存在——docstring 不得描述「P3 完成态」）。
+禁用名单（`delete_testcase` 等 8 项）由 **CI 门禁测试
+`tests/unit/test_tool_allowlist_gate.py`** 逐一钉住（Task 1.3 已落地；
+该文件与 `agents/tools.py::BANNED_TOOLS` 是同一批断言的正式落点）。
 
 AgentState 九态（设计 §9.2）：本任务只定型词表与存储；合法转换表
 M6（Task 6.1）落地——在那之前 store 不做转换校验，只做枚举校验。

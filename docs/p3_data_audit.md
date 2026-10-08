@@ -494,3 +494,97 @@ Task 2.4 加 `cmd_plan` 的那天它开始工作。
 - **探针复现 P2-1**：临时把 `config/policy.yaml` 改名 → 两条 shipped-yaml 测试
   **真红**（修复前全绿）；改名还原。
 - 全仓重复顶层定义体检：**零命中**。
+
+---
+
+## Task 1.3 完成记录（P3-03 Agent 工具层 / F2/F12 唯一通路，2026-10-08）
+
+**Objective**：设计 §10/§10.1 —— `ALLOWED_TOOLS → TOOL_ASSET_TIER → Executor+Guard`
+的**唯一分发层**；被禁工具**在构造上不存在**。
+
+### 交付
+
+- `agents/tools.py`（新，唯一分发层）：三张表 + 注册表 + `AgentToolkit.call`。
+- `tests/unit/test_agent_tools.py`（**53 例**）：行为面（plan Steps 的五条验收）。
+- `tests/unit/test_tool_allowlist_gate.py`（**16 例**，**CI 门禁**）：静态/结构性断言。
+- `agents/__init__.py`：导出三张表 + 工具层异常；**包级 docstring 的「尚未落地」
+  段落删掉**（那两件就是本任务），改成「唯一通路」的正式表述 + 一句边界说明。
+- `agents/models.py`：docstring 里「CI 门禁归 Task 1.3」改成「已落地」。
+
+### 三张表 + 注册表（都不是手抄）
+
+| 表 | 内容 | 来源 |
+|---|---|---|
+| `ALLOWED_TOOLS` | 22 | `frozenset(TOOL_ASSET_TIER)`（**派生**，门禁 A 钉住） |
+| `GUARDED_TOOLS` | 10 | 设计 §10.1 中间组「执行（仍经 Guard）」 |
+| `BANNED_TOOLS` | 8 | 设计 §10.1 末句逐字 |
+| `TOOL_METHODS` | 22 | 注册表；键集 == `ALLOWED_TOOLS`（门禁 B） |
+| `NOT_WIRED` | 11 | 声明式「还没接线 + 归哪个任务」表 |
+
+**已接线 11 / 未接线 11**（`_TOOL_METHODS` 键集仍是全集，未接线的走
+`ToolNotWired` 明确报错——**不静默返回空结果**）。
+
+### 关键决策（都写进了模块 docstring）
+
+1. **`GUARDED_TOOLS` 的边界 = 设计 §10.1 的分组**：只读组（`get_*`）与候选创建组
+   （`create_*`）**不经 Guard**。Guard 的三条规则都是关于**动作风险**
+   （`effective_risk` + action），对纯读取没有判据可用；`get_current_screen` 确实
+   调 WDA，但它的「风险」不是风险等级能表达的——环境侧的兜底是 **F7 的启动期
+   校验**（两道闸不重叠、不互相替代）。有专测钉住「只读工具在 production Guard 下
+   也照常返回，且 `guard` 字段为 None」。
+2. **BLOCK 是「结果」不是「异常」**：走 `ToolResult(ok=False, guard="BLOCK",
+   failure_type="SECURITY_BLOCKED")` ——与 `StepRunner.run_step` 的
+   `SECURITY_BLOCKED` 同款（返回而非抛）。这样「同一 Guard 下工具层与 run_step
+   结论一致」是**可比对**的（F1 的一致性测试就是比这个字段），也让 Agent 循环不必
+   用 except 表达预期结果。**异常只留给配置/编程错误**：`ToolViolation`（不是工具）、
+   `ToolNotWired`（没实现）、`ToolDependencyError`（依赖没注入）、
+   `ToolkitAuditError`（BLOCK 却无法留痕），以及 `ValueError`/`TypeError`（坏参数）
+   与 `InfraError`（设备故障，与 `run_step` 同款照原样上抛）。
+3. **审计不能静默丢弃**：BLOCK 时若没配 `agent_db`/`task_id`，**抛
+   `ToolkitAuditError`** 而不是「算了不记了」——被拦的动作没有痕迹，事后无法回答
+   「它想干什么」（F1 的审计根基）。有专测。
+4. **审计与返回值都不回显 `input` 的值**：值可能是密码/验证码（14.4 的
+   SENSITIVE/SECRET 遮蔽）。审计只记 tool/action/screen/element/risk/拦截原因，
+   `input` 的返回值只给 `value_len`。两条专测。
+5. **`_guard_context` 要认两种 resolve 产物**：`Repository.resolve` 对
+   `screen:X` 返回 `EffectiveScreen`（**没有 `.screen` 属性**，只有
+   id/marker/kind_hint）——直接摸 `eff.screen` 会让 `wait screen:X` 在
+   AttributeError 上炸（**写实现时真踩了**，测试当场抓到）。判别式沿用
+   `cli/pipeline._locator_for` 的 `hasattr(eff, "marker")`。
+6. **风险推导与 `cli/pipeline._prepare` 同式**：
+   `effective_risk(element=eff.risk, element_id=eff.id)`——不另立一套（F1）。
+   有 spy guard 的专测断言「metadata 的 `risk: HIGH` 确实进了 Guard」。
+
+### ⚠️ 两处必须说清的边界
+
+**① 不持有 `knowledge` / `budget`（对 plan Files 段的一处偏离）**：plan 把这两个
+列进了 `AgentToolkit` 的持有物，但**本任务没有任何工具消费它们**
+（`get_relevant_*` / `get_graph_neighbors` 归 Task 2.2 的 KnowledgeSources 装配；
+`budget` 是 LLM 调用配额，而工具层是确定性的、不调 LLM）。按「文档声称的能力必须
+有落点」的纪律**等有消费者时再加**，不留「已在生效」的假象（对照
+`GuardContext.data_class` 的处置）。已在模块 docstring 显式登记。
+
+**② `AgentToolkit` 在 M2+ 之前没有生产调用者**（与 `_check_autonomous_env` 同款，
+plan 的安排）：装配点（`cli/pipeline` 的 `deps` 或首个自主命令 `cmd_plan`）在
+**Task 2.4**。本任务交付的是工具层本身 + CI 门禁；端到端可达性由 Gate M2 的
+`mta plan` 提供。
+
+### CI 门禁（`test_tool_allowlist_gate.py`）——plan 执行注意事项 #2 的落点
+
+五道门禁 + 一条防空转：A 全集 = tier 表键集（防手抄第二份名单）／B 注册表键集 =
+全集／C 禁用名与**三张面**（全集、注册表、tier 表）都不相交／D tier 值域无
+PRODUCTION/CRITICAL（F2）／E 8 个禁用名在 `agents/**` 全包**只出现一次**且必须在
+`BANNED_TOOLS` 字面量里（AST 扫**非 docstring** 的字符串常量——文档里提到禁用名
+合法）／F 扫描范围自证（文件数与常量数下界 + `tools.py` 必须覆盖到）。
+
+**探针验证门禁会红**：往 `TOOL_ASSET_TIER` 加 `delete_testcase` → **4 条**同时红
+（A/B/C/E）；把 `tap` 标成 `PRODUCTION` → D 红。还原后全绿。
+
+### 实测
+
+- 全量 pytest **1412 passed**（Task 1.3 新增 **69**：行为 53 + 门禁 16；
+  上一轮基线 1343 + 69 = 1412）。
+- 两文件 `--collect-only`：53 / 16。
+- 全仓重复顶层定义体检：**零命中**。
+- 实现期由测试抓到的真 bug 一处：`EffectiveScreen` 没有 `.screen`
+  （`wait screen:X` 的 Guard 输入构造会 AttributeError）。

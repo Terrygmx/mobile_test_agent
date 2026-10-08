@@ -219,6 +219,12 @@ M1 基础与安全边界(2d) ─► M2 Planning(2d) ─► M3 Generation(3.5d) �
 >    `config/policy.yaml`，读不到 → 内置默认值）。**拍板后回填本节**。
 > 3. **调用顺序**：`cmd_plan` 的第一行过前置（`load_policy` → `_check_autonomous_env`），
 >    过了才做别的事——F7 是「启动时校验」，不是「跑一半才拦」。
+> 4. **`AgentToolkit` 的装配点**（Task 1.3 交付，尚未接线）：`guard` 必填，其余按
+>    工具需要注入——`executor` / `locator_for`（**用 `SessionPipeline._locator_for`
+>    那一份**，别在装配处再写一遍 `{"type","value"}` 转换）/ `repository` /
+>    `device_session`（`back` 走它）/ `wait_engine` / `assertion_engine` /
+>    `experience_store`，以及 **`agent_db` + `task_id`（BLOCK 的审计落点：不配就
+>    在第一次 BLOCK 时抛 `ToolkitAuditError`，不静默丢弃）**。
 
 **Objective:** 设计 12 节 CLI。
 
