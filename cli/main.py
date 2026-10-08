@@ -353,6 +353,54 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# --- P3 自主命令的公共前置（F7；设计 7.4） ----------------------------------
+
+# 自主命令全集（plan 第 12 节）。**单点**：Task 2.4（`mta plan`）起逐个接线时
+# 用本元组登记解析器、并在 `main` 里统一过 `_check_autonomous_env`——两处各写
+# 一份名单必然漂移。
+AUTONOMOUS_COMMANDS = ("plan", "generate", "explore", "diagnose", "agent")
+
+
+def _check_autonomous_env(policy, *, env_kind, command: str) -> None:
+    """自主命令的公共前置：**启动时**校验环境与总开关（F7 / 设计 §7.4）。
+
+    设计 §7.4 原文：「`production`: Autonomous Agent 整体不可用（policy.yaml
+    启动时校验，不是运行时才拦）」——所以这是**能不能启动**的判定，不是
+    「风险高就拦」。两条判据，任一不过即 `SystemExit`（消息含 `F7` 便于检索）：
+
+    1. `env_kind == production` → 拒，**且没有豁免 flag**；
+    2. `policy.autonomous.enabled is False` → 拒（连 sandbox 也拒）。
+
+    ⚠️ **与 `mta run --allow-production` 的区别**（别把两者混成一条规则）：
+    `run` 是 P1/P2 的**单次运行总闸**，允许在 production 下显式豁免跑
+    **已审核**的用例；自主命令是「在 production 下整体不存在」，故**不设**
+    豁免参数——本函数签名里没有、也不该有 `allow_production`。两者判据不同、
+    语义不同，是**两条规则**，不违反「同一概念只许一处实现」。
+
+    通过即返回 `None`（无返回值），由调用方继续；`env_kind` 复用 P1 的
+    `executor.guard.EnvKind`（字符串或枚举都收），不新建环境枚举。
+
+    调用点：Task 2.4 起各自主命令在 `cmd_*` 的第一行调用本函数（`policy` 由
+    `load_policy(args.policy)` 取得）——**不另写第二套环境校验**。
+    """
+    from executor.guard import EnvKind
+
+    kind = EnvKind(env_kind)
+    if kind is EnvKind.PRODUCTION:
+        raise SystemExit(
+            f"F7: `mta {command}` 是自主命令，production 环境下 Autonomous "
+            f"Agent 整体不可用（设计 7.4：环境就不允许启动，不是风险高才拦）。"
+            f"本命令**没有**豁免 flag——`mta run --allow-production` 是 P2 的"
+            f"单次运行总闸（只跑已审核用例），语义不同、不适用于自主命令。"
+            f"请在 sandbox 或 staging 下运行。")
+    if not policy.autonomous.enabled:
+        raise SystemExit(
+            f"F7: policy.yaml 的 `autonomous.enabled=false`，`mta {command}` "
+            f"被禁用（这是配置层面的整体开关，与 env.kind={kind.value} 无关）。"
+            f"把 `autonomous.enabled` 改回 `true` 后重试。")
+    return None
+
+
 def _resolve_app_build(args: argparse.Namespace) -> str:
     """本次 run 的 build id（12.5 / E7 的 `validated_builds` 用它）。
 

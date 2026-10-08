@@ -285,3 +285,78 @@ diff 模块（评审 §0 指出，未列为发现但一处即改）。
   报出文件与行号**。
 - 三处 store 的 `PRAGMA busy_timeout` 实测均为 **5000ms**，`sqlite3.connect` 的
   `timeout=` 均为 **5**。
+
+---
+
+## Task 1.2 完成记录（P3-02 policy.yaml + 启动校验 F7，2026-10-08）
+
+**Objective**：设计 §7.2/§7.4/§8.3/§10 —— 环境与预算约束集中一处，**启动时校验
+而不是运行时拦截**。
+
+### 交付
+
+- `config/policy.yaml`（**首次入库**）：`autonomous` / `exploration` / `escalation` /
+  `planner_weights` / `diagnosis_evidence_weights` / `evidence` 六段，值 = 设计初版值。
+- `agents/policy_config.py`（新）：`PolicyConfig`（pydantic，`extra=forbid` +
+  `frozen`）+ 三个真值源常量 + `load_policy(path)` + `PolicyConfigError`。
+- `cli/main.py`：`AUTONOMOUS_COMMANDS`（自主命令名单**单点**）+
+  `_check_autonomous_env(policy, *, env_kind, command)`（F7 公共前置）。
+- `agents/__init__.py`：导出 `load_policy` / `PolicyConfig` / `PolicyConfigError` /
+  `DEFAULT_POLICY_PATH`（与 models/storage 同款包门面）。
+- 测试：`tests/unit/test_policy_config.py`（**17 例**：TDD 起点 7 + 本任务补 10）、
+  `tests/fault_injection/test_p3_matrix_m1.py`（矩阵 #1/#4，**16 例**：TDD 起点 10 +
+  本任务补 6）。两文件合计 **33**（与全量 +33 对账）。
+
+### 关键决策
+
+1. **`load_policy` 的签名是 `(path)` 而不是 plan 里写的 `(args)`。** plan Task 1.2
+   的 Files 段写「`_check_autonomous_env(args)`：解析 env_kind（复用 `--env-kind`
+   既有语义）」——但先行的 TDD 测试（本任务的工作区起点）定的是
+   `_check_autonomous_env(policy, *, env_kind, command)`。**测试是契约**：把
+   「解析 args」与「判定」拆开，判定这一层才能脱离 argparse 单测（F13 精神），
+   而 `env_kind`/`command` 的来源由各命令在调用点解析（Task 2.4）。
+   **登记为对 plan 的一处偏离**。
+2. **`production` 一票否决且无豁免参数**：`mta run --allow-production` 是 P1/P2 的
+   **单次运行总闸**（允许在 production 跑**已审核**用例），自主命令是「在 production
+   下整体不存在」——**两条规则**，故本函数签名里没有也不该有 `allow_production`。
+   用 `inspect.signature` 把它钉成机械断言（`test_gate_has_no_exemption_parameter`）。
+   拒绝消息里**点名那个不适用**的 flag，否则读者会去找一个不存在的豁免参数。
+3. **`env_kind` 复用 P1 的 `executor.guard.EnvKind`**（字符串与枚举都收）——F7 原文
+   就是「环境隔离复用 P1 `env.kind`」，不新建环境枚举。
+4. **权重表校验「键集完全一致」**：`diagnosis_evidence_weights` / `planner_weights`
+   是**整表替换**（YAML 不做深合并），少写一个键不会立刻报错，而会一路走到
+   `score_evidence` / `priority_score` 里变成运行时 `KeyError`（离现场很远）。
+   既然 F7 的精神是「启动时校验」，就挡在加载期（漏/多都点名）。
+5. **`PLANNER_WEIGHTS` 的数值不在设计里**：设计 §5.2 只说「权重是初版，需在真实
+   数据上校准」，**没给数**。plan 要求本文件先落一段（M2 初版），故取一组可解释的
+   初值（impact 3 / history 2 / risk 5）并在 yaml 与模块 docstring 里**显式标注
+   「设计未给数值」**——不假装精确（沿用 P2 验证阈值的态度）。校准后回填设计。
+6. **配置文件缺失 = 全默认值，不是错误**（矩阵 #4 的回归底线）：policy.yaml 是 P3
+   新增层，P2 的既有命令不该因为它不在而行为改变。配套加了
+   `test_shipped_policy_yaml_equals_builtin_defaults`——入库的 yaml 与内置默认值
+   **逐字段相等**，否则「文件缺失」与「文件在」会给出两套配置，而「行为不变」的
+   承诺只在其中一套下成立（以后校准初版值时**两处一起改**，本测试会拦住只改一处）。
+
+### ⚠️ 一处必须说清的边界：`_check_autonomous_env` 目前**没有生产调用者**
+
+自主命令（`plan`/`generate`/`explore`/`diagnose`/`agent`）在 **M2+ 逐个接线**（plan
+第 12 节），Task 2.4（`mta plan`）是第一个。所以本任务交付的是**公共前置本身**，
+它在 Task 2.4 之前只有测试调用者——这是 **plan 的安排，不是遗漏**。
+
+为免它变成「写个没人调的函数就当已覆盖」（review_p2_task55 P3-4 的教训），做了两件
+事：① `AUTONOMOUS_COMMANDS` 作为**单点名单**（接线时注册解析器与过前置都从它取）；
+② 加了守卫 `test_every_wired_autonomous_command_passes_the_gate`——它扫描
+`cli/main.py` 的 `cmd_<name>`，只要名字落在 `AUTONOMOUS_COMMANDS` 里就要求函数体里
+出现 `_check_autonomous_env`。**这条守卫现在空转通过**（`cmd_plan` 还不存在），
+Task 2.4 加 `cmd_plan` 的那天它开始工作。
+
+### 实测
+
+- 全量 pytest **1319 passed**（Task 1.2 新增 33；上一轮基线 1286 + 33 = 1319）。
+  ⚠️ **本任务让全量 pytest 重新变绿**：此前那 2 个在飞的 TDD 红文件（收集期
+  `ImportError`）现在有了实现，**跑全量不再需要 `--ignore`**——Gate M1 的「全量回归
+  绿」这条判据从此可以取得。
+- 真机路径探针（模拟 Task 2.4 的调用）：`production` × 五个命令名 → 全部拒绝且
+  消息含 `F7`；`staging`/`sandbox` × 五个命令名 → 全部通过；`policy.yaml` 读到的
+  值 = `exploration{100,600,20,3}` / `planner_weights{3,2,5}` / `threshold=10`。
+- 全仓重复顶层定义体检：**零命中**。

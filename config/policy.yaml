@@ -1,0 +1,49 @@
+# config/policy.yaml — P3 环境与预算约束（设计 §7.2 / §7.4 / §8.3；Task 1.2 / P3-02）
+#
+# 这是**启动期**校验的唯一配置源：自主命令（plan/generate/explore/diagnose/agent）
+# 动手之前先过 `agents.policy_config.load_policy` + `cli.main._check_autonomous_env`，
+# 过了才继续（F7：「启动时校验，不是运行时才拦」）。
+#
+# 加载器对**未知键 / 错型 / 负预算** fail-loud——拼错的键不会静默生效。
+# 本文件缺失时全部回落到内置默认值（= 下面这些值），P2 的既有命令行为不变。
+#
+# 值都是**初版**，需在真实运行后校准（设计原文如此，不假装精确）。
+
+autonomous:
+  # F7：false = 自主能力整体禁用（连 sandbox 也拒）。改这一行之前请想清楚
+  # ——它是「环境/配置就不允许」，不是「风险高就拦」。
+  enabled: true
+
+# 设计 §7.2（F11）：每一步行动的四维预算，超限即 *_BUDGET_EXCEEDED 并停止，
+# 不自动放宽重试。初版值，需在真实运行后校准。
+exploration:
+  max_steps: 100
+  max_duration_seconds: 600
+  max_llm_calls: 20
+  max_repeated_state: 3        # 复用 P2 screen_fingerprint 判定「重复状态」（F8）
+
+# 设计 §9.2：ESCALATED 的触发条件之一 = 连续 N 次决策被 Guard 拦截。
+escalation:
+  guard_blocks_before_escalate: 3
+
+# 设计 §5.2：priority_score 的三个分量权重。⚠️ **设计没给数值**（只说「初版，
+# 需在真实数据上校准」）——这里取一组可解释的初值，Task 2.2 消费，校准后回填设计。
+planner_weights:
+  impact: 3
+  history: 2
+  risk: 5
+
+# 设计 §8.3 原文（初版，需用真实 Bug 数据校准，不是精确值）。
+# ⚠️ 整表替换、不做深合并：键集必须与 `DIAGNOSIS_EVIDENCE_WEIGHTS` 完全一致，
+# 漏一个键会在加载期被点名（而不是等到 score_evidence 里变成 KeyError）。
+diagnosis_evidence_weights:
+  crash_detected: 5
+  reproducible_3_times: 5
+  source_change_correlated: 3
+  same_issue_multiple_tests: 3
+  backend_evidence: 2
+  llm_hypothesis_only: 1
+
+evidence:
+  # F10：证据分 ≥ 阈值才**建议**归因（最终仍由人工确认），否则保持 UNTRIAGED。
+  attribution_threshold: 10

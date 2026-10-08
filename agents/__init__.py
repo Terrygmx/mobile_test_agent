@@ -23,6 +23,12 @@ from agents.models import (
     AgentTraceEntry,
     AssetTier,
 )
+from agents.policy_config import (
+    DEFAULT_POLICY_PATH,
+    PolicyConfig,
+    PolicyConfigError,
+    load_policy,
+)
 from agents.storage import (
     AGENT_MIGRATIONS_DIR,
     AGENT_SCHEMA_VERSION,
@@ -35,4 +41,6 @@ __all__ = [
     "AgentState", "AgentTaskState", "AgentTask", "AgentTraceEntry",
     "SQLiteAgentStore", "AGENT_MIGRATIONS_DIR", "AGENT_SCHEMA_VERSION",
     "DEFAULT_AGENT_DB",
+    # policy（Task 1.2 / P3-02）
+    "DEFAULT_POLICY_PATH", "PolicyConfig", "PolicyConfigError", "load_policy",
 ]
