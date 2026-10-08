@@ -588,3 +588,84 @@ PRODUCTION/CRITICAL（F2）／E 8 个禁用名在 `agents/**` 全包**只出现�
 - 全仓重复顶层定义体检：**零命中**。
 - 实现期由测试抓到的真 bug 一处：`EffectiveScreen` 没有 `.screen`
   （`wait screen:X` 的 Guard 输入构造会 AttributeError）。
+
+---
+
+## Task 1.3 评审修订记录（review_p3_task13 收口，2026-10-08）
+
+评审「有条件通过 — 1×P2 + 3×P3」，上一轮 `a01fb35` 的 **5/5 全清**，功能声称逐项对账通过。
+唯一 P2 出在**「Guard 到底跑不跑」的那张表**（`GUARDED_TOOLS`）**没有任何与设计原文对账的
+钉子**。
+
+### P2-1 `GUARDED_TOOLS` 是手抄且无逐字钉 —— 等长替换后 1412 条全绿
+
+- 症状：`GUARDED_TOOLS` 是手写的 10 个名字字面量，它决定 `call` 里
+  `if tool in GUARDED_TOOLS` 那一行**是否构造 `GuardContext` 并调 `guard.check`**
+  ——「Guard 到底跑不跑」完全由它决定。而包级 docstring 把它写成**包级纪律**
+  （「任何会碰 App 的动作都经 … → Executor+Guard」）。
+- 评审探针（A/B，真改文件）：把 `"assert_text"` 换成只读的 `"get_logs"`
+  （**等长 10**、仍是全集子集）→ **门禁 + 工具层 69 passed、全量 1412 passed，
+  一条都没红**。此时 ① `assert_text`（带 target、风险由元素推导）**不再过 Guard**；
+  ② `get_logs`（设计归「只读」组）**反而过 Guard**，与设计 §10.1 的分组、也与模块
+  docstring 自己的边界声明矛盾。
+- 为什么是 P2：这是**安全不变量的声称**却**没有落点**——正是 `MEMORY.md` 记了两次的
+  那一课（`--agent-db` 一次、`_check_autonomous_env` 的 `args.policy` 一次）的**第三次**；
+  修法方向明确、约 8 行；而且**同一文件里对「禁用名」做了这件事、对「Guard 名单」没做**
+  ——防住了「给 Agent 加上危险工具」，没防住「**让 Guard 不再跑**」。
+- 修法（三处）：
+  1. 门禁文件加 `DESIGN_10_1_GUARDED`（设计 §10.1 中间组**逐字重打**，与
+     `DESIGN_10_1_BANNED` 同一手法、**互不反推**）+ `test_guarded_set_matches_the_design_group_verbatim`；
+  2. 补**行为面**的 `test_every_guarded_tool_actually_calls_the_guard`：名单里每个工具
+     都必须真的触发 `guard.check`（静态对账挡「名单被改」，行为面挡「`call` 里的
+     `if tool in GUARDED_TOOLS` 被挪走/短路」——两者缺一 Guard 都可能不跑）；
+  3. 模块 docstring 的「三张表（键集都是**派生**，不是手抄）」措辞改掉——
+     `GUARDED_TOOLS` / `BANNED_TOOLS` 是**手抄设计原文**（设计是散文，抄合理，但
+     **手抄就必须有逐字对账的钉子**）。
+- **探针复现**：等长替换后**全量 1 failed**（`test_guarded_set_matches_the_design_group_verbatim`），
+  修复前是 1412 passed。
+
+### P3-1 失败分类有**两个落点**，docstring 只说了外层；内层词汇有三套
+
+- 症状：`wait` 超时 / `assert_*` 不过这两类最常发生的失败，分类在
+  `value["failure_type"]` 而不是 `ToolResult.failure_type`；而 `ToolResult.failure_type`
+  的 docstring 写的是「与 `steps.failure_type` 对齐」。同时内层词汇三套：
+  `assert_*` 用 `passed` / `wait` 用 `satisfied` / `create_promotion_proposal` 用 `ok`
+  （后者还与**外层** `ToolResult.ok` 撞词——探针：外层 `ok=True` 而 `value={'ok': False,…}`）。
+- 修法：① `ToolResult` 加**只读属性** `step_failure_type`（两处落点合并成一个读取口，
+  外层优先、两者互斥所以 `or` 不掩盖任何一类）+ 类 docstring 画出「哪一类在哪一层」的表；
+  ② 内层词汇**统一成 `passed`**（`wait` 的 `satisfied` 与 `create_promotion_proposal`
+  的 `ok` 一并改）——三个近义词并存时调用方总有一个会读错；③ 模块 docstring 加
+  「判定类工具的 `value` 词汇（一套，不是三套）」小节。
+- 补测：`test_step_failure_type_merges_both_places`（外层 / 内层 / 成功路径三种）。
+
+### P3-2 `failure_type` 由**异常消息字符串**派生
+
+- 症状：`"failure_type": str(e).split(":", 1)[0]` —— 能工作，但**结论依赖另一个模块的
+  消息格式**（`executor/assertion.py` 的文案）。已有一层保护（测试用真异常类），
+  不是空转，但分类是结构信息，不该由文案承担。
+- 修法：类 → 名映射。⚠️ 实现时先写成**精确类查表**，结果被自己新加的测试当场抓到
+  ——`except` 捕的是**子类**，精确查表会让子类掉进兜底名（**分类口径与捕获口径不一致**）。
+  改成 `isinstance` 查表。测试 `test_assert_failure_type_does_not_depend_on_the_exception_message`
+  用一个**改了文案的异常子类**构造，断言分类仍正确。
+
+### P3-3 一处断言过宽
+
+- `pytest.raises(Exception)` → `pytest.raises(ValueError)`（pydantic 的
+  `ValidationError` 是它的子类）。原写法会把 `ToolDependencyError` / `TypeError`
+  之类**无关**异常也算通过，与 docstring 的「非法值必须炸」不等义。
+
+### 小观察（评审标「不建议单独立项」）—— 三处已改，两处登记
+
+| 观察 | 处置 |
+|---|---|
+| 门禁 C 的「三张面」实际是 2 个独立面（`ALLOWED_TOOLS` 派生自 `TOOL_ASSET_TIER`，门禁 A 已钉住相等） | ✅ 措辞改掉（说明第三条是**冗余**而非第三张面，留着便宜） |
+| 门禁 F 的自证下界偏松（`>=4` / `>50`，实测 5 / 393） | ✅ 按实测收紧到 `>=5` / `>300`，并**逐一列出必须覆盖的 5 个文件** |
+| `screenshot_dir` 默认 `"out/screenshots"` 是 CWD 相对 | ✅ 写进类 docstring（与 `DEFAULT_POLICY_PATH` / `suites` / `out/trace.db` 同款） |
+| 门禁 E 的扫描范围是 `agents/**`，`cli/` 等包看不见 | **登记**：当前工具层只在 `agents/`，可接受；**M2 装配 `AgentToolkit` 时复看一眼** |
+| `_tool_*` 方法是公开可访问属性（`tk._tool_tap(...)` 会绕过 Guard） | **登记**：当前威胁模型下没问题（Agent 是 LLM，只能经 `call`）；**M2 起若有 Python 侧调用者需重新评估**（拆私有内部类 / 名字改写） |
+
+### 实测
+
+- 全量 pytest **1417 passed**（本轮 +5：工具层 53→55、门禁 16→19；1412 + 5 = 1417）。
+- **P2-1 探针复现**：等长替换 `assert_text` → `get_logs` → 全量 **1 failed**（修复前 1412 全绿）。
+- 全仓重复顶层定义体检：**零命中**。

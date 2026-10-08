@@ -177,7 +177,6 @@ def test_wired_and_not_wired_partition_the_allowlist():
 
 def test_guarded_tools_are_a_subset_of_the_allowlist():
     assert GUARDED_TOOLS <= ALLOWED_TOOLS
-    assert len(GUARDED_TOOLS) == 10
 
 
 # --- 2. 被禁工具（矩阵 #2 的行为面） -----------------------------------------
@@ -400,15 +399,16 @@ def test_wait_timeout_is_a_result_not_an_exception(repo):
     """等待超时是**观测结果**（Agent 要能把「没等到」当成信息）。"""
     tk = _toolkit(repo, wait_engine=_FakeWait(raise_timeout=True))
     r = tk.call("wait", target="screen:HomeView", condition="active")
-    assert r.ok and r.value["satisfied"] is False
+    assert r.ok and r.value["passed"] is False
     assert r.value["failure_type"] == "WAIT_TIMEOUT"
+    assert r.step_failure_type == "WAIT_TIMEOUT", "内层结论由 step_failure_type 统一读"
 
 
 def test_wait_satisfied(repo):
     eng = _FakeWait()
     r = _toolkit(repo, wait_engine=eng).call(
         "wait", target="screen:HomeView", condition="active")
-    assert r.value["satisfied"] is True
+    assert r.value["passed"] is True
     assert eng.specs[0].condition == "active"
     assert eng.specs[0].target.id == "HomeView"
 
@@ -439,6 +439,62 @@ def test_assert_text_maps_tool_vocabulary_to_6_2_conditions(repo):
     with pytest.raises(ValueError, match="condition"):
         tk.call("assert_text", target="HomeView.login_button", expected="x",
                 condition="bogus")
+
+
+# --- 失败分类的两个落点（review_p3_task13 P3-1） ------------------------------
+
+
+def test_step_failure_type_merges_both_places(repo):
+    """`step_failure_type` 是**唯一读取口**：外层「动作没做成」+ 内层「判定结论」。
+
+    两处互斥（见 `ToolResult` docstring 的表），所以 `or` 不掩盖任何一类。
+    M2 的 Agent 循环把工具结论映射进 `agent_trace` 时读这个属性即可——不必让
+    每个调用方都记得「两处查找」。
+    """
+    # 外层：元素找不到
+    from executor.executor import ElementNotFound
+    r = _toolkit(repo, ex=_FindExec(find_script=[ElementNotFound("x")])).call(
+        "tap", target="HomeView.login_button")
+    assert r.failure_type == "ELEMENT_NOT_FOUND"
+    assert r.value is None
+    assert r.step_failure_type == "ELEMENT_NOT_FOUND"
+
+    # 内层：断言不过
+    r2 = _toolkit(repo, assertion_engine=_FakeAssert("mismatch")).call(
+        "assert_exists", target="HomeView.login_button")
+    assert r2.failure_type is None
+    assert r2.value["failure_type"] == "ASSERTION_VALUE_MISMATCH"
+    assert r2.step_failure_type == "ASSERTION_VALUE_MISMATCH"
+
+    # 成功路径：两处都没有
+    r3 = _toolkit(repo).call("swipe", direction="up")
+    assert r3.step_failure_type is None
+
+
+def test_assert_failure_type_does_not_depend_on_the_exception_message(repo):
+    """分类来自**异常类**，不是消息文案（review_p3_task13 P3-2）。
+
+    用真异常类构造一个**消息被改过**的实例：分类仍必须正确——`str(e).split(":")[0]`
+    那版会在改文案时给出错分类（结论不该由另一个模块的文案格式承担）。
+    """
+    from executor.assertion import AssertionValueMismatch, AssertionResult
+
+    class _Reworded(AssertionValueMismatch):
+        """模拟上游改了文案（甚至去掉前缀）。"""
+
+        def __init__(self, result):
+            Exception.__init__(self, "值不符（文案改了）")
+            self.result = result
+
+    class _Engine:
+        def check(self, spec):
+            res = AssertionResult(condition=spec.condition, target="t",
+                                  expected="a", actual="b", passed=False)
+            raise _Reworded(res)
+
+    r = _toolkit(repo, assertion_engine=_Engine()).call(
+        "assert_exists", target="HomeView.login_button")
+    assert r.value["failure_type"] == "ASSERTION_VALUE_MISMATCH"
 
 
 def test_screenshot_writes_under_the_configured_dir(repo, tmp_path):
@@ -495,8 +551,11 @@ def test_bad_arguments_raise_instead_of_becoming_a_result(repo):
     with pytest.raises(ValueError, match="condition"):
         tk.call("assert_text", target="HomeView.login_button", expected="x",
                 condition="bogus")
-    # `WaitSpec` 的 condition 也是 Literal——非法值必须炸，不是返回 ok=False
-    with pytest.raises(Exception):
+    # `WaitSpec` 的 condition 也是 Literal——非法值必须**炸**，不是返回 ok=False。
+    # 断言收紧成 ValueError（pydantic 的 ValidationError 是它的子类）：
+    # `pytest.raises(Exception)` 会把 ToolDependencyError/TypeError 之类无关异常
+    # 也算通过，与 docstring 的意图不等义（review_p3_task13 P3-3）。
+    with pytest.raises(ValueError):
         _toolkit(repo, wait_engine=_FakeWait()).call(
             "wait", target="HomeView.login_button", condition="bogus")
 
@@ -525,12 +584,12 @@ def test_create_promotion_proposal_delegates_to_promoter(tmp_path):
 
     # CANDIDATE 非 VERIFIED → 9.5 需要显式人工路径；不给就如实回报
     r1 = tk.call("create_promotion_proposal", experience_id=exp.experience_id)
-    assert r1.value["ok"] is False
+    assert r1.value["passed"] is False
     assert r1.value["failure_type"] == "PROMOTION_REJECTED"
 
     r2 = tk.call("create_promotion_proposal", experience_id=exp.experience_id,
                  manual_override=True, reason="人工判断", reviewer="tester")
-    assert r2.value["ok"] is True and r2.value["proposal_id"]
+    assert r2.value["passed"] is True and r2.value["proposal_id"]
 
     r3 = tk.call("create_promotion_proposal", experience_id="ghost")
     assert r3.value["failure_type"] == "EXPERIENCE_NOT_FOUND"

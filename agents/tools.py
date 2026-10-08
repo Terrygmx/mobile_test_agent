@@ -16,13 +16,19 @@ Agent（Planner/Explorer/Diagnosis/Subagent）
   既有原语（Executor / WaitEngine / AssertionEngine / Repository / promoter）
 ```
 
-## 三张表（键集都是「单一真值源」的派生，不是手抄）
+## 三张表（两种来源，别混为一谈）
 
 | 表 | 内容 | 来源 |
 |---|---|---|
-| `ALLOWED_TOOLS` | 工具全集 **22** | `frozenset(TOOL_ASSET_TIER)`（Task 1.1 的定档） |
-| `GUARDED_TOOLS` | 设计 §10.1 中间组「执行（仍经 Guard）」10 个 | 设计原文分组 |
-| `BANNED_TOOLS` | 设计 §10.1 末句的 8 个禁用名 | 设计原文（CI 门禁逐一断言不存在） |
+| `ALLOWED_TOOLS` | 工具全集 **22** | **派生**：`frozenset(TOOL_ASSET_TIER)`（Task 1.1 的定档） |
+| `GUARDED_TOOLS` | 设计 §10.1 中间组「执行（仍经 Guard）」10 个 | **手抄设计原文**（散文，只能抄） |
+| `BANNED_TOOLS` | 设计 §10.1 末句的 8 个禁用名 | **手抄设计原文** |
+
+后两张是手抄——设计是散文，抄本身合理；但**手抄就必须有逐字对账的钉子**，
+否则「换掉一个」无声无息（`GUARDED_TOOLS` 决定 **Guard 到底跑不跑**：把
+`assert_text` 换成只读的 `get_logs` 是等长替换，`ALLOWED_TOOLS` 与长度断言都
+照样成立）。两张表的逐字对账在 `tests/unit/test_tool_allowlist_gate.py`
+（`DESIGN_10_1_GUARDED` / `DESIGN_10_1_BANNED`，**各打一遍、互不反推**）。
 
 `_TOOL_METHODS` 是**注册表**：键集必须 == `ALLOWED_TOOLS`（测试钉住）。注册表
 里的工具若实现未接线，走 `NOT_WIRED` 明确报错——**不静默返回空结果**。
@@ -49,8 +55,27 @@ Agent（Planner/Explorer/Diagnosis/Subagent）
   的职责就是「观测并决定」，用异常表达预期结果会逼调用方写 except 流程。
 - **异常**只留给**配置/编程错误**：`ToolViolation`（根本不是工具）、
   `ToolNotWired`（注册了但没实现）、`ToolDependencyError`（依赖没注入）、
-  `ToolkitAuditError`（BLOCK 却无法留痕）。
+  `ToolkitAuditError`（BLOCK 却无法留痕），以及 `ValueError`/`TypeError`（坏参数）。
 - **`InfraError` 照原样上抛**（设备故障不是测试结果——与 `run_step` 同款）。
+
+### ⚠️ 失败分类有**两个落点**，读的时候走 `step_failure_type`
+
+| 情形 | `ToolResult.failure_type` | `value["failure_type"]` |
+|---|---|---|
+| Guard 拦下 / 元素找不到 / 歧义 / 依赖缺失 | **有值** | 无 |
+| `wait` 超时、`assert_*` 不过 | `None` | **有值** |
+
+「动作没做成」的失败在**外层**，「判定类工具得出的结论」在**内层**（`wait` /
+`assert_*` 的失败是**观测结果**，不是调用失败）。所以映射到 `agent_trace` /
+与 `steps.failure_type` 对账时，**读 `ToolResult.step_failure_type`**——它把两处
+合并成一个读取口，不必让每个调用方都记得「两处查找」。
+
+### 判定类工具的 `value` 词汇（一套，不是三套）
+
+有判定的工具在 `value` 里放 **`passed: bool`**：`assert_*`（断言是否通过）、
+`wait`（条件是否满足）、`create_promotion_proposal`（是否通过 9.5/E5 的红线）。
+`failure_type` 与它同行出现——**不要**在内层再造 `ok` / `satisfied` 等别名
+（三个近义词并存时，调用方总有一个会读错）。
 """
 from __future__ import annotations
 
@@ -177,9 +202,10 @@ class ToolResult:
       `value` 里）——见模块 docstring 的「返回值的分工」。
     - `guard`：`None` = 本工具不经 Guard（只读/候选类）；`"ALLOW"` / `"BLOCK"`
       = 执行类工具的 Guard 结论。
-    - `failure_type`：与 P1 同名的失败分类（`ELEMENT_NOT_FOUND` /
-      `SECURITY_BLOCKED` / `ASSERTION_VALUE_MISMATCH` / `WAIT_TIMEOUT` …），
-      便于与 trace 的 `steps.failure_type` 对齐。
+    - `failure_type`：**只有「动作没做成」类失败**在这里（与 P1 同名：
+      `ELEMENT_NOT_FOUND` / `AMBIGUOUS_ELEMENT` / `SECURITY_BLOCKED` …）。
+      判定类工具（`wait` / `assert_*`）的结论在 `value["failure_type"]`——
+      **要两处合并请读 `step_failure_type`**，别自己记得「两处查找」。
     """
 
     tool: str
@@ -191,6 +217,20 @@ class ToolResult:
     error: str | None = None
     blocked_reason: str | None = None
     latency_ms: float = 0.0
+
+    @property
+    def step_failure_type(self) -> str | None:
+        """与 `steps.failure_type` 对齐的**唯一读取口**（两处落点在此合并）。
+
+        外层的「动作没做成」优先，其次内层的「判定结论」；两者互斥（见类
+        docstring 的表），所以 `or` 不会掩盖任何一类。M2 的 Agent 循环把工具
+        结论映射进 `agent_trace` 时读这个属性即可。
+        """
+        if self.failure_type is not None:
+            return self.failure_type
+        if isinstance(self.value, dict):
+            return self.value.get("failure_type")
+        return None
 
 
 # --- 工具层 -------------------------------------------------------------------
@@ -213,6 +253,9 @@ class AgentToolkit:
     | `assertion_engine` | `assert_exists` / `assert_text` |
     | `experience_store` | `create_promotion_proposal` |
     | `agent_db` + `task_id` | **BLOCK 留痕**（缺失则 `ToolkitAuditError`） |
+
+    ⚠️ `screenshot_dir` 默认 `"out/screenshots"` 是**相对 CWD**——与
+    `DEFAULT_POLICY_PATH` / `suites` / `out/trace.db` 同款（本项目 P1 起的约定）。
     """
 
     def __init__(self, *, guard, executor=None, locator_for=None,
@@ -454,7 +497,11 @@ class AgentToolkit:
                    expected=None, timeout: float | None = None,
                    **kw) -> dict:
         """等待条件成立。**超时是结果不是异常**（Agent 要能把「没等到」当成
-        观测）；`failure_type=WAIT_TIMEOUT` 与 P1 的等待超时同域。"""
+        观测）；`failure_type=WAIT_TIMEOUT` 与 P1 的等待超时同域。
+
+        判定放在 `value["passed"]`（判定类工具的统一词汇，见模块 docstring）——
+        **不另造 `satisfied`**：三个近义词并存时调用方总有一个会读错。
+        """
         self._need(wait_engine=self.wait_engine)
         from executor.wait import WaitTimeout
         from testcase.schema import WaitSpec
@@ -463,9 +510,9 @@ class AgentToolkit:
         try:
             self.wait_engine.wait_for(spec)
         except WaitTimeout as e:
-            return {"target": target, "condition": condition, "satisfied": False,
+            return {"target": target, "condition": condition, "passed": False,
                     "failure_type": "WAIT_TIMEOUT", "error": str(e)}
-        return {"target": target, "condition": condition, "satisfied": True}
+        return {"target": target, "condition": condition, "passed": True}
 
     def _tool_assert_exists(self, *, target, **kw) -> dict:
         return self._assert(target=target, condition="exists")
@@ -496,6 +543,14 @@ class AgentToolkit:
         from executor.assertion import (AssertionTargetDrift,
                                         AssertionValueMismatch)
         from testcase.schema import AssertionSpec
+        # 类 → 失败分类（review_p3_task13 P3-2：**不解析异常消息**
+        # `str(e).split(":")[0]`——分类是结构信息，不该由另一个模块的文案格式
+        # 承担）。按 `isinstance` 查而不是精确类：上面的 `except` 本来就捕子类，
+        # 分类若只认精确类，子类会掉进兜底名（分类与捕获口径不一致）。
+        failure_types = (
+            (AssertionValueMismatch, "ASSERTION_VALUE_MISMATCH"),
+            (AssertionTargetDrift, "ASSERTION_TARGET_DRIFT"),
+        )
         spec = AssertionSpec(target=target, condition=condition,
                              expected=expected, timeout=timeout)
         try:
@@ -505,7 +560,11 @@ class AgentToolkit:
             return {"passed": False, "condition": r.condition,
                     "target": r.target, "expected": r.expected,
                     "actual": r.actual,
-                    "failure_type": str(e).split(":", 1)[0], "error": str(e)}
+                    "failure_type": next(
+                        (name for cls, name in failure_types
+                         if isinstance(e, cls)),
+                        f"ASSERTION_{type(e).__name__}"),
+                    "error": str(e)}
         return {"passed": True, "condition": res.condition,
                 "target": res.target, "actual": res.actual}
 
@@ -546,12 +605,16 @@ class AgentToolkit:
 
         只落 proposal 表、**不写文件**（9.3 两段式的第一段）——所以它不经
         Guard（不碰 App），但它的产出必须由人工 approve 才生效。
+
+        判定放在 `value["passed"]`（与 `assert_*` / `wait` 同词汇；**不是
+        `ok`**——内层再造一个 `ok` 会与外层 `ToolResult.ok`（「调用完成了吗」）
+        撞词，review_p3_task13 P3-1）。
         """
         self._need(experience_store=self.experience_store)
         from experience.promoter import generate_proposal
         exp = self.experience_store.get_experience(experience_id)
         if exp is None:
-            return {"ok": False, "failure_type": "EXPERIENCE_NOT_FOUND",
+            return {"passed": False, "failure_type": "EXPERIENCE_NOT_FOUND",
                     "experience_id": experience_id}
         try:
             proposal = generate_proposal(
@@ -561,7 +624,7 @@ class AgentToolkit:
         except ValueError as e:
             # 9.5 / E5 的红线（非 VERIFIED 需显式 override、REJECTED 终态…）
             # → 如实回报，不让它变成异常流程
-            return {"ok": False, "failure_type": "PROMOTION_REJECTED",
+            return {"passed": False, "failure_type": "PROMOTION_REJECTED",
                     "experience_id": experience_id, "error": str(e)}
-        return {"ok": True, "proposal_id": proposal.proposal_id,
+        return {"passed": True, "proposal_id": proposal.proposal_id,
                 "experience_id": experience_id}
