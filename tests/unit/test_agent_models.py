@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+from enum import Enum
+
 import pytest
 
 from agents.models import (
@@ -82,8 +84,14 @@ def test_agent_states_complete():
     assert {s.value for s in AgentState} == {
         "IDLE", "PLANNING", "EXECUTING", "OBSERVING", "DECIDING",
         "VERIFYING", "ANALYZING", "RECOVERING", "ESCALATED"}
-    # AgentTaskState 是同域别名常量（plan Task 1.1 命名），防两套词表
-    assert AgentTaskState.IDLE is AgentState.IDLE
+    # AgentTaskState 是**真别名**（同一个 Enum 对象）——不是「名字像 Enum 的
+    # 普通类」。后者（`class AgentTaskState: IDLE = AgentState.IDLE`）会让
+    # `issubclass(..., Enum)` 为 False、不可迭代、构造抛 TypeError，于是很容易
+    # 被写成类型标注 `state: AgentTaskState`（review_p3_task11 P3-4）。
+    assert AgentTaskState is AgentState
+    assert issubclass(AgentTaskState, Enum)
+    assert AgentTaskState("IDLE") is AgentState.IDLE
+    assert [s.value for s in AgentTaskState] == [s.value for s in AgentState]
 
 
 def test_agent_task_defaults_and_strictness():

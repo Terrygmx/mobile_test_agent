@@ -7,6 +7,26 @@
 -- 独立库（out/agent.db，CLI --agent-db）延续 P2「按写者边界分库」：
 -- agent.db = 可变状态库（单写者 agents/storage.py）；trace.db 仍是
 -- append-only 流水库，职责不混（plan 执行注意事项 #5）。
+--
+-- ## 与设计 §11 的差异（全部是加固，无字段删减；review_p3_task11 P3-5）
+--
+-- | 位置 | 设计 §11 | 本文件 |
+-- |---|---|---|
+-- | agent_tasks.agent_type | 可空 | `NOT NULL` |
+-- | agent_tasks.goal | 可空 | `NOT NULL` |
+-- | agent_tasks.constraints_json | 可空 | `NOT NULL DEFAULT '{}'` |
+-- | agent_tasks.state | 可空 | `NOT NULL DEFAULT 'IDLE'` + `CHECK` 词表 |
+-- | agent_trace.llm_calls_used | 可空 | `NOT NULL DEFAULT 0` |
+-- | agent_trace.created_at | 可空 | `NOT NULL` |
+-- | test_plans.created_at | 可空 | `NOT NULL` |
+-- | test_plans.tasks_json | 可空 | `NOT NULL DEFAULT '[]'` |
+-- | 索引 | 无 | `idx_agent_trace_task` / `idx_test_plans_created` |
+--
+-- 其余字段与设计逐字一致。`state` 的 `CHECK` 词表与 `AgentState` 枚举是同一
+-- 词表的**两处字面量**，一致性由 `tests/unit/test_agent_store.py::
+-- test_state_check_constraint_matches_enum` 钉住（加第 10 态时忘改这里会红）。
+-- `start_time` / `end_time` / `outcome` 保持可空——「未开始 / 未结束 / 未定论」
+-- 都是合法状态，用空串表示会让「没有」与「空值」混为一谈。
 
 CREATE TABLE IF NOT EXISTS agent_tasks (
     task_id TEXT PRIMARY KEY,

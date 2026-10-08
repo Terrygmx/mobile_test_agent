@@ -171,3 +171,102 @@ def test_uninitialized_trace_db_is_domain_error(tmp_path):
         ks.graph_query(APP)
     with pytest.raises(ValueError, match="trace 库不可读"):
         ks.trace_history({})
+
+
+# --- review_p3_task11 P2-1：app_build 过滤必须**真的生效** -------------------
+#
+# 漏网原因：原有测试只覆盖 `{}` / `limit` / 未知键，而单 build 库下写死的
+# 过滤键「恰好返回正确数据」——死变量被掩盖。双 build 库才是 `graph diff` /
+# build-to-build 的日常形态。
+
+
+def _run_into(store, sdir, *, build: str, run_id: str) -> None:
+    """往同一个 trace 库里再跑一次（真管线装配，与 `trace_db` fixture 同款）。"""
+    from cli.pipeline import SessionPipeline, PipelineDeps
+    from executor.guard import EnvKind, Guard
+    from runner.lifecycle import Lifecycle
+    from runner.runner import StepRunner
+    from tests.fault_injection.fi_support import FakeDS, FakeExecutor
+
+    store.start_run(run_id, app_bundle_id=APP, app_build=build)
+    pipe = SessionPipeline(suites_root=sdir, store=store, recovery=None,
+                           app_id=APP, app_build=build)
+    pipe.deps = PipelineDeps(env=None, repo=None)
+    pipe._step_runner = StepRunner(FakeExecutor(), FakeDS(),
+                                   Guard(EnvKind.SANDBOX))
+    pipe._lifecycle = Lifecycle(store=store)
+    run = pipe.run_all(pipe.discover(), run_id=run_id)
+    assert run.results and run.results[0].status == "PASS"
+
+
+def _two_build_trace(tmp_path):
+    """双 build 的 trace 库：1025 跑 2 步用例、1026 跑 3 步用例。
+
+    两个 build 的 **steps 数不同**，所以「过滤生效」与「静默返回另一个 build
+    的数据」在断言上分得开——评审探针正是靠这个区分的。
+    """
+    from tracer.storage import TraceStore
+
+    store = TraceStore(tmp_path / "trace_two.db")
+    head = ('schema_version: "0.2"\nid: k_case\nname: k\nsuite: smoke\n'
+            "steps:\n  - action: launch_app\n"
+            "  - wait_for:\n      target: screen:HomeView\n"
+            "      condition: active\n      timeout: 5\n")
+    sdir_a = tmp_path / "suites_a"
+    sdir_a.mkdir()
+    (sdir_a / "k.yaml").write_text(head, encoding="utf-8")
+    sdir_b = tmp_path / "suites_b"
+    sdir_b.mkdir()
+    (sdir_b / "k.yaml").write_text(
+        head + "  - action: tap\n    target: HomeView.login_button\n"
+               "    idempotency: IDEMPOTENT\n", encoding="utf-8")
+    _run_into(store, sdir_a, build="1025", run_id="run_1025")
+    _run_into(store, sdir_b, build="1026", run_id="run_1026")
+    return tmp_path / "trace_two.db"
+
+
+def _ks(tmp_path, db, *, app_build=None):
+    return P2KnowledgeSources(
+        experience_store=SQLiteExperienceStore(str(tmp_path / "exp.db")),
+        trace_db=str(db), app_build=app_build, cases=[])
+
+
+def test_trace_history_app_build_filter_is_honored(tmp_path):
+    """P2-1 钉子：`{"app_build": X}` 只返回 X 的 steps（按次覆盖构造值）。"""
+    db = _two_build_trace(tmp_path)
+    ks = _ks(tmp_path, db, app_build="1025")
+
+    assert len(ks.trace_history({})) == 2, "缺省用构造值 1025"
+    assert len(ks.trace_history({"app_build": "1026"})) == 3, \
+        "显式 app_build 必须**按次覆盖**构造值（修复前静默返回 1025 的 2 步）"
+    assert len(ks.trace_history({"app_build": "1025"})) == 2
+
+
+def test_trace_history_unknown_build_is_empty_not_another_build(tmp_path):
+    """库里没有的 build → 空；不是静默给出别的 build 的数据。"""
+    db = _two_build_trace(tmp_path)
+    assert _ks(tmp_path, db, app_build="1025").trace_history(
+        {"app_build": "9999"}) == []
+
+
+def test_trace_history_without_scope_fails_loud_on_multiple_builds(tmp_path):
+    """不指定范围、库里又有两个 build → 原语 fail-loud（不挑一个）。
+
+    `{"app_build": None}` 是**显式要求不过滤**（原语语义），走同一条
+    fail-loud 路径——不能被静默改写成构造值（哨兵的存在理由）。
+    """
+    db = _two_build_trace(tmp_path)
+    ks = _ks(tmp_path, db)
+    with pytest.raises(ValueError, match="多个"):
+        ks.trace_history({})
+    with pytest.raises(ValueError, match="多个"):
+        ks.trace_history({"app_build": None})
+
+
+def test_trace_history_app_build_type_is_gated(tmp_path):
+    """非 str/None 的 app_build 直接拒——绑进 SQL 等值比较会一条都匹配不到。"""
+    db = _two_build_trace(tmp_path)
+    ks = _ks(tmp_path, db, app_build="1025")
+    for bad in (123, ["1026"], {"b": 1}, True):
+        with pytest.raises(ValueError, match="app_build 必须是"):
+            ks.trace_history({"app_build": bad})

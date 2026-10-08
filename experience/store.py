@@ -31,7 +31,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from contextlib import contextmanager
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +45,7 @@ from experience.models import (
     StateEvent,
 )
 from experience.schema_migrations import migrate
+from source.sqlite_tx import write_tx
 
 __all__ = ["ExperienceStore", "SQLiteExperienceStore", "record_sample_runs"]
 
@@ -135,26 +135,17 @@ class SQLiteExperienceStore:
         conn.execute("PRAGMA busy_timeout = 5000")
         return conn
 
-    @contextmanager
     def _write_tx(self):
         """写方法专用：进程锁内 BEGIN IMMEDIATE，退出时 commit（成功）/
         ROLLBACK（异常）并**必然** close + release——任何早退路径都不得
-        泄漏事务或锁（曾致「database is locked」连坐后续操作）。"""
-        self._write_lock.acquire()
-        conn = self._connect()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            yield conn
-            conn.commit()
-        except BaseException:
-            try:
-                conn.execute("ROLLBACK")
-            except sqlite3.Error:
-                pass
-            raise
-        finally:
-            conn.close()
-            self._write_lock.release()
+        泄漏事务或锁（曾致「database is locked」连坐后续操作）。
+
+        实现单点在 `source/sqlite_tx.write_tx`（review_p3_task11 P2-2：这条
+        纪律此前有三份手写实现，`agents/storage.py` 那份把 `_connect()` 与
+        `BEGIN IMMEDIATE` 放在保护区间外，一次锁冲突就让该 store 此后所有写
+        永久挂死）。本方法只做转口——**不要再把样板抄回来**。
+        """
+        return write_tx(self._write_lock, self._connect)
 
     # --- 行 ↔ 模型 ---
 

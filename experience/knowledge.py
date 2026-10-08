@@ -28,10 +28,18 @@ from graph.impact import affected_testcases, ref_index
 
 if TYPE_CHECKING:
     # RuntimeGraph 真实类型标注（review_p2_task54 P3-3 同族：避免运行时
-    # 循环 import，P3 消费方拿到的不是裸 object）。
-    from graph.diff import RuntimeGraph
+    # 循环 import，P3 消费方拿到的不是裸 object）。取**定义处**
+    # `graph.models`（`graph.diff` 只是转口，review_p3_task11 §0 指出的
+    # 无谓耦合：知识层不该为了拿一个模型类型而依赖 diff 模块）。
+    from graph.models import RuntimeGraph
 
 __all__ = ["KnowledgeSources", "P2KnowledgeSources"]
+
+# 「调用方没给」的哨兵（review_p3_task11 P2-1）。**不能**用 `None` 兼作默认
+# 值：`read_trace_steps(app_build=None)` 的语义是「取库里全部 run」，而
+# 「没给」应当落到构造时的 `self._app_build`——两者混用一个值就会让
+# `{"app_build": None}`（显式要求不过滤）被静默改写成构造值。
+_UNSET = object()
 
 
 @runtime_checkable
@@ -80,12 +88,20 @@ class P2KnowledgeSources:
                 f"{app_id!r} 不一致——graph_query 不跨 app 混图")
         return build_runtime_graph(steps, app_id=app_id)
 
-    def _read_steps(self) -> tuple[list, str, str]:
+    def _read_steps(self, app_build=_UNSET) -> tuple[list, str, str]:
         """read_trace_steps 的薄封装：把裸 sqlite 异常转成可诊断的域错误
         （review_p2_task55 P3-2——P3 规划能力会远程消费本接口，「库没
-        初始化」不该以 `no such table` 的形态漏出去）。"""
+        初始化」不该以 `no such table` 的形态漏出去）。
+
+        `app_build` 缺省（`_UNSET`）= 用构造时的 `self._app_build`；显式传入
+        则**按次覆盖**（review_p3_task11 P2-1：早先本方法写死构造值，于是
+        `trace_history` 里算出的 `app_build` 成了死变量——单 build 库「恰好
+        返回正确数据」掩盖了问题，双 build 库则报「用 app_build= 过滤」而
+        调用方正是这么做的）。传 `None` = 显式要求不过滤（原语语义）。
+        """
+        build = self._app_build if app_build is _UNSET else app_build
         try:
-            return read_trace_steps(self._trace_db, app_build=self._app_build)
+            return read_trace_steps(self._trace_db, app_build=build)
         except sqlite3.OperationalError as e:
             raise ValueError(
                 f"trace 库不可读（未初始化或无表？）：{self._trace_db}"
@@ -101,8 +117,15 @@ class P2KnowledgeSources:
             # 过滤」伪装成「结果恰好都对」。
             raise ValueError(f"未知过滤键: {sorted(unknown)}（支持: "
                              f"app_build, limit）")
-        app_build = filters.get("app_build", self._app_build)
-        steps, _app_id, _build = self._read_steps()
+        app_build = filters.get("app_build", _UNSET)
+        # 值也过闸门（与下面 limit 同款纪律）：非 str/None 的值会绑进 SQL 的
+        # 等值比较、**一条也匹配不到**——「过滤生效了，只是库里没有」与
+        # 「过滤参数是坏的」在结果上长得一样。
+        if app_build is not _UNSET and not (
+                app_build is None or isinstance(app_build, str)):
+            raise ValueError(
+                f"app_build 必须是 str 或 None，got {app_build!r}")
+        steps, _app_id, _build = self._read_steps(app_build)
         limit = filters.get("limit")
         if limit is not None:
             if not isinstance(limit, int) or limit < 0:

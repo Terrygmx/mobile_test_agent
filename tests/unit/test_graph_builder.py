@@ -506,3 +506,43 @@ def test_load_graph_carries_the_scope_source_of(tmp_path):
     gdb = tmp_path / "graph.db"
     GraphStore(gdb)
     assert GraphStore(gdb).load_graph(APP, "9999", SOURCE).source_of == SOURCE
+
+
+def test_graph_store_write_is_single_writer(tmp_path, monkeypatch):
+    """review_p3_task11 P2-2 补齐：GraphStore 的写也走「进程锁 + BEGIN IMMEDIATE」。
+
+    此前用 `with conn:` 隐式事务（**无进程锁、无 `BEGIN IMMEDIATE`**）——
+    experience/agents/graph 三处单写者形态里的第三形态。手法同评审探针：
+    外部 `BEGIN EXCLUSIVE` 期间写必须失败**且**释放进程锁。
+    """
+    import sqlite3
+
+    from graph.models import RuntimeGraph, ScreenNode
+
+    gdb = tmp_path / "graph.db"
+    store = GraphStore(gdb)
+    build_and_store(_trace(tmp_path), gdb)
+    assert store.load_graph(APP, BUILD, RUNTIME).screens, "基线可用"
+
+    def fast():
+        c = sqlite3.connect(str(gdb))
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout=50")     # 测试不必等生产的 5s
+        return c
+
+    lone = RuntimeGraph(app_id=APP, app_build=BUILD, source_of=RUNTIME,
+                        nodes=(ScreenNode(screen_id="Z", source_of=RUNTIME),))
+    blocker = sqlite3.connect(str(gdb), isolation_level=None)
+    try:
+        blocker.execute("BEGIN EXCLUSIVE")
+        monkeypatch.setattr(store, "_connect", fast)
+        with pytest.raises(sqlite3.OperationalError):
+            store.upsert_graph(lone)
+        assert not store._write_lock.locked(), "异常路径必须释放进程锁"
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+
+    store.upsert_graph(lone)
+    assert store.load_graph(APP, BUILD, RUNTIME).screens == ("Z",), \
+        "冲突解除后必须还能写（锁没被吃掉）"

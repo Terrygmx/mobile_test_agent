@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from graph.models import (
     ScreenTransition,
 )
 from experience.schema_migrations import latest_version, migrate
+from source.sqlite_tx import write_tx
 
 __all__ = ["GRAPH_MIGRATIONS_DIR", "GRAPH_SCHEMA_VERSION", "GraphStore",
            "build_and_store"]
@@ -48,6 +50,10 @@ class GraphStore:
         parent = Path(self._path).parent
         if parent and not parent.exists():
             parent.mkdir(parents=True, exist_ok=True)
+        # E9 单写者（review_p3_task11 P2-2 补齐）：本库早先用 `with conn:`
+        # 隐式事务，**无进程锁、无 BEGIN IMMEDIATE**——与 experience/agents
+        # 三处形态里的第三形态。写纪律现收敛到 source/sqlite_tx.write_tx。
+        self._write_lock = threading.Lock()
         conn = self._connect()
         try:
             migrate(conn, migrations_dir=GRAPH_MIGRATIONS_DIR,
@@ -60,6 +66,11 @@ class GraphStore:
         conn.row_factory = sqlite3.Row
         return conn
 
+    def _write_tx(self):
+        """E9 单写者：进程锁 + `BEGIN IMMEDIATE`（实现单点在
+        `source/sqlite_tx.write_tx`，与 experience / agents 共用）。"""
+        return write_tx(self._write_lock, self._connect)
+
     # --- 写 ---
 
     def upsert_graph(self, graph: RuntimeGraph) -> None:
@@ -68,36 +79,32 @@ class GraphStore:
         见模块 docstring：替换而不是累加，因为权威输入是 trace 全量、重跑必须
         幂等。节点与转移在同一个事务里换掉，读者看不到「一半新一半旧」的图。
         """
-        conn = self._connect()
-        try:
-            with conn:      # 单事务
-                # 替换范围用**图自身的** source_of，不是常量 RUNTIME
-                # （review_p2_task51 P2-1：硬编码会让写 source 图时先删掉同
-                # scope 的 runtime 行——声明面静默清空观察面）。
-                conn.execute(
-                    "DELETE FROM screen_nodes WHERE app_id=? AND app_build=?"
-                    " AND source_of=?",
-                    (graph.app_id, graph.app_build, graph.source_of))
-                conn.execute(
-                    "DELETE FROM screen_transitions WHERE app_id=?"
-                    " AND app_build=? AND source_of=?",
-                    (graph.app_id, graph.app_build, graph.source_of))
-                conn.executemany(
-                    "INSERT INTO screen_nodes (app_id, app_build, screen_id,"
-                    " source_of, visit_count, evidence, first_seen, last_seen)"
-                    " VALUES (?,?,?,?,?,?,?,?)",
-                    [(graph.app_id, graph.app_build, n.screen_id, n.source_of,
-                      n.visit_count, n.evidence_csv, n.first_seen,
-                      n.last_seen) for n in graph.nodes])
-                conn.executemany(
-                    "INSERT INTO screen_transitions (app_id, app_build,"
-                    " from_screen, to_screen, trigger, source_of, count,"
-                    " first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?,?)",
-                    [(graph.app_id, graph.app_build, t.from_screen,
-                      t.to_screen, t.trigger, t.source_of, t.count,
-                      t.first_seen, t.last_seen) for t in graph.transitions])
-        finally:
-            conn.close()
+        with self._write_tx() as conn:      # 单事务（进程锁 + BEGIN IMMEDIATE）
+            # 替换范围用**图自身的** source_of，不是常量 RUNTIME
+            # （review_p2_task51 P2-1：硬编码会让写 source 图时先删掉同
+            # scope 的 runtime 行——声明面静默清空观察面）。
+            conn.execute(
+                "DELETE FROM screen_nodes WHERE app_id=? AND app_build=?"
+                " AND source_of=?",
+                (graph.app_id, graph.app_build, graph.source_of))
+            conn.execute(
+                "DELETE FROM screen_transitions WHERE app_id=?"
+                " AND app_build=? AND source_of=?",
+                (graph.app_id, graph.app_build, graph.source_of))
+            conn.executemany(
+                "INSERT INTO screen_nodes (app_id, app_build, screen_id,"
+                " source_of, visit_count, evidence, first_seen, last_seen)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                [(graph.app_id, graph.app_build, n.screen_id, n.source_of,
+                  n.visit_count, n.evidence_csv, n.first_seen,
+                  n.last_seen) for n in graph.nodes])
+            conn.executemany(
+                "INSERT INTO screen_transitions (app_id, app_build,"
+                " from_screen, to_screen, trigger, source_of, count,"
+                " first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?,?)",
+                [(graph.app_id, graph.app_build, t.from_screen,
+                  t.to_screen, t.trigger, t.source_of, t.count,
+                  t.first_seen, t.last_seen) for t in graph.transitions])
 
     # --- diff 落库（`graph_diffs` 表，Task 5.3 的消费者） ---
 
@@ -112,26 +119,22 @@ class GraphStore:
         P3-2）：否则同一 `(app_id, base_build, build)` 下「源图 vs 运行时」与
         「build-to-build」会互相覆盖，而它们在库里本来就长得一样。
         """
-        conn = self._connect()
-        try:
-            with conn:
-                conn.execute(
-                    "DELETE FROM graph_diffs WHERE app_id=? AND base_build=?"
-                    " AND build=? AND base_source_of=? AND source_of=?",
-                    (diff.app_id, diff.base_build, diff.build,
-                     diff.base_source_of, diff.source_of))
-                conn.executemany(
-                    "INSERT INTO graph_diffs (app_id, base_build, build,"
-                    " base_source_of, source_of, kind, screen_id, from_screen,"
-                    " to_screen, trigger, detail_json, created_at)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    [(diff.app_id, diff.base_build, diff.build,
-                      diff.base_source_of, diff.source_of, e.kind, e.screen_id,
-                      e.from_screen, e.to_screen, e.trigger,
-                      json.dumps(e.detail, ensure_ascii=False), _now())
-                     for e in diff.entries])
-        finally:
-            conn.close()
+        with self._write_tx() as conn:
+            conn.execute(
+                "DELETE FROM graph_diffs WHERE app_id=? AND base_build=?"
+                " AND build=? AND base_source_of=? AND source_of=?",
+                (diff.app_id, diff.base_build, diff.build,
+                 diff.base_source_of, diff.source_of))
+            conn.executemany(
+                "INSERT INTO graph_diffs (app_id, base_build, build,"
+                " base_source_of, source_of, kind, screen_id, from_screen,"
+                " to_screen, trigger, detail_json, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                [(diff.app_id, diff.base_build, diff.build,
+                  diff.base_source_of, diff.source_of, e.kind, e.screen_id,
+                  e.from_screen, e.to_screen, e.trigger,
+                  json.dumps(e.detail, ensure_ascii=False), _now())
+                 for e in diff.entries])
         return len(diff.entries)
 
     def load_diff(self, app_id: str = "", base_build: str = "",

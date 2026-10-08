@@ -2,9 +2,13 @@
 
 **资产权限分级（设计 §4，F2 的落点）**：PRODUCTION / CRITICAL 工具在
 构造上不存在——本模块的 `TOOL_ASSET_TIER` 是工具全集的**单一真值源**，
-Task 1.3 的 `ALLOWED_TOOLS` 从这里派生（frozenset(TOOL_ASSET_TIER)），
-两处永不漂移；禁用名单（delete_testcase 等 8 项）由 CI 门禁测试
-`tests/unit/test_tool_allowlist_gate.py` 钉死。
+Task 1.3 的 `ALLOWED_TOOLS` 从这里派生（`frozenset(TOOL_ASSET_TIER)`），
+两处永不漂移。
+
+禁用名单（`delete_testcase` 等 8 项）当前由 `tests/unit/test_agent_models.py`
+的断言钉住；**CI 门禁测试 `tests/unit/test_tool_allowlist_gate.py` 归 Task 1.3**
+（review_p3_task11 P3-1：此处早先写成「已由 CI 门禁钉死」，而那个文件当时还
+不存在——docstring 不得描述「P3 完成态」）。
 
 AgentState 九态（设计 §9.2）：本任务只定型词表与存储；合法转换表
 M6（Task 6.1）落地——在那之前 store 不做转换校验，只做枚举校验。
@@ -58,18 +62,12 @@ class AgentState(str, Enum):
     ESCALATED = "ESCALATED"
 
 
-class AgentTaskState:
-    """plan Task 1.1 的命名别名——同一枚举对象，防两套状态词表漂移。"""
-
-    IDLE = AgentState.IDLE
-    PLANNING = AgentState.PLANNING
-    EXECUTING = AgentState.EXECUTING
-    OBSERVING = AgentState.OBSERVING
-    DECIDING = AgentState.DECIDING
-    VERIFYING = AgentState.VERIFYING
-    ANALYZING = AgentState.ANALYZING
-    RECOVERING = AgentState.RECOVERING
-    ESCALATED = AgentState.ESCALATED
+# plan Task 1.1 的命名别名——**真别名**（同一个 Enum 对象），防两套状态词表
+# 漂移。早先写成「普通类 + 9 个别名属性」，名字像 Enum 却不是 Enum：`issubclass(
+# AgentTaskState, Enum)` 为 False、不可迭代、`AgentTaskState("IDLE")` 抛
+# TypeError——于是很容易被写成类型标注 `state: AgentTaskState`（review_p3_task11
+# P3-4）。别名语义与 `AgentState` 完全相同，一行即可。
+AgentTaskState = AgentState
 
 
 # 工具 → 资产归属（设计 §4 + §10.1 全集；plan Task 1.1 的归属定档）。

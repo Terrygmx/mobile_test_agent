@@ -1,9 +1,15 @@
 """storage.py — agent.db 的读写入口（SQLiteAgentStore；Task 1.1 / P3-01）。
 
-设计 §11：独立库文件（默认 out/agent.db，CLI --agent-db 可覆盖），延续
-P2「按写者边界分库」与 E9 单写者纪律（进程锁 + BEGIN IMMEDIATE）。
-迁移复用 P2 泛化执行器（graph.db 同款用法），幂等可重放；迁移链
-agents/migrations/ 按里程碑增量（001 → 002/003/004 随 M3/M4/M5 定型）。
+设计 §11：独立库文件（默认 `DEFAULT_AGENT_DB` = `out/agent.db`），延续
+P2「按写者边界分库」与 E9 单写者纪律（进程锁 + `BEGIN IMMEDIATE`，实现单点
+在 `source/sqlite_tx.write_tx`）。迁移复用 P2 泛化执行器（graph.db 同款
+用法），幂等可重放；迁移链 `agents/migrations/` 按里程碑增量
+（001 → 002/003/004 随 M3/M4/M5 定型）。
+
+⚠️ **CLI `--agent-db` 尚未接线**（review_p3_task11 P3-1：docstring 不得描述
+「P3 完成态」）。本模块只提供**常量单点** `DEFAULT_AGENT_DB`，Task 2.4
+（`mta plan`，首个自主命令）接线时直接 import——与 graph 侧
+`DEFAULT_GRAPH_DB` → `--graph-db` 同款，避免两处字面量漂移。
 
 append-only：agent_trace 只 insert 不 update——每步留痕是审计根基。
 """
@@ -17,11 +23,17 @@ from pathlib import Path
 
 from agents.models import AgentState, AgentTask, AgentTraceEntry
 from experience.schema_migrations import latest_version, migrate
+from source.sqlite_tx import write_tx
 
-__all__ = ["AGENT_MIGRATIONS_DIR", "AGENT_SCHEMA_VERSION", "SQLiteAgentStore"]
+__all__ = ["AGENT_MIGRATIONS_DIR", "AGENT_SCHEMA_VERSION", "DEFAULT_AGENT_DB",
+           "SQLiteAgentStore"]
 
 AGENT_MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 AGENT_SCHEMA_VERSION = latest_version(AGENT_MIGRATIONS_DIR, "agents.migrations")
+
+# agent.db 的默认路径（**单点**）。CLI `--agent-db`（Task 2.4）直接 import
+# 本常量作 default——与 graph 侧 `DEFAULT_GRAPH_DB` 同款，两处字面量必漂移。
+DEFAULT_AGENT_DB = Path("out/agent.db")
 
 
 def _now() -> str:
@@ -30,9 +42,13 @@ def _now() -> str:
 
 class SQLiteAgentStore:
     """agent.db 读写入口。构造即迁移（幂等）。写 = 进程锁 + BEGIN
-    IMMEDIATE（E9）；读 = 每调用独立连接，可并发。"""
+    IMMEDIATE（E9）；读 = 每调用独立连接，可并发。
 
-    def __init__(self, db_path: str | Path) -> None:
+    `db_path` 缺省 `DEFAULT_AGENT_DB`（与 `SQLiteExperienceStore` 的
+    `out/experience.db` 同款：**可变状态库**给默认值，便于库内自洽地开箱即用）。
+    """
+
+    def __init__(self, db_path: str | Path = DEFAULT_AGENT_DB) -> None:
         self._path = str(db_path)
         parent = Path(self._path).parent
         if parent and not parent.exists():
@@ -52,27 +68,16 @@ class SQLiteAgentStore:
         return conn
 
     def _write_tx(self):
-        """E9 单写者：进程锁串行化全部写方法（沿 experience/store.py 同款）。"""
-        store = self
+        """E9 单写者：进程锁串行化全部写方法（实现单点在
+        `source/sqlite_tx.write_tx`，与 experience / graph 三处共用）。
 
-        class _Tx:
-            def __enter__(self) -> sqlite3.Connection:
-                store._write_lock.acquire()
-                store._conn = store._connect()
-                store._conn.execute("BEGIN IMMEDIATE")
-                return store._conn
-
-            def __exit__(self, exc_type, exc, tb) -> None:
-                try:
-                    if exc_type is None:
-                        store._conn.commit()
-                    else:
-                        store._conn.rollback()
-                finally:
-                    store._conn.close()
-                    store._write_lock.release()
-
-        return _Tx()
+        ⚠️ 本方法早先是手写的 `_Tx` 类，把 `_connect()` 与
+        `BEGIN IMMEDIATE` 放在保护区间**之外**（review_p3_task11 P2-2 实测）：
+        一次 `database is locked` 后进程锁**永不释放**，该 store 此后所有写
+        永久挂死在 `acquire()` 上——审计留痕（`agent_trace`）从那一刻起整段
+        丢失，且没有任何自愈机制。收敛到共享实现后这类错误只有一处可能犯。
+        """
+        return write_tx(self._write_lock, self._connect)
 
     # --- agent_tasks ----------------------------------------------------------
 
