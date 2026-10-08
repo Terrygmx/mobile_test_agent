@@ -51,8 +51,17 @@ def test_matrix_1_sandbox_and_staging_pass():
                                  command="plan") is None
 
 
-def test_matrix_4_missing_policy_yaml_defaults(tmp_path):
-    policy = load_policy(tmp_path / "nope.yaml")
+def test_matrix_4_missing_policy_yaml_defaults(tmp_path, monkeypatch):
+    """矩阵 #4：**默认路径**的 policy.yaml 缺失 → 内置默认值，P2 行为不变。
+
+    ⚠️ review_p3_task12 P3-2 拆开了「默认路径缺失」（→ 默认值，本矩阵的回归
+    底线）与「显式给的路径不存在」（→ fail-loud）。本测试的入参因此从「显式传
+    一个不存在的路径」改为「把默认路径指到不存在的位置」——原断言编码的是旧语义。
+    """
+    import agents.policy_config as pc
+
+    monkeypatch.setattr(pc, "DEFAULT_POLICY_PATH", tmp_path / "nope.yaml")
+    policy = load_policy()
     assert policy.exploration.max_steps == 100
     assert policy.autonomous.enabled is True
 
@@ -110,6 +119,30 @@ def test_gate_accepts_env_kind_enum():
                               command="plan")
 
 
+@pytest.mark.parametrize("bad", ["PRODUCTION", "Prod", "prod", "", None,
+                                 "sandbox "])
+def test_gate_rejects_unknown_env_kind(bad):
+    """坏 `env_kind` 也必须走 `SystemExit`（安全闸门**只许一个出口**）。
+
+    `EnvKind(bad)` 抛的是 `ValueError`——那是**第三个出口**：CLI 上会打一整段
+    traceback，而且**任何用 `except Exception` 兜底的调用方都会把否决一起吞掉**
+    （review_p3_task12 P3-4）。注意 `None` 也拒：拿不到合法环境时**不假设
+    sandbox**（那正是 F7 退化成永真的形态）。
+    """
+    with pytest.raises(SystemExit) as e:
+        _check_autonomous_env(PolicyConfig(), env_kind=bad, command="plan")
+    assert "F7" in str(e.value)
+
+
+def test_gate_unknown_env_message_lists_the_valid_kinds():
+    """坏值的拒绝消息要**列出合法值**（否则用户不知道往哪改）。"""
+    with pytest.raises(SystemExit) as e:
+        _check_autonomous_env(PolicyConfig(), env_kind="prod", command="plan")
+    msg = str(e.value)
+    for kind in ("sandbox", "staging", "production"):
+        assert kind in msg
+
+
 def test_matrix_1_disabled_flag_blocks_staging_too(tmp_path):
     p = tmp_path / "policy.yaml"
     p.write_text("autonomous:\n  enabled: false\n", encoding="utf-8")
@@ -130,13 +163,19 @@ def test_production_message_explains_the_no_exemption_rule():
 
 
 def test_every_wired_autonomous_command_passes_the_gate():
-    """任何**已接线**的自主命令都必须调 `_check_autonomous_env`。
+    """任何**已接线**的自主命令都必须过前置，且 `env_kind` 不许硬编码。
 
     ⚠️ 本任务只落地公共前置，命令本身在 M2+ 逐个接线（plan 第 12 节）——所以
     这条守卫**现在空转通过**（`cmd_plan` 等还不存在），Task 2.4 加 `cmd_plan`
-    的那天它开始工作。防的是「接线时忘了过前置」，即
-    review_p2_task55 P3-4 的教训：**判据函数要接进 main 链，别写个没人调的
-    函数就当已覆盖**。
+    的那天它开始工作。防的是两件事：
+
+    1. **接线时忘了过前置**（review_p2_task55 P3-4 的教训：判据函数要接进
+       main 链，别写个没人调的函数就当已覆盖）；
+    2. **`env_kind` 硬编码**（review_p3_task12 P3-3）：若顺手写
+       `env_kind="sandbox"`（因为当时没有别的来源），F7 会退化成**永真**——
+       判据还在、测试还绿、但**永远不拒**。合法写法是
+       `env_kind=_resolve_env_kind(args)`（与 `mta run` 同款的唯一解析点）。
+       另外 `command=` 的字面量必须与函数名一致（否则拒绝消息会指名错的命令）。
     """
     import ast
     from pathlib import Path
@@ -153,8 +192,48 @@ def test_every_wired_autonomous_command_passes_the_gate():
         if not isinstance(node, ast.FunctionDef):
             continue
         name = node.name.removeprefix("cmd_")
-        if node.name.startswith("cmd_") and name in AUTONOMOUS_COMMANDS:
-            body = ast.get_source_segment(src, node) or ""
-            assert "_check_autonomous_env" in body, (
-                f"`mta {name}` 是自主命令，但 `{node.name}` 没调 "
-                f"_check_autonomous_env（F7 前置）")
+        if not (node.name.startswith("cmd_") and name in AUTONOMOUS_COMMANDS):
+            continue
+        body = ast.get_source_segment(src, node) or ""
+        assert "_check_autonomous_env" in body, (
+            f"`mta {name}` 是自主命令，但 `{node.name}` 没调 "
+            f"_check_autonomous_env（F7 前置）")
+        for call in _gate_calls(node):
+            for kw in call.keywords:
+                if kw.arg == "env_kind":
+                    assert not isinstance(kw.value, ast.Constant), (
+                        f"`{node.name}` 把 env_kind 写成了字面量——那会让 F7 "
+                        f"退化成永真（应写 `_resolve_env_kind(args)`）")
+                if kw.arg == "command" and isinstance(kw.value, ast.Constant):
+                    assert kw.value.value == name, (
+                        f"`{node.name}` 的 command={kw.value.value!r} 与函数名"
+                        f" {name!r} 不一致（拒绝消息会指名错的命令）")
+
+
+def _gate_calls(fn_node):
+    """该函数体里所有 `_check_autonomous_env(...)` 调用节点。"""
+    import ast
+
+    out = []
+    for call in ast.walk(fn_node):
+        if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                and call.func.id == "_check_autonomous_env"):
+            out.append(call)
+    return out
+
+
+def test_env_kind_resolution_is_shared_with_run():
+    """`--env-kind` 的解析**单点**（`run` 与自主命令共用，review_p3_task12 P3-3）。
+
+    两处各写一份 `EnvKind(getattr(args, "env_kind", None) or "sandbox")` 必然
+    漂移——而 `run` 那一份现在有真实调用者，正是「先有落点再有话」的形态。
+    """
+    import inspect
+    from pathlib import Path
+
+    from cli.main import _resolve_env_kind
+
+    assert "sandbox" in inspect.getsource(_resolve_env_kind), "默认值仍是 sandbox"
+    src = Path("cli/main.py").read_text(encoding="utf-8")
+    assert src.count('EnvKind(getattr(args, "env_kind", None) or "sandbox")') == 1, \
+        "解析只许一处实现（`_resolve_env_kind`）"

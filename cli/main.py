@@ -361,15 +361,36 @@ def build_parser() -> argparse.ArgumentParser:
 AUTONOMOUS_COMMANDS = ("plan", "generate", "explore", "diagnose", "agent")
 
 
+def _resolve_env_kind(args: argparse.Namespace) -> "EnvKind":
+    """`--env-kind` 的**唯一解析点**（`run` 与自主命令共用；10.1）。
+
+    语义沿用 P1：「用旗标显式给，默认 sandbox = 历史行为不变」。
+    review_p3_task12 P3-3：自主命令的 `env_kind` 来源此前**没有落点**——若
+    Task 2.4 顺手硬编码 `env_kind="sandbox"`，F7 会退化成**永真**（判据还在、
+    测试还绿、但永远不拒）。故把解析抽成这里：自主命令的 `--env-kind` 与 `run`
+    同款（Task 2.4 的接线前置，见 `docs/p3_data_audit.md`），调用方只许写
+    `env_kind=_resolve_env_kind(args)`。
+    """
+    from executor.guard import EnvKind
+
+    return EnvKind(getattr(args, "env_kind", None) or "sandbox")
+
+
 def _check_autonomous_env(policy, *, env_kind, command: str) -> None:
     """自主命令的公共前置：**启动时**校验环境与总开关（F7 / 设计 §7.4）。
 
     设计 §7.4 原文：「`production`: Autonomous Agent 整体不可用（policy.yaml
     启动时校验，不是运行时才拦）」——所以这是**能不能启动**的判定，不是
-    「风险高就拦」。两条判据，任一不过即 `SystemExit`（消息含 `F7` 便于检索）：
+    「风险高就拦」。三条判据，任一不过即 `SystemExit`（消息含 `F7` 便于检索）：
 
-    1. `env_kind == production` → 拒，**且没有豁免 flag**；
-    2. `policy.autonomous.enabled is False` → 拒（连 sandbox 也拒）。
+    1. `env_kind` **不是**合法环境（含 `None` / 拼错 / 大小写不对）→ 拒；
+    2. `env_kind == production` → 拒，**且没有豁免 flag**；
+    3. `policy.autonomous.enabled is False` → 拒（连 sandbox 也拒）。
+
+    第 1 条是 review_p3_task12 P3-4 补的：`EnvKind(bad)` 抛的是 `ValueError`
+    ——那是**第三个出口**，CLI 上会打一整段 traceback，而且**任何用
+    `except Exception` 兜底的调用方都会把否决一起吞掉**。安全闸门只许有一个
+    出口：`SystemExit`。
 
     ⚠️ **与 `mta run --allow-production` 的区别**（别把两者混成一条规则）：
     `run` 是 P1/P2 的**单次运行总闸**，允许在 production 下显式豁免跑
@@ -380,12 +401,23 @@ def _check_autonomous_env(policy, *, env_kind, command: str) -> None:
     通过即返回 `None`（无返回值），由调用方继续；`env_kind` 复用 P1 的
     `executor.guard.EnvKind`（字符串或枚举都收），不新建环境枚举。
 
-    调用点：Task 2.4 起各自主命令在 `cmd_*` 的第一行调用本函数（`policy` 由
-    `load_policy(args.policy)` 取得）——**不另写第二套环境校验**。
+    调用点：Task 2.4 起各自主命令在 `cmd_*` 的第一行调用本函数
+    （`policy = load_policy(args.policy)` 是**将来时**——`--policy` 这个 flag
+    目前不存在，归 Task 2.4 与 `--env-kind` 一并接线；在那之前用
+    `load_policy()` 的默认解析）。**不另写第二套环境校验**。
     """
     from executor.guard import EnvKind
 
-    kind = EnvKind(env_kind)
+    try:
+        kind = EnvKind(env_kind)
+    except ValueError:
+        # 安全闸门只许一个出口（SystemExit）：坏值若以 ValueError 漏出去，
+        # 调用方的 `except Exception` 会把否决一起吞掉（P3-4）。
+        raise SystemExit(
+            f"F7: 未知环境 {env_kind!r}——只接受 "
+            f"{[k.value for k in EnvKind]}。自主命令的 env 来源是 "
+            f"`--env-kind`（与 `mta run` 同款）；拿不到合法值时不假设 "
+            f"sandbox，直接拒。") from None
     if kind is EnvKind.PRODUCTION:
         raise SystemExit(
             f"F7: `mta {command}` 是自主命令，production 环境下 Autonomous "
@@ -503,7 +535,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # P2-2（review_m4_task43）：--env-kind 真实接线（10.1）。production
     # 启动必须显式 --allow-production——最前置 fail-loud，不带病建 run 行。
-    env_kind = EnvKind(getattr(args, "env_kind", None) or "sandbox")
+    # 解析单点在 `_resolve_env_kind`（review_p3_task12 P3-3：自主命令的
+    # env 来源与 run 同款，两处各写一份必然漂移）。
+    env_kind = _resolve_env_kind(args)
     if env_kind is EnvKind.PRODUCTION and not args.allow_production:
         print("PREFLIGHT ERROR: --env-kind production 需要显式 "
               "--allow-production（10.1 总闸；production 下 HIGH/CRITICAL "

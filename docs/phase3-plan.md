@@ -204,10 +204,26 @@ M1 基础与安全边界(2d) ─► M2 Planning(2d) ─► M3 Generation(3.5d) �
 
 ### Task 2.4: P3-08 — `mta plan` CLI + Gate 演示
 
+> **⚠️ 接线前置（Task 1.2 拍板，2026-10-08；review_p3_task12 P3-3）**：`mta plan` 是
+> **第一个自主命令**，`_check_autonomous_env` 的 CLI 端到端接线从它开始。三件事：
+> 1. **`env_kind` 的来源**——给自主命令加 `--env-kind`（`choices` 与 `run` 同款、
+>    `default="sandbox"`），并在 `cmd_*` 第一行用**唯一解析点**
+>    `env_kind=_resolve_env_kind(args)`（`cli/main.py`，`run` 也在用）。**不许**
+>    硬编码 `env_kind="sandbox"`——那会让 F7 退化成**永真**（判据还在、测试还绿、
+>    但永远不拒）。守卫 `tests/fault_injection/test_p3_matrix_m1.py::
+>    test_every_wired_autonomous_command_passes_the_gate` 会在 `cmd_plan` 出现的
+>    那天检查这条。
+> 2. **`policy` 的来源**——`--policy` 这个 flag **目前不存在**（Task 1.2 的
+>    docstring 已改成将来时）。接线时二选一：加 `--policy`（显式路径，按 P3-2 的
+>    语义**不存在即报错**），或直接用 `load_policy()` 的默认解析（相对 CWD 的
+>    `config/policy.yaml`，读不到 → 内置默认值）。**拍板后回填本节**。
+> 3. **调用顺序**：`cmd_plan` 的第一行过前置（`load_policy` → `_check_autonomous_env`），
+>    过了才做别的事——F7 是「启动时校验」，不是「跑一半才拦」。
+
 **Objective:** 设计 12 节 CLI。
 
 **Files:**
-- Modify: `cli/main.py`（`plan --build <id> --base-build <id>`：装配 PlannerInput（`source/git_diff.py` + `_resolve_app_build`）→ planner → 存 test_plans → 人类可读 + `--json` 结构化输出）
+- Modify: `cli/main.py`（`plan --build <id> --base-build <id>`：装配 PlannerInput（`source/git_diff.py` + `_resolve_app_build`）→ planner → 存 test_plans → 人类可读 + `--json` 结构化输出；**加 `--env-kind`**，第一行过 `_check_autonomous_env`）
 - Create: `phase0/verify_p3_m2.py`（对 ios_demo 构造一次真实改动（改一个 Swift 文件 + commit）→ Plan 输出：reasons 非空、CRITICAL 用例居顶、plan_id 可查库）
 - Test: `tests/unit/test_cli_plan.py`
 
@@ -360,6 +376,13 @@ M1 基础与安全边界(2d) ─► M2 Planning(2d) ─► M3 Generation(3.5d) �
 2. Run → PASS → Commit: `feat(p3): discovery events + sandbox-only startup (P3-18)`
 
 ### Task 4.6: P3-19 — `mta explore` CLI + Sandbox Gate 演示
+
+> **⚠️ 口径必守（review_p3_task12 §4 留的）**：`mta explore` 必须在 **staging 下也拒**
+> ——plan 执行注意事项 #3 与 design §7.4 对 Exploration 要求的是 **sandbox-only 且不能
+> 有例外**。而 Task 1.2 的 `_check_autonomous_env` 只做「production 一票否决」，它的
+> 拒绝消息目前对用户说「请在 **sandbox 或 staging** 下运行」——**本任务落地时必须让
+> staging 也被 `mta explore` 拒掉**，否则文案与行为打架（那条消息对 `plan`/`generate`
+> 是准确的，对 `explore` 不是）。
 
 **Objective:** 设计 12 节 CLI；本里程碑端到端验证。
 

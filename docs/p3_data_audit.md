@@ -360,3 +360,137 @@ Task 2.4 加 `cmd_plan` 的那天它开始工作。
   消息含 `F7`；`staging`/`sandbox` × 五个命令名 → 全部通过；`policy.yaml` 读到的
   值 = `exploration{100,600,20,3}` / `planner_weights{3,2,5}` / `threshold=10`。
 - 全仓重复顶层定义体检：**零命中**。
+
+---
+
+## Task 1.2 评审修订记录（review_p3_task12 收口，2026-10-08）
+
+评审「有条件通过」：功能声称**全部对账通过**（1319 / +33 / 设计值逐项 / 核销 3/3），
+但「**启动时校验**」这一层的**守卫强度**有两处与自己的声称不符 → **1×P2 + 4×P3**。
+两者当前都不改变运行行为（`_check_autonomous_env` 尚无生产调用者、权重表尚无消费者），
+但都会在 **Task 2.4 接线那天变成真问题**，故在接线前收口。
+
+### P2-1 「shipped yaml ↔ 内置默认值」的守卫**空转**
+
+- 症状：两条 shipped-yaml 测试的断言目标（`enabled=True`、`max_steps=100`、
+  `== PolicyConfig()`）**正是** `load_policy` 在「路径不存在」时返回的东西
+  （`if not p.is_file(): return PolicyConfig()`）→ **文件在不在，结果一样**。
+  评审探针⑨⑩：把默认路径指到不存在的文件、或把 CWD 换到 `/tmp`，两条测试**仍然全绿**。
+  也就是说它们**既不能发现文件被删/改名，也不能发现 CWD 不对**——而「文件缺失 →
+  默认值」的唯一守卫就是它们。
+- 为什么定 P2：提交信息「关键决策 6」与审计文档都把这条测试写成**保证**
+  （「以后校准初版值时必须两处一起改，本测试会拦住只改一处」）。**声称的能力 > 实际
+  能力**，且修法两行——正是 `MEMORY.md` 记的那类错（「『固化』必须是一条会自动失败的
+  测试」），与上一轮 P3-3（「声称两条实为 3 条」）同源。
+- 修法：`_REPO = Path(__file__).resolve().parents[2]` + `path = _REPO /
+  DEFAULT_POLICY_PATH` + **先 `assert path.is_file()`**（报错消息写明「其余断言会因此
+  空转」）。**探针复现**：临时把 `config/policy.yaml` 改名 → 两条测试**真红**（修复前
+  全绿）；改名还原。
+- 顺带补了一条**能测出「默认解析真的读文件」**的测试
+  （`test_default_resolution_actually_reads_the_default_path`）：把默认路径
+  monkeypatch 到一个**值不同**的临时文件，断言读到的是文件里的值——只断言
+  「`== PolicyConfig()`」是测不出这件事的，那正是空转的形态。
+
+### P3-1 两张权重表的**值**没有任何值域闸门（负权重静默接受）
+
+- 症状：`field_validator` **只校键集、不校值**，而同文件所有**标量段**都有 `ge=0`。
+  评审探针⑪：`crash_detected=-1` / `llm_hypothesis_only=-99` / `impact=-1` / `risk=-100`
+  全部**被接受**；对照组的 `exploration.max_steps=-1` 等三个标量**全被拒**。
+- 口径不符：模块 docstring 与 yaml 头注释都写「未知键 / 错型 / **负预算** fail-loud」。
+  消费者（`score_evidence` / `priority_score`）拿到负权重会算出**负分**，直接污染
+  「归因是否达标」（F10）与「先做哪个」（§5.2）——P3 的定档理由是「现在还没有消费者」，
+  M2 接线即升级为 P2。
+- 修法：`_NonNegInt = Annotated[int, Field(ge=0)]`，两个权重字段改成
+  `dict[str, _NonNegInt]`；yaml 与 docstring 的「负预算」改「负值」（让声称与覆盖面
+  一致）。补 4 条测试（负权重 3 例 × 两张表 + 标量对照）。
+
+### P3-2 `load_policy` 分不清「文件缺失」与「路径拼错」，且默认路径是 CWD 相对
+
+- 症状：`if not p.is_file(): return PolicyConfig()` —— 缺失、拼错、是目录、`None`
+  **全走这一条**。评审探针③：`config/polcy.yaml`（拼错）与 `config/policy.yaml`
+  （正确）**长得一模一样**。
+- 两个后果：① **生产侧**：从仓库外的目录跑 `mta plan` 会**静默拿到内置默认值**——
+  用户的 policy.yaml 被无声忽略；这不是「文件缺失 → 默认」那条回归底线（那是设计
+  要求的），而是「**你以为你在用配置文件，其实没有**」。② **将来**：加了
+  `--policy` 之后，一个拼错的路径会静默退回默认值，而 `--policy` 的全部意义就是
+  「我指定了配置」。
+- 修法（用哨兵把两件事分开，与 `experience/knowledge.py::_UNSET` 同一手法）：
+
+  | 入参 | 行为 |
+  |---|---|
+  | 不给（`_UNSET`） | 读 `DEFAULT_POLICY_PATH`（相对 CWD）；读不到 → 内置默认值（矩阵 #4） |
+  | `None` | **显式要求内置默认值**，不读任何文件 |
+  | 存在的文件 | 读它（未知键/错型/负值/权重键集不符 → `PolicyConfigError`） |
+  | 显式给了却不存在 | **`PolicyConfigError`**（fail-loud） |
+
+  `DEFAULT_POLICY_PATH` 的 CWD 相对**保持不变**——那是本项目的既有约定（`suites` /
+  `out/trace.db` 同款，P1 起「用旗标/相对路径显式给」），而且「用户在自己项目里放一份
+  配置」正是想要的行为；改成锚 `__file__` 反而与全局不一致。**把事实写进 docstring 与
+  yaml 头注释**，而不是悄悄改语义。
+- ⚠️ **两处 TDD 起点的测试因此要改断言**（`test_missing_file_yields_design_defaults`
+  与 `test_matrix_4_missing_policy_yaml_defaults`）：它们原先把「显式传一个不存在的
+  路径」当作矩阵 #4 的场景，而那是**旧语义**。已改为「把默认路径指到不存在的位置」——
+  矩阵 #4 的**意图**（P2 既有命令行为不变）完整保留，只是换了正确的触发方式。
+  这是评审明确要求的方向（P3-2 的修法），不是为了让测试变绿而改断言。
+- 补 4 条测试：默认解析真的读文件 / 默认路径缺失 → 默认值 / `None` 不读文件 /
+  显式缺失 → fail-loud。
+
+### P3-3 `env_kind` 的来源无落点；docstring 指向不存在的 `args.policy`
+
+- 症状：plan 要求「解析 env_kind（**复用 `--env-kind` 既有语义**）」，但 `--env-kind`
+  **只挂在 `run` 子命令**上，五个自主命令**没有任何 env 来源**；`--policy` / `args.policy`
+  **全仓（含 plan 与 design）零命中**，只出现在 docstring 第 384 行。
+- 这是 `MEMORY.md` 那一课的**复现**：「文档声称的能力必须有落点——写 docstring 前
+  grep 自己提到的符号；没落地的写将来时 + 任务号」。
+- **更实质的一半**：若 Task 2.4 顺手写 `env_kind="sandbox"`（因为当时没别的来源），
+  **F7 就退化成永真**——判据还在、测试还绿、但永远不拒。
+- 修法：
+  1. docstring 的 `load_policy(args.policy)` 改成**将来时 + 任务号**，并明写
+     「`--policy` 目前不存在」；
+  2. 抽 `cli/main.py::_resolve_env_kind(args)` 作 `--env-kind` 的**唯一解析点**，
+     **`cmd_run` 改用它**（所以它有真实生产调用者，不是悬空 helper）；自主命令的
+     `--env-kind` 与 `run` 同款，定为 **Task 2.4 的接线前置**（已写进 plan Task 2.4，
+     连同 `--policy` 的拍板项与「第一行过前置」的顺序要求）；
+  3. 守卫 `test_every_wired_autonomous_command_passes_the_gate` **加强**：除「必须调
+     前置」外，还要求**`env_kind` 实参不是字面量**（AST 判定，`env_kind=args.env_kind`
+     合法、`env_kind="sandbox"` 红），且 `command=` 的字面量必须与函数名一致（否则
+     拒绝消息会指名错的命令）。补 `test_env_kind_resolution_is_shared_with_run`
+     钉住「解析只许一处实现」。
+- **附注（给 M4 留的一条）**：拒绝消息目前对用户说「请在 sandbox **或 staging** 下
+  运行」，而 plan #3 与 design §7.4 对 Exploration 要求 **sandbox-only 不能有例外**
+  ——已写进 plan **Task 4.6（`mta explore`）**：落地时必须让 staging 也被拒，否则
+  文案与行为打架。
+
+### P3-4 「错型 fail-loud」的实际覆盖面比声称的窄
+
+- 症状 A（pydantic 默认 lax）：`"100"→100`、`3.0→3`、`"true"→True`、**`true→1`**
+  全部静默强转。最尖的一例是 `max_steps: true → 1`：F11 规定超预算即
+  `*_BUDGET_EXCEEDED` 并停止，一个静默变成 **1 步**的预算会让探索在第一步就停——
+  **配置错误表现为功能退化，而不是报错**。而 `test_wrong_type_fails_loud` 用的
+  `"abc"` 是唯一会被拒的那种，所以实际覆盖面没被测试暴露。
+- 症状 B（前置函数的**第三个出口**）：`_check_autonomous_env` 的 docstring 说
+  「任一不过即 `SystemExit`」，但 `EnvKind(bad)` 抛的是 **`ValueError`**（探针⑤：
+  `'PRODUCTION'` / `'Prod'` / `''` / `None` / `'sandbox '` 六种坏值）。后果：CLI 上
+  打一整段 traceback，而且**任何用 `except Exception` 兜底的调用方都会把否决一起
+  吞掉**。安全闸门只许一个出口。
+- 修法：`_Frozen` 加 `strict=True`（一行，全字段生效）；`EnvKind(env_kind)` 包进
+  `try/except ValueError` → `SystemExit`（消息列出合法值）。补测试：7 例 lax 强转
+  全拒 + YAML 布尔（`yes`）不被误伤 + 6 例坏 `env_kind` 全走 `SystemExit` + 坏值
+  消息列出合法环境。
+
+### 未处理（登记，评审 §4 的存疑项）
+
+- **`frozen` 是浅冻结**：属性重绑与嵌套模型赋值被拒，但 `planner_weights["impact"] =
+  999` 成功。好消息是 `default_factory` 保证**实例间与模块常量都不共享**（改一个实例
+  污染不到真值源），故不构成发现；但「dict 内容可改」这件事**没有测试记录**。若将来
+  要把配置当只读对象传进引擎，需 `MappingProxyType` 或语义升级——**独立立项**。
+- **真机 gate**：`phase0/verify_p3_*.py` 尚不存在；M1 的真机/Sandbox 集中点在 Task 3.4
+  之后，本轮只做库内 + 纯函数层验证。
+
+### 实测
+
+- 全量 pytest **1343 passed**（本轮 +24；上一轮 1319 + 24 = 1343）。两文件收集数
+  **33 / 24**（合计 57）。
+- **探针复现 P2-1**：临时把 `config/policy.yaml` 改名 → 两条 shipped-yaml 测试
+  **真红**（修复前全绿）；改名还原。
+- 全仓重复顶层定义体检：**零命中**。

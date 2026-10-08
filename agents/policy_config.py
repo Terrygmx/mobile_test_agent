@@ -11,8 +11,12 @@ production: Autonomous Agent 整体不可用（policy.yaml 启动时校验，不
 所以本模块是**启动期**的唯一配置入口：自主命令（`plan`/`generate`/`explore`/
 `diagnose`/`agent`）在动手之前先 `load_policy` + `cli.main._check_autonomous_env`，
 过了才继续。「启动时校验而不是运行时才拦」是 F7 的**核心**——所以这里的判据要
-能挡住「配置拼错」：**未知键、错型、负预算一律 fail-loud**，静默生效的配置错误
-是最难查的一类回归。
+能挡住「配置拼错」：**未知键、错型（严格类型，不靠 lax 强转）、负值、权重表键集
+不符一律 fail-loud**，静默生效的配置错误是最难查的一类回归。
+
+⚠️ 注意「**默认路径不存在 → 内置默认值**」（矩阵 #4 的回归底线）与「**显式给了
+路径却不存在 → 报错**」是**两件事**，别共用一个出口——后者会让人以为「我在用配置
+文件，其实没有」。详见 `load_policy` 的入参语义表。
 
 ## 三处「单一真值源」
 
@@ -38,10 +42,11 @@ risk 5）并在 `config/policy.yaml` 里标注「初版待校准」——**不�
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (BaseModel, ConfigDict, Field, ValidationError,
+                      field_validator)
 
 __all__ = [
     "DEFAULT_POLICY_PATH",
@@ -57,8 +62,21 @@ __all__ = [
     "load_policy",
 ]
 
-# 首次入库的配置文件路径（CLI 的默认值；单点，别在别处再写字面量）
+# 首次入库的配置文件路径（CLI 的默认值；单点，别在别处再写字面量）。
+# ⚠️ **相对 CWD**——与 `suites`（`--suites-root` 默认）`out/trace.db`（`--db`
+# 默认）同款，是本项目的既有约定（P1 起「用旗标/相对路径显式给」）；**不是**
+# 相对仓库根。所以「从别的目录跑 `mta`」会读到那个目录下的 `config/policy.yaml`
+# ——这正是「用户在自己项目里放一份配置」想要的行为（review_p3_task12 P3-2 要求
+# 把这个事实写出来，而不是悄悄锚到 `__file__`）。
 DEFAULT_POLICY_PATH = Path("config/policy.yaml")
+
+# 「调用方没给路径」的哨兵（review_p3_task12 P3-2）。**不能**用 `None` 兼作默认
+# 值：`None` 的语义是「显式要求内置默认值、别读文件」，而「没给」应当去读
+# `DEFAULT_POLICY_PATH`（读不到才回落默认值——那是矩阵 #4 的回归底线）。
+_UNSET = object()
+
+# 非负整数（权重表的值域闸门；见 `PolicyConfig` 的两个权重字段）
+_NonNegInt = Annotated[int, Field(ge=0)]
 
 # --- 三处真值源（默认值 = 设计初版值，逐字抄自设计，不四舍五入） ---------------
 
@@ -104,12 +122,19 @@ class PolicyConfigError(ValueError):
 
 
 class _Frozen(BaseModel):
-    """E 系纪律的载体：未知键拒绝 + 不可变（配置读进来就不该被改）。
+    """E 系纪律的载体：未知键拒绝 + 不可变 + **严格类型**。
 
-    `extra="forbid"` 是「未知键 fail-loud」的落点——拼错的键不会静默生效。
+    - `extra="forbid"`：未知键 fail-loud——拼错的键不会静默生效；
+    - `frozen=True`：配置读进来就不该被改（注意是**浅冻结**：属性重绑被拒，
+      但 `dict` 字段的内容仍可改；`default_factory` 保证实例间与模块常量
+      **不共享**，所以改不到真值源）；
+    - `strict=True`（review_p3_task12 P3-4）：pydantic 默认 lax 会把
+      `"100"→100`、`3.0→3`、**`true→1`**、`"true"→True` 静默强转——`max_steps:
+      true` 会让预算从 100 静默变成 **1 步**，即「配置错误表现为功能退化而不是
+      报错」。既然 F7 的精神是「启动时校验」，类型也必须严。
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
 def _require_exact_keys(where: str, got: dict[str, Any],
@@ -168,9 +193,12 @@ class PolicyConfig(_Frozen):
     autonomous: AutonomousPolicy = Field(default_factory=AutonomousPolicy)
     exploration: ExplorationPolicy = Field(default_factory=ExplorationPolicy)
     escalation: EscalationPolicy = Field(default_factory=EscalationPolicy)
-    planner_weights: dict[str, int] = Field(
+    # 值域闸门 `_NonNegInt`（review_p3_task12 P3-1）：负权重会算出负分，直接污染
+    # 「归因是否达标」（F10）与「先做哪个」（§5.2）。标量段一直有 `ge=0`，权重表
+    # 漏了——而 docstring 与 yaml 头注释都声称「负值 fail-loud」。
+    planner_weights: dict[str, _NonNegInt] = Field(
         default_factory=lambda: dict(PLANNER_WEIGHTS))
-    diagnosis_evidence_weights: dict[str, int] = Field(
+    diagnosis_evidence_weights: dict[str, _NonNegInt] = Field(
         default_factory=lambda: dict(DIAGNOSIS_EVIDENCE_WEIGHTS))
     evidence: EvidencePolicy = Field(default_factory=EvidencePolicy)
 
@@ -188,20 +216,36 @@ class PolicyConfig(_Frozen):
         return v
 
 
-def load_policy(path: str | Path | None = DEFAULT_POLICY_PATH) -> PolicyConfig:
-    """读 policy 文件 → `PolicyConfig`。
+def load_policy(path: str | Path | None | object = _UNSET) -> PolicyConfig:
+    """读 policy 文件 → `PolicyConfig`。四种入参语义（review_p3_task12 P3-2）：
 
-    - `None` / 路径不存在 → **全默认值**（= 设计初版值，P2 行为不变，矩阵 #4）；
-    - 读不出 / 不是合法 YAML / 顶层不是对象 / 未知键 / 错型 / 负预算 →
-      `PolicyConfigError`（**fail-loud**：配置拼错静默生效是最难查的一类回归）。
+    | 入参 | 行为 |
+    |---|---|
+    | 不给（`_UNSET`） | 读 `DEFAULT_POLICY_PATH`（**相对 CWD**）；读不到 → 内置默认值 |
+    | `None` | **显式要求内置默认值**，不读任何文件 |
+    | 存在的文件 | 读它（未知键 / 错型 / 负值 / 权重键集不符 → `PolicyConfigError`） |
+    | 显式给了却不存在 | **`PolicyConfigError`**（fail-loud） |
+
+    「不给 → 读不到就回落默认值」是矩阵 #4 的回归底线（policy.yaml 是 P3 新增层，
+    P2 的既有命令不该因为它不在而行为改变）；而「**显式给了却不存在**必须报错」是
+    另一回事——那说明路径拼错或文件被删，静默退回默认值会让人以为「我在用配置
+    文件，其实没有」。这两件事此前共用一个出口（review_p3_task12 P3-2）。
 
     不做深合并：文件就是整份配置（省略的段回落到该段的默认值）。
     """
+    explicit = path is not _UNSET
+    if path is _UNSET:
+        path = DEFAULT_POLICY_PATH
     if path is None:
         return PolicyConfig()
     p = Path(path)
     if not p.is_file():
-        return PolicyConfig()
+        if not explicit:
+            return PolicyConfig()            # 默认路径不存在 = 回归底线
+        raise PolicyConfigError(
+            f"policy 文件不存在：{p}（显式指定的路径必须存在——拼错的路径静默"
+            f"退回内置默认值会让人以为「我在用配置文件，其实没有」；想用内置"
+            f"默认值请传 None）")
     try:
         raw = yaml.safe_load(p.read_text(encoding="utf-8"))
     except OSError as e:
