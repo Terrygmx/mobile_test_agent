@@ -117,3 +117,102 @@ def test_hygiene_scan_actually_covers_the_repo():
     assert any("tests" in p.parts for p in files), "tests/ 要覆盖到"
     # 反向：生成物目录必须被排除（否则每次 run 都会拖慢甚至误报）
     assert not any("out" in p.parts for p in files), "out/ 不该被扫"
+
+
+# --- E9 单写者：三处 store 只许有一个写入口 ------------------------------------
+#
+# review_p3_task11_final 建议动作 5：P2-2 把三份手写事务样板收敛成
+# `source/sqlite_tx.write_tx` 之后，需要一条**机械**守卫防止样板被抄回来
+# ——而「已修过的模式被复制」在本项目**已经复发过一次**（同一次评审的 P3-2：
+# `agents/storage.py` 抄了 experience 已修掉的 `_connect` 形态）。
+
+# 三处 store（按写者边界分家的可变状态库）
+_STORE_FILES = ("experience/store.py", "agents/storage.py", "graph/storage.py")
+
+# 算作「写语句」的 SQL 前缀；`SELECT` / `PRAGMA` 不在内（读与连接参数）
+_WRITE_SQL_PREFIXES = ("INSERT", "UPDATE", "DELETE", "REPLACE")
+
+# 三处 store 写语句数的下界（防空转：判据写错会变成「零命中」）
+_MIN_WRITE_STATEMENTS = 18
+
+
+def _write_tx_body_ranges(tree: ast.AST) -> list[tuple[int, int]]:
+    """`with self._write_tx() as conn:` 语句的行区间。"""
+    out: list[tuple[int, int]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.With):
+            continue
+        for item in node.items:
+            call = item.context_expr
+            if (isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "_write_tx"):
+                out.append((node.lineno, node.end_lineno))
+    return out
+
+
+def _write_sql_calls(tree: ast.AST) -> list[ast.Call]:
+    """首参是「写 SQL 字符串常量」的 `execute*` 调用。
+
+    只认 `ast.Constant`：隐式字符串拼接在**解析期**已折叠成一条常量（所以
+    多行 SQL 照样命中），而 `"… WHERE " + where` 这类动态拼串与 `f"…"`
+    会被跳过——避免把读语句或拼接式 SQL 误判成写。
+    """
+    out: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute)
+                and func.attr in ("execute", "executemany", "executescript")):
+            continue
+        first = node.args[0]
+        if (isinstance(first, ast.Constant) and isinstance(first.value, str)
+                and first.value.lstrip().upper().startswith(_WRITE_SQL_PREFIXES)):
+            out.append(node)
+    return out
+
+
+def test_store_writes_are_inside_the_write_tx_region():
+    """三处 store 的写语句必须都在 `with self._write_tx()` 保护区内（E9）。
+
+    写在保护区外就绕过了**进程锁 + `BEGIN IMMEDIATE`**（跨进程串行 + 忙等待），
+    而这类错误的后果是「并发写静默丢更新」或「锁泄漏后永久挂死」——本项目两种
+    都真发生过。收敛到 `source/sqlite_tx.write_tx` 之后，本守卫防的是**新写一个
+    方法时忘了套 `with self._write_tx()`**。
+    """
+    bad: list[str] = []
+    total = 0
+    for rel in _STORE_FILES:
+        path = ROOT / rel
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        regions = _write_tx_body_ranges(tree)
+        calls = _write_sql_calls(tree)
+        total += len(calls)
+        for call in calls:
+            if not any(lo <= call.lineno <= hi for lo, hi in regions):
+                sql = call.args[0].value.strip().splitlines()[0][:48]
+                bad.append(f"{rel}:{call.lineno} → {sql!r}")
+    assert total >= _MIN_WRITE_STATEMENTS, (
+        f"三处 store 只扫到 {total} 条写语句（下界 {_MIN_WRITE_STATEMENTS}）"
+        "，判据疑似失效")
+    assert not bad, ("写语句绕过了 _write_tx（无进程锁 / 无 BEGIN IMMEDIATE）：\n  "
+                     + "\n  ".join(bad)
+                     + "\n修法：把该语句挪进 `with self._write_tx() as conn:`。")
+
+
+def test_write_tx_boilerplate_is_not_copied_back():
+    """三处 `_write_tx` 只做转口，不许再抄「锁 + `BEGIN IMMEDIATE`」样板。
+
+    这条是 review_p3_task11_final 建议动作 5 的正面记录：P2-2 把三份手写样板
+    收敛成 `source/sqlite_tx.write_tx`（唯一实现）。本守卫防的是**样板被抄
+    回来**——而「已修过的模式被复制」在本项目已复发过一次（同次评审的 P3-2）。
+    """
+    for rel in _STORE_FILES:
+        src = (ROOT / rel).read_text(encoding="utf-8")
+        assert "write_tx(self._write_lock, self._connect)" in src, \
+            f"{rel} 的 _write_tx 不再走共享实现"
+        assert "_write_lock.acquire()" not in src, \
+            f"{rel} 又抄回了手写锁样板（应走 source/sqlite_tx.write_tx）"
+        assert '"BEGIN IMMEDIATE"' not in src, \
+            f"{rel} 又抄回了手写 BEGIN IMMEDIATE（应走 source/sqlite_tx.write_tx）"

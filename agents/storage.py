@@ -62,9 +62,13 @@ class SQLiteAgentStore:
             conn.close()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path, timeout=30)
+        # busy_timeout 单点 5s（与 experience/store.py 逐字一致；review_p3_task11_final
+        # P3-2：本处曾抄 experience **已修掉**的 `timeout=30` + `PRAGMA 5000`
+        # ——PRAGMA 后设者胜，`timeout=30` 是**死字面量**，读者会以为等 30s。
+        # 同一个模式在 experience 侧已被判过一次 P3，「已修过的模式会被复制」。
+        conn = sqlite3.connect(self._path, timeout=5)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA busy_timeout = 5000")
         return conn
 
     def _write_tx(self):

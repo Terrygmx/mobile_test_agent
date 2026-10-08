@@ -88,7 +88,19 @@
   一条也匹配不到，「过滤生效了只是库里没有」与「参数是坏的」长得一样）。
 - 补 4 条集成测试（双 build 库：1025 跑 2 步用例、1026 跑 3 步用例——**steps 数
   不同**才能把「过滤生效」与「静默返回另一个 build」在断言上分开）。探针复现：
-  回退修复后两条断言立刻红（`2 != 3`、`[...] != []`），与评审的发现逐字吻合。
+  回退修复后**三条**断言立刻红，与评审的发现逐字吻合：
+
+  | 测试 | 失败形态 |
+  |---|---|
+  | `test_trace_history_app_build_filter_is_honored` | `2 != 3`（静默返回另一个 build 的 steps） |
+  | `test_trace_history_unknown_build_is_empty_not_another_build` | `[...] != []`（库里没有的 build 也返回数据） |
+  | `test_trace_history_app_build_type_is_gated` | `DID NOT RAISE ValueError`（类型闸门也没生效） |
+
+  ⚠️ **数字更正（review_p3_task11_final P3-3）**：本行原写「两条」，实测 **3 条**
+  ——第 3 条（类型闸门）的失败形态是 `DID NOT RAISE` 而非「断言值不等」，我当初
+  只数了后者。教训：写「回退后 N 条红」时，**`DID NOT RAISE` 类失败也算红**。
+  （提交信息已不可改，此处的文档是可改的——它正是「给后来者的实测真值源」，
+  数字偏小会让后来者以为覆盖更弱。）
 
 ### P2-2 单写者事务在异常路径上泄漏进程锁（→ 抽公共实现）
 
@@ -168,3 +180,108 @@ diff 模块（评审 §0 指出，未列为发现但一处即改）。
   agent_store 5 + graph_builder 1；`test_agent_models.py` 的加强不增计数）。
 - P2-1 / P2-2 两处都有**回退探针**：回退修复后对应断言立刻红，与评审的探针
   逐条吻合。
+
+---
+
+## Task 1.1 收口评审修订记录（review_p3_task11_final 收口，2026-10-08）
+
+评审结论：**通过** —— 上一轮 2×P2 + 5×P3 **7/7 全部核销、无遗留**；两处 P2 的修法
+被记为「优于评审建议」。本轮新增 **0×P2 + 3×P3**，都是**新引入的收口面**，无回归。
+
+### P3-1 `source/sqlite_tx.py` 的 `finally` 把 `close()` 放在 `release()` 之前且无保护
+
+- 症状：`finally: if conn is not None: conn.close()` 后紧跟 `lock.release()` ——
+  `close()` 一旦抛异常，`release()` **永不执行**，锁照样泄漏。这与 P2-2 是
+  **同一个失败模式，只差一层**（P2-2 修的是「`_connect()` / `BEGIN IMMEDIATE` 在
+  保护区间外」），而本模块的**全部存在意义**就是这条不变量，docstring 却把话说到
+  最满（「必然 close + release」「任何早退路径都不得泄漏事务或锁」）。
+- 修法：`try: close() finally: release()`（`release()` 在自己的 `finally` 里）。
+  docstring 补一段「为什么 close() 要在 release() 的保护里」+ **诚实边界**。
+- **诚实边界（评审探针③，我在测试 docstring 里也写明）**：真 sqlite3（CPython 走
+  `sqlite3_close_v2`——延迟关闭、返回 `SQLITE_OK`）**不会在 `close()` 上抛**，所以
+  只能用**替身**复现。触发它需要将来把 `_connect` 换成返回包装对象/`Connection`
+  子类，或 sqlite3 行为变化——但**爆炸半径是三个库**（收敛的代价），一行成本，
+  就地修。
+- 补 2 条测试：`test_lock_released_when_close_raises`（替身，`close()` 抛）+
+  `test_lock_released_when_body_and_close_both_fail`（真连接 + `close()` 抛，断言
+  锁释放**且事务已回滚**）。回退探针：两条都在 `not lock.locked()` 上红。
+
+### P3-2 `agents/storage.py::_connect` 复制了 experience **已修掉**的模式
+
+- 三处形态（评审探针①实测 `PRAGMA busy_timeout` 都是 5000ms → 功能等价）：
+
+  | 位置 | 原写法 | 实际生效 |
+  |---|---|---|
+  | `agents/storage.py` | `timeout=30` + `PRAGMA busy_timeout=5000` | 5000 —— `timeout=30` 是**死字面量** |
+  | `experience/store.py` | `timeout=5` + PRAGMA | 5000 |
+  | `graph/storage.py` | 不传 `timeout`、不设 PRAGMA | 5000（默认值） |
+
+- **这是「已知问题的复制」**：`experience/store.py` 的注释原文就记着
+  「review P3-2：connect `timeout=30` 与 PRAGMA 5000 曾意图不一致，后设者胜靠阅读
+  顺序」——同一个模式当时被报为 P3 并**已修**（`30` → `5`）；P3-01 新写
+  `agents/storage.py` 时又抄了一遍。
+- 修法：`agents` 对齐 experience（`timeout=5` + 同一句注释）；`graph` 补
+  `timeout=5` + `PRAGMA busy_timeout = 5000`，**三处字面量一致**。
+- 补 2 条测试：
+  - 行为面 `test_busy_timeout_is_consistent_across_the_three_stores`（三处都是
+    5000ms）；
+  - 源码面 `test_store_connects_use_the_same_timeout`（**AST**：三处各**恰一个**
+    `sqlite3.connect`，都写了 `timeout=5`）。
+    ⚠️ 初版用「`"timeout=30" not in src`」的**纯文本**判据 → 被 experience 注释里
+    为解释该模式而提到的数字**误报**；改成 AST 只看真正的 `timeout=` 实参。
+    教训：「源码里不许出现某字符串」要先问「注释里为解释它而提到它算不算」。
+
+### P3-3 回退探针的红灯数：声称「两条」，实测 **3 条**
+
+- `test_trace_history_app_build_type_is_gated` 的失败形态是
+  `DID NOT RAISE ValueError`，我当初只数了「断言值不等」的两条。已在本文件
+  Task 1.1 评审修订段更正为三条并列出三种失败形态（提交信息不可改，文档可改）。
+- **教训（已并入 `MEMORY.md`）**：写「回退后 N 条红」时，**`DID NOT RAISE` 类失败
+  也算红**。
+
+### 顺带落地评审建议动作 5：把「单写者唯一入口」固化成机械守卫
+
+评审把它列为**可选**，并提醒「复用 `tests/unit/test_repo_hygiene.py` 的手法，别再开
+第二个体检入口」。已在**同一个文件**里加两条（未新增体检入口）：
+
+1. `test_store_writes_are_inside_the_write_tx_region`（**AST**）：三处 store 的
+   写语句（`execute*` 首参是以 `INSERT/UPDATE/DELETE/REPLACE` 开头的字符串常量）
+   **必须落在 `with self._write_tx()` 的行区间内**；带防空转下界（实测 23 条：
+   experience 13 / agents 4 / graph 6，下界取 18）。
+   只认 `ast.Constant` —— 隐式字符串拼接在解析期已折叠（多行 SQL 照样命中），而
+   `"… WHERE " + where` 这类动态拼串与 `f"…"` 会跳过，避免误判读语句。
+2. `test_write_tx_boilerplate_is_not_copied_back`：三处 `_write_tx` 必须仍是
+   `write_tx(self._write_lock, self._connect)` 转口，且源码里不得出现
+   `_write_lock.acquire()` / `"BEGIN IMMEDIATE"`。
+
+**探针验证两条都会红**：注入「把一条 UPDATE 挪出保护区」→ 第 1 条指名报出
+`agents/storage.py:110`；注入「抄回 `_write_lock.acquire()`」→ 第 2 条报出
+`agents/storage.py 又抄回了手写锁样板`。
+
+**为什么值得加**（不只是「照做」）：同一次评审的 P3-2 就是**「已修过的模式被复制」**
+的实例——这个类已经复发过一次。收敛的收益是「这类错误只有一处可能犯」，代价是
+「那一处犯错的爆炸半径 = 全部三个库」；机械守卫把「记得别抄」从纪律变成**会红的
+测试**。
+
+### 未处理（登记）
+
+- **`db_path` 有默认值之后的脚枪面**（评审 §4）：任何未来「忘记传路径」的调用都会
+  写 **CWD 的 `out/agent.db`**。仓库里 `out/experience.db` 就是这么落地的（mtime
+  2026-10-06 23:14，非测试所写）。当前唯一无参调用点有 `monkeypatch.chdir` 保护。
+  **定档：不撤默认值**（与 `SQLiteExperienceStore` 的 `out/experience.db` 同款，
+  可变状态库给默认值便于开箱即用），但**测试夹具一律显式传 `tmp_path`**；Task 2.4
+  接 CLI `--agent-db` 时一并复核（已写进 `MEMORY.md`）。
+- **`tracer/storage.py` 是第四个 SQLite 写者**（无进程锁、无 `BEGIN IMMEDIATE`）：
+  `source/sqlite_tx.py` 的 docstring **明确把范围限定为「三个库」**（不夸大）；
+  trace.db 是 append-only 流水库。属**存量（P1 期）**，是否收敛到同一纪律应由后续
+  任务显式决策，**不顺手改**。
+- **真机 gate**：`phase0/verify_p3_*.py` 尚不存在，Gate M1 属 Task 1.2/1.3 之后。
+- 工作区仍有 2 个在飞的 Task 1.2 TDD 红测试（不在本提交范围，Gate M1 前必须收口）。
+
+### 实测
+
+- 全量 pytest **1286 passed**（本轮 +6：sqlite_tx 4 + repo_hygiene 2）。
+- 回退探针：P3-1 的两条测试在锁泄漏断言上真红；两条新守卫在注入违规后真红并**指名
+  报出文件与行号**。
+- 三处 store 的 `PRAGMA busy_timeout` 实测均为 **5000ms**，`sqlite3.connect` 的
+  `timeout=` 均为 **5**。

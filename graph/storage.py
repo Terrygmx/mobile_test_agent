@@ -62,8 +62,13 @@ class GraphStore:
             conn.close()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path)
+        # busy_timeout 单点 5s（与 experience/store.py、agents/storage.py 逐字一致
+        # ——review_p3_task11_final P3-2：本处原先是**第三种形态**（不传 timeout、
+        # 不设 PRAGMA，靠 sqlite3 默认的 5s）。功能等价，但「哪个才是权威值」被
+        # 交给了阅读顺序；显式写出来才可核。
+        conn = sqlite3.connect(self._path, timeout=5)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 5000")
         return conn
 
     def _write_tx(self):

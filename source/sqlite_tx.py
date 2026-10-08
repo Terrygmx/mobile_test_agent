@@ -26,6 +26,28 @@
 `BEGIN IMMEDIATE` 失败时事务根本没起来，此时 `ROLLBACK` 会抛
 `cannot rollback - no transaction is active`——那是**清理阶段的正常噪声**，
 不该盖住真正的失败原因（原异常会被 `raise` 重新抛出）。
+
+## 为什么 `close()` 要在 `release()` 的保护里
+
+`finally` 里先 `close()` 再 `release()` 是自然的顺序，但**没有保护**——`close()`
+一旦抛异常，`release()` 永不执行，锁照样泄漏（review_p3_task11_final P3-1：与
+「`_connect()` 在保护区间外」是**同一个失败模式，只差一层**）。而本模块的**全部
+存在意义**就是这条不变量，所以两层都要包：
+
+```python
+finally:
+    try:
+        if conn is not None:
+            conn.close()
+    finally:
+        lock.release()
+```
+
+⚠️ **诚实边界**：真 sqlite3（CPython 走 `sqlite3_close_v2`——延迟关闭、返回
+`SQLITE_OK`）不会在 `close()` 上抛，所以这条只能靠**替身**测试复现（见
+`tests/unit/test_sqlite_tx.py::test_lock_released_when_close_raises`）。触发它需要
+将来把 `_connect` 换成返回包装对象/`Connection` 子类，或 sqlite3 行为变化——
+但**爆炸半径是三个库**（收敛的代价），一行成本，就地修。
 """
 from __future__ import annotations
 
@@ -62,6 +84,11 @@ def write_tx(lock: threading.Lock,
                 pass
         raise
     finally:
-        if conn is not None:
-            conn.close()
-        lock.release()
+        try:
+            if conn is not None:
+                conn.close()
+        finally:
+            # `release()` 必须在**自己的** `finally` 里：`close()` 抛异常时也要
+            # 还锁（review_p3_task11_final P3-1）。顺序上 close 在前是安全的
+            # ——事务已 commit/ROLLBACK 完毕，连接不再持有库锁。
+            lock.release()
