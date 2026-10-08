@@ -669,3 +669,80 @@ PRODUCTION/CRITICAL（F2）／E 8 个禁用名在 `agents/**` 全包**只出现�
 - 全量 pytest **1417 passed**（本轮 +5：工具层 53→55、门禁 16→19；1412 + 5 = 1417）。
 - **P2-1 探针复现**：等长替换 `assert_text` → `get_logs` → 全量 **1 failed**（修复前 1412 全绿）。
 - 全仓重复顶层定义体检：**零命中**。
+
+---
+
+## Task 1.4 完成记录（P3-04 git diff / changed_files + run_git 单点，2026-10-08）
+
+**Objective**：设计 §5.1 的 `PlannerInput.changed_files` 数据源（plan 第 0 节核实的差距：
+**全仓此前没有任何 git diff 工具**）。
+
+### 交付
+
+- `source/vcs.py`（新）：`run_git(repo_root, *args) -> str` + `GitError(RuntimeError)`
+  ——git 调用的**唯一实现**。
+- `source/git_diff.py`（新）：`changed_files(repo_root, base, head=None) -> GitChangeSet`
+  + `FileChange` / `GitChangeSet` / `GitDiffError`。
+- `experience/promoter.py`（改）：删掉本地 `_git`，三个调用点改调 `run_git`；
+  去掉不再用的 `import subprocess`。**行为与报错消息逐字不变**（P2 回归保证：
+  `test_promoter.py` + `test_p2_matrix_m4.py` 20 例全绿）。
+- `tests/unit/test_git_diff.py`（新，**17 例**，真 git 仓库 fixture）。
+
+### 三条设计决定（都影响下游 impact 分析，都写进了模块 docstring）
+
+1. **`-z`（NUL 分隔）而不是按行 + `\t` 切**：文件名里可以有制表符与换行（git 允许），
+   按行切会把这类名字**静默解析错**——而错的路径喂给 `planner/impact.py` 的
+   path→target 映射只会**静默**给出错的受影响用例。有专测（`a\tb.txt` / `c\nd.txt`）。
+2. **显式传 `-M`**：git 2.9 起 `diff.renames` 默认 true，但那是**用户配置**——有人在
+   `~/.gitconfig` 里关掉，重命名就会变成 `A` + `D`，「重命名分类正确」在**他的机器上**
+   静默不成立。**实测**：git 2.54 下不传 `-M` 也会报 `R100`（默认开），但**探针验证**
+   去掉 `-M` 后 `test_rename_detection_is_independent_of_user_config` **真红**——即
+   这条钉子不是空转，它钉的正是「用户配置不该改变结论」。
+3. **`changed_files` 对重命名取旧 + 新两个路径**：impact 的映射是「路径 → 受影响
+   target」，重命名后 metadata 的文件归属**可能还挂在旧路径上**（未重新生成）、也可能
+   已挂到新路径——两边都收是保守的（沿用 P2「匹配宁可多包含」的取向），只收一边会在
+   另一种 metadata 形态下漏掉影响面。复制（`C`）**只收新路径**（源文件内容没变，
+   不该被算受影响）。有专测。
+
+### 失败语义（fail-loud，矩阵 #6 的 M2 侧消费）
+
+非 git 目录 / 坏 `base` / 坏 `head` → `GitDiffError(ValueError)`，消息带**仓库路径 +
+范围 + git 自己的 stderr**（`unknown revision` / `Not a git repository` 都在那，不自己
+编诊断）。**不静默返回空 changeset**——「这次改动影响 0 个用例」与「ref 拼错了」在结果
+上长得一模一样，而前者会让 planner 产出一个看起来完全正常的空 Plan。
+底层 `GitError(RuntimeError)` 在 `changed_files` 里被**翻译**成域错误（与
+`knowledge._read_steps` 把裸 sqlite 异常翻译成 `ValueError` 同一手法，review_p2_task55
+P3-2 的先例）。
+
+### 实测踩到的 git 行为（写进测试 docstring）
+
+`git -C dir` 会**向上找 `.git`**——而 pytest 的 `tmp_path` 在**项目仓库里面**，所以
+「造一个非 git 目录」的测试**第一版 `DID NOT RAISE`**（那个目录被当成「项目仓库的
+子目录」）。修法：`GIT_CEILING_DIRECTORIES=tmp_path` 把向上搜索截住。
+这条同时说明：`changed_files(Path("."))` 从仓库子目录调用**能正常工作**（会找到外层
+仓库）——那是想要的行为。
+
+### ⚠️ 登记：另有两处 git 调用**没有**收敛（有意为之）
+
+| 位置 | 形态 | 为什么不动 |
+|---|---|---|
+| `source/metadata.py::_git_commit` | 不传 `-C`（靠进程 CWD），失败一律 `"unknown"` | **P1 存量**；plan Task 1.4 的 Files 段**只限定 promoter**；调用形态不同（失败策略是调用方的，不是 git 层的） |
+| `tracer/recorder.py::_git_commit` | 同上（两者互为副本） | 同上 |
+
+`source/vcs.py` 的 docstring 已把这个范围**写清楚**（「本次只收敛 promoter 那一条」），
+并注明「是否收敛由后续任务显式决策，不顺手改」——沿用 `review_p3_task11_final` 肯定过的
+边界诚实做法（当时没顺手改 `tracer` 的第四/第五个 SQLite 写者）。
+
+### 实测
+
+- 全量 pytest **1434 passed**（Task 1.4 新增 **17**；上一轮基线 1417 + 17 = 1434）。
+- P2 回归：`test_promoter.py` + `test_p2_matrix_m4.py` **20 passed**（promoter 换
+  `run_git` 后行为不变）。
+- **探针**：去掉 `-M` → `test_rename_detection_is_independent_of_user_config` **真红**。
+- 全仓重复顶层定义体检（含 `source/`）：**零命中**。
+
+### M1 收口
+
+**Gate M1 的 5 条判据全部满足**：agent.db 迁移幂等 ✅ / 单写者生效（异常路径已修）✅ /
+policy.yaml + production 一票否决 ✅（函数层；CLI 端到端归 Task 2.4）/
+工具注册表静态断言进 CI ✅ / `source/git_diff.py` ✅。→ 打 tag **`checkpoint-p3-m1`**。

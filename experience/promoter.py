@@ -27,7 +27,6 @@
 from __future__ import annotations
 
 import re
-import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +34,7 @@ from pathlib import Path
 from experience.models import Experience, ExperienceStatus, PromotionProposal
 from experience.store import SQLiteExperienceStore
 from experience.verifier import distinct_run_count
+from source.vcs import run_git
 
 __all__ = ["generate_proposal", "approve_proposal"]
 
@@ -275,8 +275,8 @@ def approve_proposal(store: SQLiteExperienceStore, proposal_id: str, *,
         else:
             target.write_text(proposal.diff, encoding="utf-8")
         rel = target.relative_to(Path(repo_root)).as_posix()
-        _git(repo_root, "add", rel)
-        _git(repo_root, "commit", "-m",
+        run_git(repo_root, "add", rel)
+        run_git(repo_root, "commit", "-m",
              f"promote: experience {exp.experience_id} "
              f"(proposal {proposal_id})\n\n"
              f"Committer: {committer}\n"
@@ -290,18 +290,9 @@ def approve_proposal(store: SQLiteExperienceStore, proposal_id: str, *,
         raise RuntimeError(
             f"git 提交失败，overrides 写入已回滚（proposal 仍为 PENDING，"
             f"修复 git 后重试 approve 即续传）：{e}") from e
-    sha = _git(repo_root, "rev-parse", "HEAD").strip()
+    sha = run_git(repo_root, "rev-parse", "HEAD").strip()
 
     store.set_promotion_proposal_status(proposal_id, "APPROVED",
                                         git_commit=sha, reviewer=committer)
     store.record_promotion(exp.experience_id, sha)
     return store.get_promotion_proposal(proposal_id), sha
-
-
-def _git(repo_root: Path, *args: str) -> str:
-    result = subprocess.run(["git", "-C", str(repo_root), *args],
-                            capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"git {' '.join(args)} failed: {result.stderr.strip()[:300]}")
-    return result.stdout
