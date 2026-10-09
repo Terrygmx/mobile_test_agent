@@ -196,7 +196,14 @@ M1 基础与安全边界(2d) ─► M2 Planning(2d) ─► M3 Generation(3.5d) �
 > ① 每次随机生成（uuid）→ upsert **永不发生**，库随调用次数线性增长；
 > ② 由 `app_build + git_commit`（+ 可选的 base_build）派生 → 同一 build 重复 plan 会**覆盖**，
 > 但「同一 build 跑了两次想留两份」就不可能。
-> **拍板后回填本节**，并让 `TestPlan.plan_id` 的生成方式只有**一处实现**。
+> **✅ 已拍板（Task 2.3 实现时）**：**内容寻址**——唯一生成点
+> `planner/models.py::plan_id_for(app_build, git_commit, changed_files)`
+> = `"plan_" + sha256(三者) [16 hex]`。理由：`save_plan` 是 upsert，所以
+> ① 随机 uuid → upsert 永不发生、库线性增长，且同一输入两次跑出两份「内容可能不同」
+> 的 Plan（LLM 解释层不稳定），无法回答「这个 build 的 plan 是哪一份」；
+> ② 只由 `app_build + git_commit` 派生 → 同一 build 换 base（改动集不同）会**静默
+> 覆盖**前一份。内容寻址两头都躲开：同输入幂等、不同输入不互相覆盖。
+> `changed_files` 先排序再入哈希（集合相同 → id 相同）。
 
 > **⚠️ 接线前置（Task 2.2 留的，review_p3_task22 P3-3 / 小观察 1、5）**——三条，都影响
 > `planner/planner.py` 的写法：

@@ -18,10 +18,16 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-__all__ = ["LLM_INVALID_OUTPUT", "ParsedLLMOutput", "parse_llm_output",
+__all__ = ["LLM_INVALID_OUTPUT", "MAX_REASON_CHARS", "ParsedLLMOutput",
+           "PlanRationale", "parse_llm_output", "parse_plan_reasons",
            "ALLOWED_ACTIONS"]
 
 LLM_INVALID_OUTPUT = "LLM_INVALID_OUTPUT"
+
+# `reasons` 单条的长度上限。存在的理由：这段文字会被**持久化**（`test_plans.tasks_json`）
+# 并被 CLI / 报告渲染，一个失控的长回复会把它们撑坏。超长**截断并留 `…` 标记**——不是
+# 静默丢弃（丢了等于「LLM 没解释」，截断是「解释被截了」，后者看得见）。
+MAX_REASON_CHARS = 200
 
 # 10.4：允许的 action（恢复执行端仍受「与原动作一致」白名单二次约束——
 # 这里是 LLM 契约层，两层各自 fail-closed）
@@ -106,4 +112,81 @@ def parse_llm_output(raw: str) -> ParsedLLMOutput:
         if getattr(out, name if name != "target" else "target_value") is None:
             # 必填缺失（action 非白名单 / target.value 缺失 / confidence 缺失）
             return out
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Planner 解释层契约（设计 §5.2 末句；Task 2.3 / P3-07）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PlanRationale:
+    """`{"reasons": {case_id: str}, "order": [case_id, …]}` 的解析结果。
+
+    **两个字段各自独立降级**（不是「一个坏就全丢」）：解释写坏了不该连顺序也丢，
+    反过来也一样——它们由 `planner/planner.py` 分别消费（`reasons` 进 Plan，
+    `order` 只影响同分次序）。
+
+    - `reasons`：**已清洗**（strip 过、去空、截断到 `MAX_REASON_CHARS`）。
+      非法条目**直接丢掉**而不是保留原文：`TestPlanTask.reasons` 的校验要求
+      「非空且元素非空白」，留着坏值会让整个 Plan 构造失败——**LLM 的输出不该有能力
+      让 Plan 建不出来**。
+    - `order`：`None` = 没有可用的顺序（缺字段 / 非列表 / 有重复 / 空 / 含非 str）。
+      「不完整或重复的排列」一律作废：调用方要拿它跟确定性顺序做**集合比对**，
+      半个排列会让「谁被漏了」变成一个需要猜的问题。
+    - `ignored_fields`：额外字段忽略但可见（与 `ParsedLLMOutput` 同款纪律）。
+    """
+
+    reasons: dict[str, str] = field(default_factory=dict)
+    order: tuple[str, ...] | None = None
+    ignored_fields: dict = field(default_factory=dict)
+
+
+def _clean_reason(text) -> str | None:
+    """单条解释的清洗：非 str / 空白 → `None`（丢弃）；超长 → 截断 + `…`。"""
+    if not isinstance(text, str):
+        return None
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > MAX_REASON_CHARS:
+        return cleaned[:MAX_REASON_CHARS - 1] + "…"
+    return cleaned
+
+
+def parse_plan_reasons(raw: str) -> PlanRationale:
+    """严格解析 planner 解释层的输出。**不抛异常**——返回尽最大努力的合法子集，
+    调用方按「有没有可用内容」决定降级（`planner/planner.py` 的规则摘要兜底）。
+
+    与 `parse_llm_output` 同一套纪律：`raw_decode` 增量提取、额外字段忽略但记录、
+    任何类型不符的字段**不采纳**（fail-closed —— 「尽量解释一下」是给幻觉开后门）。
+    """
+    out = PlanRationale()
+    if not isinstance(raw, str):
+        return out
+    obj = _extract_json(raw)
+    if not isinstance(obj, dict):
+        return out
+
+    known = {"reasons", "order"}
+    extra = {k: v for k, v in obj.items() if k not in known}
+    if extra:
+        out.ignored_fields = extra
+
+    reasons = obj.get("reasons")
+    if isinstance(reasons, dict):
+        for case_id, text in reasons.items():
+            if not isinstance(case_id, str) or not case_id.strip():
+                continue
+            cleaned = _clean_reason(text)
+            if cleaned is not None:
+                out.reasons[case_id.strip()] = cleaned
+
+    order = obj.get("order")
+    if isinstance(order, list) and order:
+        if all(isinstance(i, str) and i.strip() for i in order):
+            ids = tuple(i.strip() for i in order)
+            if len(set(ids)) == len(ids):        # 重复 → 不是排列，作废
+                out.order = ids
     return out

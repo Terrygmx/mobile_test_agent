@@ -50,16 +50,27 @@ class TestPlan(BaseModel):
 
 - 那张表的 `tasks_json` 是**不透明 JSON blob**（不像 `agent_tasks` 有逐字段列），
   store 没有理由知道 `TestPlanTask` 的结构；
-- 更要紧的是**避免包级循环**：`agents.storage` 若 import `planner.models`，而
-  `planner/__init__.py` 又 re-export `planner.planner`（Task 2.3 起要 import
-  `agents.storage`），就会在包初始化期形成环。把转换留在本模块，
-  **`agents/**` 对 `planner` 的依赖为「零」**——这是结构上的保证，不是「我们小心
-  一点」。`test_planner_models.py::test_agents_package_does_not_import_planner`
-  逐文件扫整个 `agents/` 包钉住它（依赖方向单向：`planner → agents`）。
+- 更要紧的是**避免包级循环**：把转换留在本模块，**`agents/**` 对 `planner` 的依赖为
+  「零」**——这是结构上的保证，不是「我们小心一点」。
+  `test_planner_models.py::test_agents_package_does_not_import_planner` 逐文件扫整个
+  `agents/` 包钉住它（依赖方向单向：`planner → agents`）。
+
+⚠️ **Task 2.3 落地后的一处措辞更正**：本模块原先写「`planner/__init__.py` 又 re-export
+`planner.planner`（Task 2.3 起要 import `agents.storage`）」——实现 `planner/planner.py`
+时核实：**它不 import `agents`**（落库是 CLI 的职责，编排层只产出 `TestPlan`）。
+所以那条成环路径**今天不成立**。禁令仍然保留，但理由换成本文件与 `planner/__init__.py`
+写的那条：`planner/__init__` 只放**不依赖 `agents`** 的叶子模块——把 `planner.planner`
+拉进包初始化会让 `import planner` 顺带拉起 `repository` / `llm` / `experience`，而且
+一旦将来有人给编排层加上落库（M6 的自主闭环很可能要），成环会**立刻**回来。
+
+## `plan_id` 的来源（Task 2.3 前置 ①，已拍板）
+
+**内容寻址**：`plan_id_for(app_build, git_commit, changed_files)`。理由见该函数。
 """
 from __future__ import annotations
 
-from typing import Any, Literal
+import hashlib
+from typing import Any, Iterable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -71,6 +82,7 @@ __all__ = [
     "PlannerInput",
     "TestPlan",
     "TestPlanTask",
+    "plan_id_for",
 ]
 
 # TestPlan **自己的**版本（设计 §5.1 的 `schema_version: str = "0.1"`）。
@@ -83,6 +95,39 @@ PRIORITY_MIN, PRIORITY_MAX = 0, 100
 # 设计 §5.1 的 `Literal["existing", "generated_gap"]`——用类型别名而不是 Enum：
 # 与设计逐字一致，且 `model_dump(mode="json")` 直接给字符串（落 tasks_json 要的就是它）。
 PlanSource = Literal["existing", "generated_gap"]
+
+# `plan_id` 的哈希长度（16 hex = 64 bit，碰撞概率对本项目的规模而言可忽略；
+# 短是为了 CLI 输出与日志里好读）。
+_PLAN_ID_HASH_LEN = 16
+
+
+def plan_id_for(app_build: str, git_commit: str,
+                changed_files: Iterable[str]) -> str:
+    """`plan_id` 的**唯一生成点**（Task 2.3 前置 ① 的拍板结论）。
+
+    ## 为什么是内容寻址，不是随机 id
+
+    `test_plans` 的主键是 `plan_id`，而 `save_plan` 是 **upsert**（Task 1.1 的定档）
+    ——所以「重存算不算新计划」**完全取决于 id 是否稳定**：
+
+    - **随机 uuid**：upsert **永不发生**，库随每次调用线性增长；而且同一输入跑两次
+      得到两份「内容可能不同」的 Plan（LLM 解释层不稳定），**无法回答「这个 build 的
+      plan 是哪一份」**；
+    - **只由 `app_build + git_commit` 派生**：同一 build 下换一个 base（→ 不同的
+      `changed_files`）会**覆盖**前一份——那是**静默丢数据**；
+    - **内容寻址（本实现）**：`(app_build, git_commit, changed_files)` 三者相同 →
+      同一 id（重跑幂等，不增长）；任一不同 → 不同 id（不互相覆盖）。
+
+    与 P2/P3 的确定性取向一致：`priority_score` 是纯函数、`order_key` 是全序，Plan
+    也应当**可复现**——「同一输入 → 同一 `plan_id`」正是这件事在**标识**上的落点。
+
+    `changed_files` 先 `sorted` 再入哈希：git 的输出顺序是确定的，但调用方可能来自
+    `--changed-files` 之类的手工输入，排序让「集合相同」等价于「id 相同」。
+    """
+    parts = [app_build, git_commit, *sorted(str(p) for p in changed_files)]
+    digest = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+    return f"plan_{digest[:_PLAN_ID_HASH_LEN]}"
+
 
 
 class _Strict(BaseModel):

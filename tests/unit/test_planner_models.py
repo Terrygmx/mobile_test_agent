@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 from agents.storage import SQLiteAgentStore
 from planner.models import (PLAN_SCHEMA_VERSION, PRIORITY_MAX, PRIORITY_MIN,
-                            PlannerInput, TestPlan, TestPlanTask)
+                            PlannerInput, TestPlan, TestPlanTask, plan_id_for)
 
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -232,3 +232,45 @@ def test_agents_package_does_not_import_planner():
                if "__pycache__" not in p.parts]
     assert len(scanned) >= 5, f"只扫到 {len(scanned)} 个 agents/*.py，范围疑似写错"
     assert (_ROOT / "agents" / "storage.py") in scanned, "storage.py 必须被覆盖到"
+
+
+# --- plan_id 的来源（Task 2.3 前置 ① 的拍板结论） ----------------------------
+
+
+def test_plan_id_is_stable_for_the_same_inputs():
+    """同一输入 → 同一 id：`save_plan` 是 upsert，幂等靠它。"""
+    a = plan_id_for("1026", "abc1234", ["a.swift", "b.swift"])
+    b = plan_id_for("1026", "abc1234", ["a.swift", "b.swift"])
+    assert a == b and a.startswith("plan_")
+
+
+def test_plan_id_ignores_the_order_of_changed_files():
+    """集合相同 → id 相同（`changed_files` 先排序再入哈希）。"""
+    assert (plan_id_for("1026", "abc", ["b", "a"]) ==
+            plan_id_for("1026", "abc", ["a", "b"]))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("app_build", "1027"), ("git_commit", "deadbee")])
+def test_plan_id_changes_when_the_build_identity_changes(field, value):
+    """build / commit 变了 → 不同 id（**不互相覆盖**）。"""
+    base = plan_id_for("1026", "abc1234", ["a.swift"])
+    kwargs = {"app_build": "1026", "git_commit": "abc1234", field: value}
+    assert plan_id_for(kwargs["app_build"], kwargs["git_commit"],
+                       ["a.swift"]) != base
+
+
+def test_plan_id_changes_when_changed_files_change():
+    """同一 build 下换 base（改动集不同）→ 不同 id。
+
+    这正是「只由 app_build + git_commit 派生」会**静默丢数据**的那个洞：两份 Plan
+    撞同一个主键，后写的覆盖前写的。
+    """
+    assert (plan_id_for("1026", "abc1234", ["a.swift"]) !=
+            plan_id_for("1026", "abc1234", ["b.swift"]))
+
+
+def test_plan_id_is_content_addressed_not_random():
+    """确定性：与调用次数/时间无关（F13 的取向延伸到 Plan 的**标识**上）。"""
+    ids = {plan_id_for("1026", "abc1234", ["a.swift"]) for _ in range(5)}
+    assert len(ids) == 1

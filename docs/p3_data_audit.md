@@ -1174,3 +1174,138 @@ plan 的 Files 只列了 `experience/knowledge.py`，但白名单里的三个键
   舍入退回 `round()` → 2 red。
 - `-W error::pytest.PytestCollectionWarning` 下两文件 **53 passed**（零收集警告）。
 - 全仓重复顶层定义体检：**零命中**。
+
+---
+
+## Task 2.3 完成记录（P3-07 diff-driven planner + LLM 解释层，2026-10-09）
+
+**Objective**：设计 §5.2/§5.3 —— `Git Diff → Impact → TestPlan`，**LLM 只解释/同分打平，
+不决定顺序**。M2 的第三个任务。
+
+### 交付
+
+- `planner/impact.py`（新）：`changed_targets` / `unmatched_changed_files` /
+  `metadata_has_file_attribution` / `drift_targets` / `ImpactMappingError`。
+  **适配层**：一行索引逻辑都没有（索引本体是 `source/coverage.py` + `graph/impact.py`）。
+- `planner/planner.py`（新）：`plan(...)` / `PlanResult` / `Unrankable` / `failure_rate` /
+  `rule_basis` / `llm_order_violations`。
+- `llm/prompt.py`（改）：`build_plan_rationale_prompt`（解释层模板，10.4 分区结构照旧）。
+- `llm/parser.py`（改）：`parse_plan_reasons` / `PlanRationale` / `MAX_REASON_CHARS`。
+- `planner/models.py`（改）：`plan_id_for`（前置 ① 的拍板落点）+ 分层段措辞更正。
+- `planner/__init__.py`（改）：导出 `plan_id_for`；**禁令理由对齐实测**（见下）。
+- 测试：`tests/unit/test_planner_impact.py`（**16**）、`tests/unit/test_planner_e2e.py`（**24**）、
+  `test_llm_contract.py` 26→**47**、`test_planner_models.py` 18→**24**。
+
+### 前置 ① 拍板：`plan_id` = **内容寻址**
+
+唯一生成点 `planner/models.py::plan_id_for(app_build, git_commit, changed_files)`
+= `"plan_" + sha256(三者)[:16]`。三个候选的取舍：
+
+| 方案 | 后果 |
+|---|---|
+| 随机 uuid | `save_plan` 是 upsert → **upsert 永不发生**，库随调用线性增长；同一输入两次跑出两份「内容可能不同」的 Plan（LLM 解释层不稳定），无法回答「这个 build 的 plan 是哪一份」 |
+| 只由 `app_build + git_commit` | 同一 build 换 base（改动集不同）→ **静默覆盖**前一份（丢数据） |
+| **内容寻址（本实现）** | 同输入幂等（不增长）、不同输入不互相覆盖；`changed_files` 先排序 → 集合相同即 id 相同 |
+
+### 三条口径（都写进了模块 docstring）
+
+1. **候选集 = 影响面内的用例**（不是全部用例）。设计 §5.3 的流程从「受影响用例」出发再把
+   历史/风险**加进排序**；§5.3 那句「CRITICAL/HIGH 强制高优先级，**不管改动大小**」说的是
+   **排序**（diff 只碰它一个字符也照样给 floor），不是「把未受影响的 CRITICAL 也拉进来」。
+   这条同时让**矩阵 #6 自洽**：`changed_files` 为空 → 影响面为空 → 空 Plan（若候选集是全体，
+   空改动会产出一份「排好序的全体用例」，那就不是空 Plan 了）。未受影响的用例由 `notes` 明示。
+2. **`reasons` = 规则摘要（永远在）+ `llm: ` 前缀的 LLM 解释（有则追加）**。F13 要的是
+   「可解释，**不是『LLM 觉得』**」——数值依据由代码生成、**永远存在**，LLM 的文字只做追加，
+   来源一眼可辨。LLM 挂掉/预算耗尽/输出不合契约 → 只是少了那几行，Plan 照常产出。
+3. **`failure_rate` 按运行统计**：分母 = `testcase_run_id` 去重数、分子 = 有 ≥1 个
+   `status=="FAILED"` 步骤的运行数。`trace_history` 给的是**步骤流**，但 `TraceStep`
+   带着 `testcase_run_id` → 分组即可，**不新增接口、不手搓 SQL**。三条细则：
+   `RECOVERED` **不算失败**（它是恢复成功，E7 口径）；按步骤算会让步骤多的用例被稀释；
+   **空历史 → 0.0**（没有失败证据 ≠ 一直失败——给 1.0 会让新用例凭空挤掉有失败史的老用例）。
+
+### 矩阵 #5：LLM 只许同分重排 —— 判据可机械核对
+
+`llm_order_violations(ordered, proposed)`：① `proposed` 必须是**排列**（漏/多/重复都算违规）；
+② 按**分数**给段位（同分共享一段），`proposed` 的段位序列必须**非递减**。
+
+⚠️ **段位必须按分数算，不能按名次算**——同分两条互换是设计**允许**的 tie-break；按名次判会
+把合法操作全判成违规，「矩阵 #5 的守卫」就变成「LLM 永远被拒」，判据与设计不等义。有专测
+（`test_llm_order_violations_allows_any_within_group_order` 用三条同分覆盖）。
+
+违规 → **整条顺序丢弃** + `audit` 里记 `llm_order_rejected`（含 `moved_up` / `displaced`
+与各自分数——**字段名按角色给**，第一版写成 `higher`/`lower` 指反了，审计读者会把分数读反）。
+另外两条留痕：`llm_unknown_testcase_ids`（提到本 Plan 没有的 id）、`llm_ignored_fields`
+（LLM 试图给 `priority` → 忽略但可见）。
+
+### 矩阵 #6：空改动的三种成因都**明示**
+
+| 成因 | 处置 |
+|---|---|
+| `changed_files` 为空 | 空 Plan + `notes`「本次没有改动 → 空 Plan（矩阵 #6）」 |
+| 改动非空、**一个元素都没映射到** | 空 Plan + `notes` **列出未匹配的文件**（`unmatched_changed_files`） |
+| 改动命中了元素、**没有用例引用** | 空 Plan + `notes` 说明 |
+
+三种都是「不编造依据」。第一种与第二种的差别正是 `unmatched_changed_files` 存在的理由：
+「这次没碰 UI」与「metadata 的路径写法与 git 不一致」在结果上长得一模一样，而后者会让
+planner **长期**产出空 Plan 却没人发现。
+
+### ⚠️ 偏离登记 1：`changed_targets` 多了 `unmatched_changed_files` 兄弟函数
+
+plan 的 Files 只写了 `changed_targets(changes, metadata) -> tuple[str, ...]`（**签名照办**）。
+实现时发现上面那张表里的第二种成因必须可见 → 补一个只读视图，与 `changed_targets` 共用
+同一个私有索引 `_file_index`（不是第二份实现）。
+
+### ⚠️ 偏离登记 2：`drift_targets` 需要 `cases`（plan 只写了「回退 drift 面」）
+
+核实 `source/build_diff.py::diff_builds`：它的**范围**由 `reached_screens(cases, old)` 决定
+——**没有 cases 就退化成空 scope、什么都比不出来**，而结果看起来只是「没变化」。所以回退面
+必须收 `cases`，且 `cases` 为空时**显式拒绝**（`ImpactMappingError`）。
+调用方（`planner/planner.py`）额外收一个**可选** `base_metadata`：有它才走回退面，没有就
+照原样上抛 `ImpactMappingError`（不是「空 Plan」）。open question #2 要求的「精度损失写进
+reasons」落在 `notes` 里（drift 是 build 之间的元素变化，比「本次 commit 改了哪些文件」宽）。
+
+### ⚠️ 偏离登记 3：`PlanResult` 是 plan 之外的**过程产物**
+
+设计 §5.1 的 `TestPlan` 只有 `schema_version / plan_id / app_build / git_commit / tasks`
+——**没有**承载「为什么是这个 Plan」的字段。但本任务 Steps 明确要求两件事可见：「空 Plan 且
+**明示**」（矩阵 #6）与「LLM 重排被拒 → **审计留痕**」（矩阵 #5）。所以编排层返回
+`PlanResult(plan, notes, unrankable, audit)`：`plan` 是**持久化产物**（`save_plan` 只收它），
+其余三项是**过程结论**（CLI 渲染；M6 起写 `agent_trace`）。**不给 `TestPlan` 加字段**——那要
+动 `test_plans` 的 schema（设计 §11 的表没有这些列）。
+
+### ⚠️ 坏引用用例：**列出来**，不猜、不静默丢
+
+进了影响面但元素解析不到的用例（`UnknownReferenceError` / `AmbiguousReferenceError`）→
+`PlanResult.unrankable` + `notes` 点名。**不给它猜一个风险等级**：猜 LOW 会让它在 Plan 里
+沉底，而它恰恰是最可能失败的那个。依据是 P1 的同一句话——`runner/testcase_runner.py` 把引用
+错误当**用例缺陷**（lint 应已拦截），该用例直接 FAIL、不做 recovery。
+（口径待 M2 Gate 演示后回设计层确认：排除 / 按 unknown-risk 计 / fail-loud，三选一。）
+
+### `planner/__init__.py` 的禁令理由**对齐实测**
+
+Task 2.1 写的禁令理由是「`planner.planner` 要 import `agents.storage` → 成环」。实现时核实：
+**编排层不 import `agents`**（落库是 CLI 的职责，AST 扫过导入表：无 `agents`），所以那条
+成环路径**今天不成立**。禁令**保留**，理由换成两条真的：① `import planner` 不该顺带拉起
+`repository` / `source.build_diff`；② M6 的自主闭环很可能让编排层直接落 `agent.db`，那时
+成环会**立刻**回来。`planner/models.py` 的「分层」段同步更正。
+
+### ⚠️ 登记：本任务只产出 `source="existing"`
+
+设计 §5.1 的 `Literal["existing","generated_gap"]` 两值都已支持，但 `generated_gap`
+（生成补齐）的生产者归 **M3 的 Test Generator**——那时才有「这条任务是生成的」这个事实。
+现在写它是**没有生产者**，不是漏了。
+
+### 实测
+
+- 全量 pytest **1575 passed**（Task 2.3 新增 **67**：`test_planner_impact.py` 16 +
+  `test_planner_e2e.py` 24 + `test_llm_contract.py` +21 + `test_planner_models.py` +6；
+  上一轮基线 1508 + 67 = 1575）。
+- **九条 A/B 探针全部真红**（每次先读原文、改后立即还原并断言字节相等）：
+  ① 删「跨分重排判违规」→ 2 red；② 删预算闸门 → 1 red；③ 候选集改成全部用例 → 7 red；
+  ④ 失败率改成按步骤 → 3 red；⑤ 删「缺归属 fail-loud」→ 3 red；⑥ 删单字符串闸门 → 1 red；
+  ⑦ 删 drift 的 cases 闸门 → 1 red；⑧ LLM 解释改成「替换」而非「追加」→ 1 red；
+  ⑨ `plan_id` 改成常量 → 4 red。
+- 实现期由测试抓到的真 bug 一处：`_resolve_targets` 的回退分支**漏了 `return`**（回退面
+  没接上，返回 `None` → `frozenset(None)` 抛 TypeError）。测试当场抓到。
+- 全仓重复顶层定义体检（含 `llm/`）：**零命中**。
+- `-W error::pytest.PytestCollectionWarning` 下 `test_planner_models.py` 24 passed（零警告）。

@@ -384,3 +384,102 @@ def test_no_llm_disabled_stage_visible():
     r = engine.recover(c)
     assert not r.recovered
     assert {"stage": "llm", "outcome": "disabled"} in r.detail["stages"]
+
+
+# ---------------------------------------------------------------------------
+# Planner 解释层契约（设计 §5.2 末句；Task 2.3 / P3-07）
+# ---------------------------------------------------------------------------
+
+
+def test_plan_rationale_prompt_states_the_two_hard_rules():
+    """prompt 必须把两条硬约束写出来（对应的**强制**在 parser 与 planner，不靠模型自觉）。"""
+    from llm.prompt import build_plan_rationale_prompt
+
+    prompt = build_plan_rationale_prompt(
+        app_build="1026", git_commit="abc1234",
+        changed_files=["LoginDemoApp.swift"],
+        entries=[{"testcase_id": "login_001", "priority": 55,
+                  "basis": ["impact: 命中改动影响面", "score: 55"]}])
+    assert "[SYSTEM INSTRUCTIONS]" in prompt
+    assert '"reasons"' in prompt and '"order"' in prompt
+    assert "会被判违规" in prompt, "跨分重排的后果必须写进契约"
+    assert "不要引入没有给出的事实" in prompt, "F13：不许编造依据"
+    # 可信区里带上真实上下文（用例 id / 分数 / 依据 / 改动文件）
+    assert "login_001" in prompt and "priority=55" in prompt
+    assert "LoginDemoApp.swift" in prompt and "abc1234" in prompt
+
+
+def test_plan_rationale_prompt_has_no_untrusted_zone():
+    """本 prompt 只喂仓库数据（用例集 / git / metadata）——**没有**运行时观测，
+    所以不该出现不可信区；将来若有人往这里塞运行时数据，必须先建区（见函数 docstring）。"""
+    from llm.prompt import build_plan_rationale_prompt
+
+    prompt = build_plan_rationale_prompt(
+        app_build="b", git_commit="c", changed_files=[],
+        entries=[{"testcase_id": "x", "priority": 0, "basis": []}])
+    assert "[UNTRUSTED" not in prompt
+
+
+def test_parse_plan_reasons_happy_path():
+    from llm.parser import parse_plan_reasons
+
+    p = parse_plan_reasons(json.dumps({
+        "reasons": {"login_001": "  登录失败过  "},
+        "order": ["b", "a"]}))
+    assert p.reasons == {"login_001": "登录失败过"}, "strip 过"
+    assert p.order == ("b", "a")
+
+
+@pytest.mark.parametrize("raw", ["不是 JSON", "[]", "{}", "", None, 42])
+def test_parse_plan_reasons_invalid_is_empty(raw):
+    from llm.parser import parse_plan_reasons
+
+    p = parse_plan_reasons(raw)
+    assert p.reasons == {} and p.order is None
+
+
+def test_parse_plan_reasons_drops_bad_entries_keeps_good_ones():
+    """**逐条降级**：一条坏解释不该连累别的（否则 LLM 一抖就全没了）。"""
+    from llm.parser import parse_plan_reasons
+
+    p = parse_plan_reasons(json.dumps({
+        "reasons": {"a": "好", "b": "", "c": "   ", "d": 42, "e": None,
+                    "f": "也好"},
+        "order": ["a", "a"]}))          # 有重复 → 不是排列 → 作废
+    assert p.reasons == {"a": "好", "f": "也好"}
+    assert p.order is None
+
+
+def test_parse_plan_reasons_truncates_long_text_with_a_marker():
+    """超长截断**留标记**——截断是「解释被截了」，丢弃是「LLM 没解释」，两者要能区分。"""
+    from llm.parser import MAX_REASON_CHARS, parse_plan_reasons
+
+    p = parse_plan_reasons(json.dumps({"reasons": {"a": "x" * 500}}))
+    assert len(p.reasons["a"]) == MAX_REASON_CHARS
+    assert p.reasons["a"].endswith("…")
+
+
+@pytest.mark.parametrize("bad_order", [
+    ["a", 1], ["a", ""], ["a", "  "], "a", {}, ["a", "a"], [], None])
+def test_parse_plan_reasons_rejects_unusable_orders(bad_order):
+    from llm.parser import parse_plan_reasons
+
+    assert parse_plan_reasons(json.dumps({"order": bad_order})).order is None
+
+
+def test_parse_plan_reasons_records_extra_fields():
+    """额外字段忽略但可见（与 recovery 契约同款：LLM 越权的痕迹不能静默消失）。"""
+    from llm.parser import parse_plan_reasons
+
+    p = parse_plan_reasons(json.dumps({"reasons": {}, "priority": {"a": 100}}))
+    assert p.ignored_fields == {"priority": {"a": 100}}
+
+
+def test_parse_plan_reasons_uses_raw_decode_for_nested_json():
+    """P0 P2-6 的老坑：非贪婪正则会被嵌套 JSON 截断——用 `raw_decode` 增量解码。"""
+    from llm.parser import parse_plan_reasons
+
+    raw = 'prefix {"reasons": {"a": "nested {\\"x\\": 1}"}, "order": ["a"]} tail'
+    p = parse_plan_reasons(raw)
+    assert p.reasons["a"] == 'nested {"x": 1}'
+    assert p.order == ("a",)
