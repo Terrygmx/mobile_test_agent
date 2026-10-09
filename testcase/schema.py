@@ -1,9 +1,13 @@
-"""Testcase schema 0.1 模型（设计 6.1~6.3，Task 1.1 / P1-01）。
+"""Testcase schema 模型（设计 6.1~6.3，Task 1.1 / P1-01；Task 3.1 / P3-09 扩展）。
 
 原则（设计 H7/H18）：
-  - Pydantic 只建设计 6.3 列出的字段，extra="forbid"（未知键一律 ValidationError）；
+  - Pydantic 只建设计 6.3 列出的字段 + 6.2 的 Candidate 溯源字段，extra="forbid"
+    （未知键一律 ValidationError）；
   - retry / 用例级 timeout 键不进 schema（重试归 Executor Policy，作者不可绕过）；
   - 纯数据模型，不 import 任何执行层模块（H18）。
+
+F5：Candidate Test **就是**本模型的实例，只是多三个可选溯源字段——**不建平行模型**
+（`extra="forbid"` 下平行模型会拒新键，且「同一 Schema」是本阶段的红线）。
 """
 from __future__ import annotations
 
@@ -167,8 +171,34 @@ class AssertionStep(BaseModel):
     assertion: AssertionSpec
 
 
+class GenerationEvidence(BaseModel):
+    """6.2 候选溯源：这个候选**从何而来**（F5 的「溯源字段」）。
+
+    三个列表装的是**人类可读的引用**，不是活对象——本模型随用例序列化进
+    `test_candidates.testcase_yaml` 与最终落盘的 suite YAML，必须是 YAML 友好、
+    可人工复核的形态（设计 6.2 示例即 `"Search -> EmptyResultState"` /
+    `"SearchView.swift"` 这类字符串）。
+
+    ⚠️ 元素类型定为 `str`：设计未给出结构化元素契约。生产侧（Task 3.4）若确需
+    结构化元素，那是**改这份契约**的立项，不要在这里放宽成 `Any` 静默放行。
+
+    三个键**必填**（设计 6.2 示例三者俱在）：空即写 `[]`，「没给」与「显式为空」
+    由此可分辨。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    coverage_gap: list[str]
+    bug_history: list[str]
+    source_refs: list[str]
+
+
 class TestCase(BaseModel):
-    """6.3 用例骨架。retry / 用例级 timeout 键不存在（H7）。"""
+    """6.3 用例骨架。retry / 用例级 timeout 键不存在（H7）。
+
+    6.2 的 Candidate 溯源三字段可选（默认 `None`）：正式用例不带它们，
+    解析结果不受影响。
+    """
 
     __test__ = False  # pytest collection: 数据模型不是测试类
 
@@ -186,6 +216,10 @@ class TestCase(BaseModel):
     precondition: dict = Field(default_factory=dict)
     steps: list[ActionStep | WaitStep | AssertionStep] = Field(default_factory=list)
     cleanup: dict | None = None
+    # --- Task 3.1 / P3-09（设计 6.2）：Candidate 溯源，追加在末尾（既有键序不动）---
+    status: Literal["CANDIDATE"] | None = None
+    generated_by: str | None = None
+    generation_evidence: GenerationEvidence | None = None
 
 
 def parse_testcase_dict(data: dict) -> TestCase:

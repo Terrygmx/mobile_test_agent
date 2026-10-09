@@ -1544,3 +1544,77 @@ rev-parse」的落点。`range.head` 仍如实显示 metadata 里写的（可能
 **Gate M2 判据全绿**：`mta plan` 输出可解释的优先级排序（`reasons` 非空、依据可追溯）；
 评分纯函数可单测（Task 2.2/2.3）；LLM 重排被拒（矩阵 #5）与空改动明示（矩阵 #6）
 在 CLI 端到端跑通。→ 打 tag **`checkpoint-p3-m2`**。
+
+---
+
+## Task 3.1 完成记录（P3-09 TestCase Schema 扩展，2026-10-09）
+
+**M3 第一个任务**。Candidate Test = P1 TestCase + 溯源字段（F5），扩展方式是
+**Modify 既有模型**。
+
+### 交付
+
+- `testcase/schema.py`：新增 `GenerationEvidence`（`coverage_gap` / `bug_history` /
+  `source_refs`，三键**必填**、`extra="forbid"`）；`TestCase` 末尾追加三个可选字段
+  （`status: Literal["CANDIDATE"] | None` / `generated_by: str | None` /
+  `generation_evidence: GenerationEvidence | None`）。`SCHEMA_VERSION` **不变**（`"0.2"`）。
+- `tests/unit/test_testcase_candidate_fields.py`（12 例）、
+  `tests/unit/test_lint_candidate_compat.py`（4 例）——共 **16** 例。
+
+### 决策记录
+
+1. **Modify 既有模型**（不建 `generator/models.py` 平行继承）：`extra="forbid"` 下平行
+   模型会拒新键，且违反 F5「同一 Schema」。
+2. **`GenerationEvidence` 的三个列表必填**（空即写 `[]`）：设计 6.2 示例三者俱在。
+   「没给」与「显式为空」由此可分辨——与本仓反复踩的「形式合法、语义等于没有」同一形态。
+   plan 只规定了**外层**字段可选（`= None`），内层是否可选属本次拍板。
+3. **元素类型定为 `list[str]`，不用 `Any`**：设计示例即字符串
+   （`"Search -> EmptyResultState"` / `"SearchView.swift"`），未给结构化元素契约；且
+   `generation_evidence` 会随用例序列化进 `test_candidates.testcase_yaml` 与最终落盘的
+   suite YAML，必须是 YAML 友好、可人工复核的形态。生产侧（Task 3.4）若确需结构化元素
+   → **改这份契约**的立项。
+4. **`status` 用 `Literal["CANDIDATE"]`，不引用 `AssetTier.CANDIDATE`**：后者是**工具资产
+   分级**（设计 4 节），与「用例状态」是不同概念；且 `testcase/schema.py` 是纯数据模型
+   （H18），不 import 执行层。
+5. **无跨字段耦合**：`status="CANDIDATE"` 不强制 `generation_evidence` 必填（plan 未要求；
+   最小实现，不凭空收紧契约）。
+
+### ⚠️ 偏离登记 1：设计 6.2 的示例**漏写了 `name`**
+
+示例只有 `schema_version / id / status / generated_by / generation_evidence / suite /
+steps`，而 `name` 是 P1 必填字段 → **示例本身过不了 strict parser**（实测：报
+`name Field required` + 3 个 extra 键）。**不放宽 `name`**（P1 契约不改，F5「同一 Schema」）；
+测试夹具补上 `name` 并在注释里写明。设计文档这处待回填。
+
+### ⚠️ 偏离登记 2：「既有用例解析结果逐字节不变」的口径按实测写
+
+plan 的 Steps 写「逐字节不变」，但**加字段后 `model_dump()` 必然多出三个 `None` 键**——
+字面「逐字节」不可能成立。实际钉的是**语义不变**：真语料 **20/20** 满足
+`TestCase.model_validate(tc.model_dump()) == tc`，且三个新字段一律 `None`。
+测试名与 docstring 按实测写（**不写「逐字节」**），避免「声称与实测不符」。
+
+### ⚠️ 偏离登记 3：drive-by 更正模块 docstring
+
+`testcase/schema.py` 首行原写「Testcase schema **0.1** 模型」，而 `SCHEMA_VERSION` 是
+`"0.2"`；且原则行「只建设计 6.3 列出的字段」在加了 6.2 的 Candidate 字段后不再成立。
+一并更正为「设计 6.3 字段 + 6.2 Candidate 溯源字段」。属「文档与实测不符」的同一形态。
+
+### 实测
+
+- 全量 pytest **1625 passed**（1609 + 16）。
+- **5 条 A/B 探针全部真红**（每次先读原文、改后立即还原并断言字节相等）：
+  **A** 删三个字段 → **6** red（含两条 lint 路径测试）；**B** 三列表给默认值 → **3** red；
+  **C** 去掉 `extra="forbid"` → **1** red；**D** 三列表改裸 `list` → **1** red；
+  **E** `Literal` 改裸 `str` → **3** red。
+- 真语料：`suites/` **20/20** round-trip 恒等、新字段全 `None`；全量 lint **0 个
+  `schema_invalid`**。（其余既有 issue 由环境/生成仓库决定，**不冻结**：用
+  `EnvSecretProvider` 实测 **46** 条，全是 `unknown_secret` / `unknown_target`——
+  与本次扩展无关。）
+- `-W error::pytest.PytestCollectionWarning` 下零警告。
+
+### 教训（待并入 MEMORY）
+
+- **设计示例本身可能过不了 strict parser**：抄示例当夹具前先跑一次——`name` 缺失、
+  `schema_version` 笔误（`0.1` vs 现行 `0.2`）是同一类。
+- **「逐字节不变」这类强口径在加字段后必然失真**：要么改口径（语义/round-trip），
+  要么别用这个词。
