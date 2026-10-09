@@ -1961,3 +1961,90 @@ MEMORY §5.A 记的 `getattr` 静默兜底已踩四遍，这是第五次。改�
   **调用**（spy / `monkeypatch`），且**注意 patch 的是使用方的命名空间**。
 - **「断言会抛异常」也可能恒成立**：更早的闸门先炸，断言照样绿。写
   `pytest.raises` 前确认**异常来自被测的那一步**。
+
+---
+
+## Task 3.3 完成记录（P3-11 Test Fingerprint 去重，2026-10-09）
+
+**M3 第三个任务**。设计 F8：Test Fingerprint = screen 序列 + action 序列 +
+assertion 的哈希，**用同一套哈希工具**，**只做精确哈希相等**（禁一切相似度 /
+模糊匹配 / 编辑距离）。用途：Task 3.4 生成器的去重（设计 6.1「命中已有用例 →
+SKIP」）。
+
+### 交付
+
+- `source/hashing.py`：`stable_hash(parts: Iterable[str]) -> str`（拼接 → sha256
+  → 前 16 hex；不排序、不去重，规范化交给调用方）。
+- `candidates/__init__.py`：包 docstring（不预建空壳，照 `generator/__init__.py`）。
+- `candidates/fingerprint.py`：`test_fingerprint(tc: TestCase) -> str`（纯函数）+
+  三个分量 helper（`_screen_tokens` / `_action_tokens` / `_assertion_tokens`）。
+- **Modify** `source/screen.py`：`screen_fingerprint` 改调 `stable_hash`，行为不变。
+- `tests/unit/test_test_fingerprint.py`（**19** 例）、
+  `tests/unit/test_screen_fingerprint_regress.py`（**4** 例）。
+- `docs/windows_dev_notes.md`（非工程产物）：Windows 开发环境说明 + 6 条
+  POSIX-only 测试的登记（用户指示：跑不了的登记进 docs，由其在 macOS 补跑）。
+
+### 决策记录
+
+1. **复用口径按 plan 修订 #8 落地为「共享同一哈希原语」，不是「字面调同一函数」**。
+   两处指纹输入形状不同（XML `page_source` vs step 序列），字面同一函数不可行；
+   抽 `source/hashing.py::stable_hash`，规范化（排序 / 去重 / 顺序 / 字段编码）
+   留在各自调用方。红线不变：**禁相似度算法**。
+2. **三个分量、每个步骤恰好落入一个分量**：`screens`（屏目标的 wait / assertion /
+   postcondition）、`actions`（动作步骤，含 value）、`assertions`（**element 目标**
+   的 wait / assertion / postcondition）。分量内保序，分量间不保序。
+3. **token 用 `repr(元组)` 而非手工拼接**：元组 repr 自带定界（括号 + 引号转义），
+   字段里含 `|` / `:` / `,` 也不会与相邻 token 粘连。**有测试钉住**（见 A/B 探针 B）。
+4. **不进指纹的字段**：`id` / `name` / `suite` / `tags` / `precondition` / `cleanup`
+   / `schema_version` + Candidate 溯源三字段（`status` / `generated_by` /
+   `generation_evidence`）——描述「叫什么、从哪来」，不描述「做什么」。
+5. **`input` 的 `value` 与断言的 `expected` 进指纹**：不同测试数据（如「空用户名」
+   与「空密码」两条负例）动作序列相同，不含 value 会被误判重复而 SKIP 掉一条真
+   用例。YAML 里的 value 是占位符 / 字面量、**非密钥**（H9：密钥只经
+   `SecretProvider`，不进 YAML），故可入指纹。
+6. **`stable_hash` 对裸 `str` fail-loud（`TypeError`）**：`str` 也是 `Iterable[str]`，
+   会被逐字符迭代成「形式合法、语义等于没有」的指纹（MEMORY §5.A 反复踩的形态）。
+   元素非 `str` 由 `"\n".join` 自然抛 `TypeError`，**不 `str()` 强转**（强转会让
+   `1` 与 `"1"` 撞指纹）。
+
+### ⚠️ 已登记的边界（不假装完整）
+
+- **分量间不保留交错顺序**：`[tap A, assert B]` 与 `[assert B, tap A]` 得同一指纹
+  （两个分量各自相同）。真语料无「把独立步骤对调」的用例；Task 3.4 若产生此类
+  形态，改为保留全局顺序（登记）。
+- **`postcondition` 无 `expected` 字段**，element 目标的 token 里以空串占位。
+
+### 实测
+
+- 全量 pytest（Windows 兼容子集）**1679 passed / 0 failed**（1685 collected − 6
+  条 POSIX-only deselect；**清 `__pycache__` 后复跑同值**）。基线 Task 3.2 修订后
+  为 1662 collected，本任务 **+23**（19 + 4）→ 1685。
+- `test_screen_fingerprint_regress.py` 的期望摘要是**重构前**用裸 `hashlib` 独立
+  算出的固定值（`b00ee6cdb98b8128` / `ca978112ca1bbdca` / `154fe76ca1499d78`），
+  **不是从新实现回抄**——否则重构把两处一起改错也照样绿。
+- `test_repo_hygiene.py` + `test_knowledge_retrieval.py`（去 1 条已知 Windows 红）
+  `-W error::pytest.PytestCollectionWarning` → **22 passed 零警告**（`test_fingerprint`
+  名字以 `test_` 开头，测试里用 `as fingerprint` 别名导入，避免被 pytest 误收集）。
+- **10 条 A/B 探针全部真红**（每次改完还原、`git diff` 核对为空）：
+  A action token 丢 value → **1** / B 三分量改 naive `":".join` → **3** /
+  C `screen_fingerprint` 内联 hashlib（行为等价、不复用）→ **1** /
+  D 把命名字段掺进指纹 → **3** / E screen token 丢 condition → **2** /
+  F 去掉裸 str 闸门 → **1** / G 元素 `str()` 强转 → **2** /
+  H 删 screen postcondition 分支 → **1** / I 删 element postcondition 分支 → **1** /
+  J 删 element wait 分支 → **2**。
+
+### 教训（已并入 MEMORY §5）
+
+- **「对抗性 fixture」才钉得住编码选择**：初版边界测试用 `element:A` vs `element:A:`
+  想证明 repr 优于 naive 拼接——但 TargetRef 的 sugar 把整串塞进 `id`（`type='element'`、
+  `id='element:A'`），两条 naive 串并不同 → **naive-join mutant 仍 20 passed（空转）**。
+  换成真正会撞的对抗 fixture（`id="f::x"/value="y"` vs `id="f"/value="x::y"`）后 mutant
+  才真红。**写「守卫某实现选择」的测试前，先用 mutant 确认它真能区分两种实现。**
+- **分支覆盖率自查照 Task 3.2 修订 3 的老账**：`_screen_tokens` / `_assertion_tokens`
+  的 postcondition 分支、`_assertion_tokens` 的 element-wait 分支初版**零测试**——
+  与本仓「postcondition 分支零测试」的历史同形，补 3 例后 A/B 探针 H/I/J 才真红。
+
+### 待办（Windows 侧）
+
+- macOS 上补跑全量 `pytest tests`（应 1685 passed），确认 6 条 POSIX-only 测试全绿
+  （见 `docs/windows_dev_notes.md` §2）。

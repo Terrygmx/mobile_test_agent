@@ -15,11 +15,11 @@ marker 匹配严格按 repo 中 ScreenDef.marker（`screen.<Name>`），不无�
 """
 from __future__ import annotations
 
-import hashlib
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
 from repository.resolver import Repository
+from source.hashing import stable_hash
 
 # status 常量（8.2 failure_type 同名语义；FOUND 非失败态）
 CURRENT_SCREEN_UNKNOWN = "CURRENT_SCREEN_UNKNOWN"
@@ -132,5 +132,7 @@ def screen_fingerprint(page_source: str) -> str | None:
                 names.add(v)
     if not names:
         return None
-    digest = hashlib.sha256("\n".join(sorted(names)).encode("utf-8"))
-    return digest.hexdigest()[:16]
+    # Task 3.3 / P3-11：改调共享哈希原语（F8）。行为逐字不变——原实现即
+    # `sha256("\n".join(sorted(names)).encode("utf-8")).hexdigest()[:16]`，
+    # `stable_hash` 做的正是同一件事（不排序由调用方负责）。
+    return stable_hash(sorted(names))
