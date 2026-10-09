@@ -21,6 +21,8 @@ trigger 形状必须复用 `graph/builder.py::_trigger_of`，不另写一份拼�
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from generator.coverage import (
@@ -33,6 +35,8 @@ from generator.coverage import (
 )
 from graph.models import RUNTIME, RuntimeGraph, ScreenTransition
 from testcase.schema import parse_testcase_dict
+
+_ROOT = Path(__file__).resolve().parents[2]
 
 APP = "com.phaset0.logindemo"
 
@@ -252,15 +256,39 @@ def test_back_transition_is_branching_not_happy_path():
 
 # --- 判据 ⑦：「同一套逻辑」的显式断言（plan §2 第 1 条）----------------------
 
-def test_trigger_shape_reuses_graph_builder_primitive():
-    """trigger 形状必须复用 `graph/builder.py::_trigger_of`，不另写一份拼接。"""
-    from graph.builder import _trigger_of
+def test_trigger_shape_reuses_graph_builder_primitive(monkeypatch):
+    """trigger 形状必须**真的调用** `graph/builder.py::_trigger_of`（plan §2 第 1 条）。
+
+    ⚠️ **为什么用 spy 而不直接断言形状**（review_p3_task32 P3-1）：原先的写法
+    只断言 `_trigger_of(TraceStep(...)) == "tap:..."`，验的是**被调用方自己的
+    行为**——把 `_step_trigger` 换成一段行为逐字等价、但不再调 `_trigger_of`
+    的实现，全部测试**仍然全绿**（mutant 实测 20 passed）。要钉住「用的是同一个
+    函数」，只能钉**调用**。
+
+    ⚠️ 替换的是 **`generator.coverage` 的命名空间**：该模块用
+    `from graph.builder import _trigger_of` 把名字绑到了本地，改
+    `graph.builder._trigger_of` 对它无效（patch 错地方会让这条测试恒绿）。
+    """
+    import generator.coverage as cov
     from graph.models import TraceStep
-    step = TraceStep(testcase_run_id=1, step_index=0, step_type="tap",
-                     target_id="HomeView.go_search")
-    assert _trigger_of(step) == "tap:HomeView.go_search"
-    # coverage_gap 用的就是同一形状（用例侧推导出来的 trigger 与它同域）
-    assert any(g.trigger == _trigger_of(step) for g in coverage_gap(GRAPH, []))
+
+    calls: list = []
+    real = cov._trigger_of
+
+    def spy(step):
+        calls.append(step)
+        return real(step)
+
+    monkeypatch.setattr(cov, "_trigger_of", spy)
+    covered_transitions([LOGOUT])
+    assert calls, "coverage 侧从未调用 _trigger_of（自己另写了一份拼接？）"
+    # 传进去的必须是**真的** TraceStep（不是自己拼的字符串）
+    assert all(isinstance(s, TraceStep) for s in calls)
+    # LOGOUT 的三个动作各触发一次（login_button / go_profile / logout_button）
+    assert [s.step_type for s in calls] == ["tap", "tap", "tap"]
+    assert [s.target_id for s in calls] == [
+        "LoginView.login_button", "HomeView.go_profile",
+        "ProfileView.logout_button"]
 
 
 def test_covered_transitions_is_the_complement():
@@ -295,3 +323,163 @@ def test_non_string_screen_id_is_rejected():
     """
     with pytest.raises(ValueError):
         UncoveredTransition(from_screen=42, to_screen="SearchView")
+
+
+# --- 评审修订新增（review_p3_task32）------------------------------------------
+
+# P2-1：否定等待**不是到达**（真语料 suites/account/login_negative_002.yaml）
+
+def test_not_exists_wait_is_not_an_arrival():
+    """`wait_for screen:X condition=not_exists` 断言的是「X **不**在这里」。
+
+    算成到达会**凭空造一条覆盖** → 真 gap 静默塌成 0（错误落在「没覆盖」那侧）。
+    """
+    neg = _case("neg", [
+        {"action": "launch_app"},
+        _screen_wait("ProfileView"),
+        {"action": "tap", "target": "ProfileView.logout_button"},
+        _screen_wait("LoginView"),
+        {"wait_for": {"target": "screen:HomeView", "condition": "not_exists",
+                      "timeout": 3}},
+    ])
+    covered = covered_transitions([neg])
+    assert ("LoginView", "HomeView", "") not in covered
+    assert covered == {("ProfileView", "LoginView",
+                        "tap:ProfileView.logout_button")}
+
+
+def test_not_exists_gap_is_reported_not_swallowed():
+    """反向：图上真有的转移，用例只做了否定断言 → 必须**如实报成 gap**。"""
+    g = RuntimeGraph(
+        app_id=APP, app_build="b", source_of=RUNTIME,
+        transitions=(ScreenTransition("LoginView", "HomeView",
+                                      "tap:LoginView.login_button",
+                                      source_of=RUNTIME),))
+    neg = _case("neg", [
+        {"action": "launch_app"},
+        _screen_wait("LoginView"),
+        {"wait_for": {"target": "screen:HomeView", "condition": "not_exists",
+                      "timeout": 3}},
+    ])
+    got = {(x.from_screen, x.to_screen, x.trigger) for x in coverage_gap(g, [neg])}
+    assert got == {("LoginView", "HomeView", "tap:LoginView.login_button")}
+
+
+def test_real_corpus_negative_case_covers_nothing_extra():
+    """真语料 `login_negative_002`（空密码失败 + 断言 HomeView not_exists）
+    不得贡献任何到达 HomeView 的覆盖。"""
+    import yaml
+    from testcase.schema import parse_testcase_dict as _p
+    raw = yaml.safe_load((_ROOT / "suites/account/login_negative_002.yaml")
+                         .read_text())
+    tc = _p(raw)
+    assert not any(to == "HomeView"
+                   for _, to, _ in covered_transitions([tc]))
+
+
+# P3-2：postcondition 到达点分支此前零测试
+
+def test_postcondition_arrival_is_covered():
+    """`postcondition screen:X` = 「动作后到达 X」的声明 → 计入覆盖。
+
+    删掉该分支会让 `ProfileView→LoginView` 整条消失（mutant 实测 20 passed）。
+    """
+    covered = covered_transitions([LOGOUT])
+    assert ("ProfileView", "LoginView", "tap:ProfileView.logout_button") in covered
+
+
+def test_postcondition_without_action_is_not_an_arrival():
+    """postcondition 只在**跟着动作**时才是到达点（`ActionStep` 的字段）。"""
+    from testcase.schema import parse_testcase_dict as _p
+    tc = _p({"schema_version": "0.2", "id": "x", "name": "x", "steps": [
+        {"wait_for": {"target": "screen:HomeView", "condition": "active",
+                      "timeout": 10}}]})
+    assert covered_transitions([tc]) == set()
+
+
+# P3-3 / P3-6：分类分支此前零覆盖
+
+@pytest.mark.parametrize("action,expected", [
+    ("launch_app", CATEGORY_ERROR_RECOVERY),
+    ("terminate_app", CATEGORY_ERROR_RECOVERY),
+    ("back", CATEGORY_BRANCHING),
+    ("tap", CATEGORY_HAPPY_PATH),
+])
+def test_category_covers_every_branch(action, expected):
+    """四类触发动作各打自己的标（`_RECOVERY_ACTIONS` 清空 → 必须真红）。"""
+    g = RuntimeGraph(
+        app_id=APP, app_build="b", source_of=RUNTIME,
+        transitions=(ScreenTransition("HomeView", "DetailView",
+                                      f"{action}:HomeView.x",
+                                      source_of=RUNTIME),))
+    assert coverage_gap(g, [])[0].category == expected
+
+
+def test_real_corpus_relaunch_transition_is_categorised():
+    """真语料 `terminate_relaunch_001` 有重启动作 → 该转移应打 `Recovery`。
+
+    **不靠「图上恰好有」**（真 runtime 图 8 条转移里零重启，依赖它会空转）：
+    直接构造一条 `launch_app` 触发的图，喂真语料的用例验证不误判。
+    """
+    import yaml
+    from testcase.schema import parse_testcase_dict as _p
+    g = RuntimeGraph(
+        app_id=APP, app_build="b", source_of=RUNTIME,
+        transitions=(ScreenTransition("ProfileView", "LoginView",
+                                      "terminate_app:", source_of=RUNTIME),))
+    raw = yaml.safe_load((_ROOT / "suites/regression/terminate_relaunch_001.yaml")
+                         .read_text())
+    tc = _p(raw)
+    # 前提核验：夹具里确有重启动作（否则这条测试会变成「测了个空」）
+    assert {"terminate_app", "launch_app"} & {
+        s.action for s in tc.steps if getattr(s, "action", None)}
+    assert coverage_gap(g, [])[0].category == CATEGORY_ERROR_RECOVERY
+
+
+# P3-4 / P3-5：闸门此前零测试
+
+@pytest.mark.parametrize("kwargs", [
+    {"from_screen": 42},
+    {"to_screen": ""},
+    {"trigger": 1},
+    {"observed_count": -1},
+    {"observed_count": True},      # bool 是 int 子类
+])
+def test_uncovered_transition_rejects_bad_fields(kwargs):
+    base = {"from_screen": "A", "to_screen": "B"}
+    with pytest.raises(ValueError):
+        UncoveredTransition(**{**base, **kwargs})
+
+
+def test_duplicate_transitions_in_graph_yield_one_gap():
+    """`RuntimeGraph.__post_init__` **不**去重（去重是 builder 建图时的行为）。
+
+    图上塞两条同键转移 → 只报 1 条 gap（否则 Task 3.4 会拿到重复候选）。
+    """
+    g = RuntimeGraph(
+        app_id=APP, app_build="b", source_of=RUNTIME,
+        transitions=(
+            ScreenTransition("HomeView", "DetailView", "tap:HomeView.cell",
+                             source_of=RUNTIME, count=1),
+            ScreenTransition("HomeView", "DetailView", "tap:HomeView.cell",
+                             source_of=RUNTIME, count=9),
+        ))
+    got = coverage_gap(g, [])
+    assert len(got) == 1
+    assert got[0].observed_count == 1      # 保留首次出现
+
+
+def test_non_graph_object_is_rejected_not_silently_empty():
+    """传一个**没有** `transitions` 属性的对象 → fail-loud，不是静默返回零 gap。
+
+    ⚠️ **为什么不能用 `object()`**（review 修订时实测空转）：`object()` 连
+    `source_of` 都没有，会在闸门那一步先炸 → 断言恒成立。把
+    `graph.transitions` 换回 `getattr(graph, "transitions", ())` 仍然全绿。
+    必须给一个**过得了 source 闸门、但缺 transitions** 的对象，才测得到
+    这一步。
+    """
+    class _NoTransitions:
+        source_of = RUNTIME          # 过闸门
+
+    with pytest.raises(AttributeError):
+        coverage_gap(_NoTransitions(), [])

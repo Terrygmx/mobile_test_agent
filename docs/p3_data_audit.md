@@ -1857,3 +1857,107 @@ Transition / Concurrency-Timing / Recovery），本次只实现可由**转移形
   第六种形态：断言依赖一个被测对象按构造不会产生的输入。**
 - **「零 gap / 零差异」类结果要先自问鉴别力**：判据的鉴别力由「拿掉一个输入
   后结果是否变化」证明，不能靠「结果非空」——真语料「全都覆盖了」恰恰是健康态。
+
+---
+
+## Task 3.2 评审修订记录（2026-10-09，round 1）
+
+**评审报告**：`review/review_p3_task32_2026-10-09.md` —— 结论 **有条件通过，
+1×P2 + 6×P3**（报告另附 P3-7/P3-8 两条附加观察）。评审跑了 **14 个 mutant**，
+每个都先备份 → 改 → **清 `__pycache__`** → 跑 → 还原 → 再清 → 核对，并逐条标注
+「真红 / 空转 / 有语义后果但无测试」。
+
+提交信息与审计记录的**全部声称均被复现**：全量 1645 passed、7 条 A/B 探针红数
+4/1/1/5/1/1/1、真语料 8/8 覆盖零误报、留一法 gap=1。评审还用留一法找到
+**4 个**能让 gap 变化的用例（作者只举证了 1 个），鉴别力比作者举证更强。
+
+### 修订 1（P2-1）：否定等待被当成「到达过」——真 gap 静默塌成 0
+
+- **位置**：`generator/coverage.py::_arrivals` 的 wait 分支。
+- **问题**：`wait_for screen:X condition=not_exists` 断言的是「X **不**在这里」，
+  原实现把它当成一个**到达点** → 凭空造一条覆盖（如
+  `LoginView→HomeView@''`）。错误落在「**没覆盖**」那一侧，正是 fail-loud 的对象。
+- **真语料命中**：`suites/account/login_negative_002.yaml`（空密码登录失败 +
+  `wait_for screen:HomeView not_exists`）。**该用例此前恰好只有一个到达点**
+  （配对不出转移），所以缺陷被巧合掩盖——我构造了第二个到达点复现出假覆盖。
+- **修法**：新增 `NEGATIVE_WAIT_CONDITIONS = {"not_exists", "disabled"}`，
+  命中则**不计入到达**（`disabled` 对屏不成立，一并排除以防 schema 将来放开）。
+- **回归**：真语料 8/8 覆盖、gap=0、去掉 `login_again_001` → gap=1 **全部不变**；
+  `login_negative_002` 的贡献从「（巧合的）无」变成**确定的空**。
+- **新增测试 3 条**（含真语料那条）。A/B：删掉排除 → **1 failed**。
+
+### 修订 2（P3-1）：「同一套逻辑」断言是**空的** → 改用 spy
+
+- **位置**：`test_trigger_shape_reuses_graph_builder_primitive`。
+- **问题**：原断言只验 `_trigger_of(TraceStep(...)) == "tap:..."`，验的是**被调用方
+  自己的行为**；把 `_step_trigger` 换成行为逐字等价、但不再调 `_trigger_of` 的实现，
+  **20 passed**（mutant 实测）——守卫空转（形态 ②）。
+- **修法**：`monkeypatch` 替换 **`generator.coverage` 的命名空间**（该模块用
+  `from graph.builder import ...` 把名字绑到本地，patch `graph.builder` 无效——
+  那正是让这条测试恒绿的第二个坑），spy 记录调用并断言传入的是真 `TraceStep`。
+- **A/B**：改成行为等价但不调 `_trigger_of` → **1 failed** ✅。
+
+### 修订 3（P3-2）：`postcondition` 分支零测试 → 补 2 条
+
+mutant（删整条分支）此前 **20 passed**；现补 `postcondition` 计入覆盖 /
+无动作时不计入两条 → mutant **1 failed**。
+
+### 修订 4（P3-3）：`_RECOVERY_ACTIONS` 清空仍全绿 → 补参数化分类测试
+
+原 20 条测试**无一构造** `launch_app`/`terminate_app` 转移。补 4 组参数化
+（`launch_app`/`terminate_app`/`back`/`tap` 各打各的标）+ 真语料
+`suites/regression/terminate_relaunch_001.yaml` 一条 → mutant **3 failed**。
+
+### 修订 5（P3-4）：`trigger`/`observed_count` 闸门零测试 + `bool` 放行
+
+- `observed_count=True` 被放行（**`bool` 是 `int` 子类**，MEMORY §5.A 明文点名要排除
+  的一类）→ 闸门加 `isinstance(..., bool)` 排除。
+- 补 5 组参数化（`from_screen=42` / `to_screen=""` / `trigger=1` /
+  `observed_count=-1` / `observed_count=True`）→ A/B **1 failed**。
+
+### 修订 6（P3-5）：`getattr(graph, "transitions", ())` 静默兜底（本仓**第 5 次**同形）
+
+MEMORY §5.A 记的 `getattr` 静默兜底已踩四遍，这是第五次。改为**直接取属性**。
+
+⚠️ **这条测试自己也空转了一轮**：初版写 `coverage_gap(object(), [])` 期望
+`AttributeError`，但 `object()` 连 `source_of` 都没有，**在闸门那步先炸** →
+断言恒成立；把 `graph.transitions` 换回 `getattr(...)` 仍然全绿。改成构造一个
+「过得了 source 闸门、但缺 `transitions`」的对象后才真红（mutant **1 failed**）。
+
+> **新增教训：断言 `AttributeError` 前要确认异常来自被测的那一步**——更早的
+> 闸门先炸会让断言恒成立。这与 §5.C ⑥「钉产生问题的那一侧」同一形态。
+
+### 修订 7（P3-7）：去重注释不成立
+
+`RuntimeGraph.__post_init__` **不去重**（去重是 `build_runtime_graph` 建图时的行为，
+构造点可直接塞重复转移）。原注释「图上同一条转移不会重复」不成立——实测重复转移
+出 **2 条 gap**（Task 3.4 会拿到重复候选）。已改为按值语义去重（保留首次出现）
+并补测试；`test_result_has_no_duplicates` 改用**真的塞重复转移**的图（此前对
+`GRAPH` 恒真，14 个 mutant 无一能红）。
+
+### 修订 8（P3-6 / P3-8）：docstring 声称宽于实现
+
+- **P3-6**：两个分类常量的 docstring 声称了 `_classify(trigger)` **结构上拿不到**
+  的判据（「不是从详情返回」「目标屏是返回路径」）。实测反例：
+  `DetailView→HomeView@tap:…back_cell` 被打成 `Happy Path`（它确实是回边，只是
+  触发动作不是 `back`）。已改为只描述**实际判据**，并写明这是**兜底标签**。
+- **P3-8**：`_step_trigger` 的「trigger 全是动作步骤」原写成构造性保证，实为
+  **实测如此**——runtime 侧取值域本来更宽（`_trigger_of` 取紧邻前一步，可为任意
+  `step_type`）。真语料命中 **0** 次；若 Task 3.4 接线后出现 `wait_for:` 前缀的
+  trigger，会多出假 gap。已在 docstring 写明，**登记「M4 接线后升级为 P2」**。
+
+### 修订后实测
+
+- 全量 pytest **1662 passed**（1645 + 17；清 `__pycache__` 后复跑同值）。
+- 7 条 A/B 探针**修订后全部真红**（P2-1 移除 → 1 / spy 失效 → 1 /
+  删 postcondition → 1 / `_RECOVERY_ACTIONS` 清空 → 3 / bool 闸门 → 1 /
+  去重移除 → 1 / `getattr` 兜底 → 1）。
+- `test_repo_hygiene.py` `-W error::pytest.PytestCollectionWarning` → 5 passed 零警告。
+
+### 教训（已并入 MEMORY §5）
+
+- **「只验被调用方的行为」不等于「钉住复用」**：plan §2 第 1 条要求钉「同一套逻辑」，
+  断言 `_trigger_of(step) == "tap:..."` 只证明了 `_trigger_of` 自己没坏——要钉
+  **调用**（spy / `monkeypatch`），且**注意 patch 的是使用方的命名空间**。
+- **「断言会抛异常」也可能恒成立**：更早的闸门先炸，断言照样绿。写
+  `pytest.raises` 前确认**异常来自被测的那一步**。

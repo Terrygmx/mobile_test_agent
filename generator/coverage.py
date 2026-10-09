@@ -54,15 +54,33 @@ __all__ = [
 ]
 
 # 分类标签（设计 6.3 七类的**初版启发**：只取本次能由转移形状判别的三类）
+#
+# ⚠️ **判据只有「触发动作的类型」**（`_classify(trigger)` 只拿到 trigger 串）。
+# 早先的 docstring 声称「不是从详情返回」「目标屏是返回路径」——那需要
+# `to_screen` 与一张「返回路径表」，`_classify` **结构上拿不到**，属声称宽于
+# 实现（review_p3_task32 P3-6）。实测反例：`DetailView→HomeView@tap:...back_cell`
+# 会被打成 `Happy Path`——它**确实是**一条回边，只是触发动作不是 `back`。
+# 下方 docstring 只描述**实际判据**；要让分类名副其实，是给 `_classify` 补
+# 屏侧上下文（或改叫别的标签）的立项。
 CATEGORY_HAPPY_PATH = "Happy Path"
-"""前进到一个新屏（`tap` 触发），且不是从详情返回。"""
+"""触发动作**不是** `back` / 重启动作——即绝大多数「点一下到下一个屏」。
+
+⚠️ 这是**兜底标签**，不是「真的是 happy path」的断言：`tap:back_cell` 这类
+返回动作同样是 `tap`，会被打上本标签。
+"""
 CATEGORY_BRANCHING = "State Transition"
-"""回退/返回类（`back` 触发，或目标屏是返回路径）——转移形状上的「回边」。"""
+"""触发动作是 `back`（返回）。"""
+
 CATEGORY_ERROR_RECOVERY = "Recovery"
 """触发动作是 `terminate_app` / `launch_app`（重启动作 → 恢复语义）。"""
 
 _RECOVERY_ACTIONS = frozenset({"terminate_app", "launch_app"})
 _BACK_ACTIONS = frozenset({"back"})
+
+# 否定型等待条件：`wait_for screen:X condition=<这些>` **不表示到达过 X**。
+# 设计 6.3 的 WaitSpec 条件矩阵里，屏语义下会成立的「否定」只有 `not_exists`；
+# `disabled` 对屏不成立（屏没有 disabled 态），一并排除以防将来 schema 放开。
+NEGATIVE_WAIT_CONDITIONS = frozenset({"not_exists", "disabled"})
 
 
 @dataclass(frozen=True)
@@ -91,6 +109,13 @@ class UncoveredTransition:
                     f"{name} 必须是非空 str，got {value!r}")
         if not isinstance(self.trigger, str):
             raise ValueError(f"trigger 必须是 str，got {self.trigger!r}")
+        # ⚠️ `bool` 是 `int` 子类：`observed_count=True` 会悄悄变成 1 次观测
+        # （MEMORY §5.A 明文点名要显式排除的一类）。
+        if (not isinstance(self.observed_count, int)
+                or isinstance(self.observed_count, bool)):
+            raise ValueError(
+                f"observed_count 必须是 int（不含 bool），got "
+                f"{self.observed_count!r}")
         if self.observed_count < 0:
             raise ValueError(f"observed_count 不能为负: {self.observed_count}")
 
@@ -109,8 +134,15 @@ def _step_trigger(step) -> str | None:
     """用例步骤 → trigger 形状（复用 `_trigger_of`，不另写拼接）。
 
     只有**动作步骤**能当触发（`tap` / `back` / `input`…）；`wait_for` /
-    `assertion` 是观测，不是触发——与 runtime 侧同款：真 trace 里 8 条转移的
-    trigger 全是动作步骤（实测 `tap` 7 / `back` 1，无 wait/assert）。
+    `assertion` 是观测，不是触发。
+
+    ⚠️ **这是「实测如此」，不是「构造保证」**（review_p3_task32 P3-8）：
+    真 trace 的 8 条转移实测全是动作步骤（`tap` 7 / `back` 1，零 wait/assert），
+    **但 runtime 侧的 trigger 取值域本来更宽**——`graph/builder.py::_trigger_of`
+    取的是「紧邻前一步」，那一步**可以是任何 `step_type`**。真语料里一条都没
+    命中，所以今天的覆盖推导与 runtime 图对齐；一旦 trace 出现
+    `wait_for:` 前缀的 trigger，这里会**多出一条覆盖不到的（假）gap**。
+    真实语料命中 **0** 次；Task 3.4 接线后若真出现，升级为 P2 并改这里。
 
     复用方式是**造一个真的 `TraceStep`** 喂给 `_trigger_of`，而不是在这里再写
     一遍 `f"{action}:{target}"`——「trigger 形状」这个概念只许有一处实现。
@@ -119,9 +151,15 @@ def _step_trigger(step) -> str | None:
     if action is None:
         return None
     target = getattr(step, "target", None)
+    # ⚠️ **不用 `getattr(target, "id", "")` 兜底**（MEMORY §5.A 同形第 5 次）：
+    # 传错形态时它会塌成 `action:` —— 一条 trigger 为空串的伪转移看起来
+    # 「正常」，实则永远匹配不上图上的任何转移。`ActionStep.target` 要么是
+    # `TargetRef`（有 `.id`）要么是 `None`（无目标动作），直接取属性即可。
+    target_id = target.id if target is not None else ""
+    if not isinstance(target_id, str):
+        raise ValueError(f"target.id 必须是 str，got {target_id!r}")
     return _trigger_of(TraceStep(testcase_run_id=0, step_index=0,
-                                 step_type=action,
-                                 target_id=getattr(target, "id", "") or ""))
+                                 step_type=action, target_id=target_id))
 
 
 def _arrivals(tc) -> list[tuple[str, str]]:
@@ -150,10 +188,17 @@ def _arrivals(tc) -> list[tuple[str, str]]:
         wait = getattr(step, "wait_for", None)
         if wait is not None:
             tgt = getattr(wait, "target", None)
-            if getattr(tgt, "type", None) == "screen":
+            # ⚠️ **否定等待不是到达**（review_p3_task32 P2-1）：`not_exists`
+            # 断言的是「X **不**在这里」——真语料 `suites/account/
+            # login_negative_002.yaml` 就是这个形态（空密码登录失败后断言
+            # `screen:HomeView not_exists`）。把它算成到达会**凭空造一条覆盖**，
+            # 让真 gap 静默塌成 0（「没覆盖」这一侧的错误，正是 fail-loud 的对象）。
+            # `disabled` 在屏语义下不成立（屏没有 disabled 态），一并排除。
+            if (getattr(tgt, "type", None) == "screen"
+                    and wait.condition not in NEGATIVE_WAIT_CONDITIONS):
                 out.append((tgt.id, pending or ""))
-                pending = None
-                continue    # wait 不是触发，不算「最近动作」
+            pending = None
+            continue    # wait 不是触发，不算「最近动作」
         # 3) 动作步骤 → 记下来当后续到达点的触发
         if action is not None:
             pending = _step_trigger(step)
@@ -201,8 +246,15 @@ def coverage_gap(graph: RuntimeGraph,
         UncoveredTransition(from_screen=t.from_screen, to_screen=t.to_screen,
                             trigger=t.trigger, observed_count=t.count,
                             category=_classify(t.trigger))
-        for t in getattr(graph, "transitions", ())
+        for t in graph.transitions
         if (t.from_screen, t.to_screen, t.trigger) not in covered
     ]
-    # 图上同一条转移不会重复（builder 按 (from,to,trigger) 合并），此处只排序
-    return sorted(gaps, key=lambda g: (g.from_screen, g.to_screen, g.trigger))
+    # ⚠️ **不假设图上无重复**：`RuntimeGraph.__post_init__` **不**去重（去重是
+    # `build_runtime_graph` 建图时的行为，构造点可以直接塞重复转移进来）。
+    # 直接 return 会把同一条 gap 吐两遍 → Task 3.4 按 gap 生成时会拿到重复候选。
+    # 用 `UncoveredTransition` 的值语义（frozen dataclass）去重，保留首次出现。
+    deduped: dict[tuple[str, str, str], UncoveredTransition] = {}
+    for g in gaps:
+        deduped.setdefault((g.from_screen, g.to_screen, g.trigger), g)
+    return sorted(deduped.values(),
+                  key=lambda g: (g.from_screen, g.to_screen, g.trigger))
