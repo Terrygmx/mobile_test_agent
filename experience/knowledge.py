@@ -102,7 +102,14 @@ class P2KnowledgeSources:
         build = self._app_build if app_build is _UNSET else app_build
         try:
             return read_trace_steps(self._trace_db, app_build=build)
-        except sqlite3.OperationalError as e:
+        except sqlite3.DatabaseError as e:
+            # ⚠️ 捕 `DatabaseError`（**父类**）而不是 `OperationalError`：
+            # 「文件不是 sqlite 库」「库被加密」抛的是 `DatabaseError` 本身
+            # （`OperationalError` 是它的子类，捕子类会漏掉这两类）——而
+            # Task 2.4 的 `mta plan` 是第一个生产调用者，实测 `--db` 指向一个
+            # 非 sqlite 文件时裸 `DatabaseError` 直接漏到了 CLI（traceback）。
+            # 本方法的 docstring 承诺「把裸 sqlite 异常转成可诊断的域错误」，
+            # 捕父类才让这句声称成立。
             raise ValueError(
                 f"trace 库不可读（未初始化或无表？）：{self._trace_db}"
                 f"——{e}") from e

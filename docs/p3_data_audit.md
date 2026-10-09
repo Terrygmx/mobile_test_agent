@@ -1424,3 +1424,123 @@ Task 2.1 写的禁令理由是「`planner.planner` 要 import `agents.storage` �
   ⑨ 恢复 `getattr(c, "id", "?")` → 1 red。
 - 全仓重复顶层定义体检：**零命中**。
 - `-W error::pytest.PytestCollectionWarning` 下 `test_planner_models.py` 27 passed（零警告）。
+
+
+---
+
+## Task 2.4 完成记录（P3-08 `mta plan` CLI + Gate M2 演示，2026-10-09）
+
+**Objective**：设计 12 节 CLI —— 首个**自主命令**，`_check_autonomous_env` 的 CLI 端到端
+接线从它开始。**M2 收口任务**。
+
+### 交付
+
+- `cli/main.py`（改）：`plan` 子命令 + `cmd_plan` + `_plan_range` / `_render_plan`；
+  **抽出 `_metadata_path(args)`**（`_resolve_app_build` 与 `cmd_plan` 原先各写一份同样的
+  路径表达式 → 同一课第二次）；`main()` 分发。
+- `phase0/verify_p3_m2.py`（新）：**自足工程**的 Gate M2 脚本（见下）。
+- `tests/unit/test_cli_plan.py`（新，**23 例**）。
+- `planner/planner.py`（改）：`plan(..., no_history_reason=None)` + `rule_basis(no_history=)`。
+- `experience/knowledge.py`（改，**P2 侧**）：`_read_steps` 的翻译面
+  `OperationalError` → **`DatabaseError`**（父类）。
+- `agents/storage.py` / `knowledge/retrieval.py` / `docs/phase3-plan.md`：**更正三处会
+  变成假声称的 docstring**（见下）。
+
+### 前置三条的落点
+
+| 前置 | 拍板 / 实现 |
+|---|---|
+| ① `env_kind` 来源 | `--env-kind`（与 `run` 同款 choices/default）+ **唯一解析点** `_resolve_env_kind(args)`；`cmd_plan` **第一行**过 `_check_autonomous_env`。M1 的守卫 `test_every_wired_autonomous_command_passes_the_gate` 从本轮起**真的在工作**（探针 A/B/C 各红） |
+| ② `policy` 来源 | **加了 `--policy`**：不给 → `load_policy()`（读相对 CWD 的 `config/policy.yaml`，读不到 → 内置默认值，矩阵 #4）；给了 → 该路径，**不存在即报错**。实现 `load_policy(args.policy) if args.policy is not None else load_policy()` —— **`is not None` 而非 `if args.policy`**：`--policy ""` 必须报错（探针 E） |
+| ③ 调用顺序 | `cmd_plan` 第一行过前置，过了才读 metadata/git —— F7 是「启动时校验」，不是「跑一半才拦」 |
+| ④ `AgentToolkit` 装配点 | **已证伪，未装配**（见下） |
+
+### ⚠️ 偏离登记 1：**没有**在 `cmd_plan` 装配 `AgentToolkit`（更正 Task 1.3 的推测）
+
+Task 1.3 的 docstring 与 plan 的接线前置都写「装配点归 Task 2.4」。实现时核实：
+`mta plan` **不碰 App**（离线规划：git diff + metadata + 用例集 + 历史），装配
+`AgentToolkit` 会是一个**死对象**（还要为它建真机会话）——正是「无消费者就不加字段」
+要防的。**真正的装配点是第一个会驱动设备的命令**（M6 的自主闭环 / M3 的 Dry Run）。
+plan 的接线前置已改成删除线 + 更正说明；`agents/tools.py` 的同类声称在早前一轮已改。
+**教训**：Task 1.3 的「装配点归 Task 2.4」是**推测**，写进 docstring 时就该写成
+将来时 + 待核实——它差一点变成一条假声称。
+
+### ⚠️ 偏离登记 2：`no_history_reason`（plan 没预料到的输入态）
+
+`trace_history` 对**不存在的 trace 库**抛 `ValueError`（P2 的既有语义）。而「还没跑过
+用例」是**合法状态**，`mta plan` 不该因此拒绝服务。但把「读不出来」也按 0.0 兜住就是
+静默降级。按「**空结果的成因必须可分辨**」处理：
+
+| 状态 | 处置 |
+|---|---|
+| trace 库**不存在** | 合法：历史项按 0.0 计，原因进 `notes` **且每条 `reasons` 的 history 行标注**「（无历史数据：trace 库尚不存在）」 |
+| 库存在但**读不了** | **exit 3**（`trace_history` 抛 → `cmd_plan` catch 成前置错误），**不**用上面的开关兜 |
+
+分界由 **CLI 用文件存在性**判（不解析异常消息——文案不该承担语义，Task 1.3 P3-2 的
+同一课）。`plan()` 的 `no_history_reason` docstring 明写这条边界。
+
+### ⚠️ 偏离登记 3：`git_commit` 必须 rev-parse 成**确定的 sha**
+
+`plan_id` 由 `(app_build, git_commit, changed_files)` 内容寻址，而 `HEAD` 是**移动的
+ref** —— 两个不同的提交会算出同一个 `plan_id`，后写的**静默覆盖**前一份。所以
+`cmd_plan` 额外跑一次 `run_git(repo_root, "rev-parse", head_ref)`。
+这正是 `review_p3_task14` 登记的「M2 若要做『Plan 可追溯到确定的 commit』需额外一次
+rev-parse」的落点。`range.head` 仍如实显示 metadata 里写的（可能是 `HEAD`），
+两者**故意不同**：前者是标识（必须定），后者是口径（如实反映输入）。
+
+### 实现期由测试抓到的两处真问题
+
+1. **`_read_steps` 的翻译面漏了 `DatabaseError`**：`sqlite3.OperationalError` 是
+   `DatabaseError` 的**子类**，所以「文件不是 sqlite 库」「库被加密」抛的 `DatabaseError`
+   **直接漏到了 CLI**（traceback）。该方法的 docstring 承诺「把裸 sqlite 异常转成可诊断
+   的域错误」—— 捕父类才让这句声称成立。**P2 侧改动**，全量回归 1607 通过。
+2. **Gate 脚手架的第三个 commit**：metadata 写盘后又 `git commit` 了一次，于是
+   `HEAD~1..HEAD` 变成「metadata 的改动」而不是「Swift 的改动」，Plan 空。修法是
+   **写盘但不提交**（metadata 是生成产物，读取走文件系统不走 git）。
+
+### 更正三处会变成假声称的 docstring（「文档声称必须有落点」第 7 次）
+
+| 位置 | 原文 | 更正 |
+|---|---|---|
+| `agents/storage.py` | 「CLI `--agent-db` **尚未接线**」 | 「**已接线**（Task 2.4 的 `mta plan` 直接 import `DEFAULT_AGENT_DB`）」——`review_p3_task11` P3-1 记的「写了 flag 而零命中」就此核销 |
+| `knowledge/retrieval.py` | 「「单一入口」目前**零生产调用者**」「第一个真实调用点是 Task 2.3 的 `planner/planner.py`」 | 改成「第一处生产调用点 = `cli/main.py::cmd_plan`」+ 一句更正：**`planner/planner.py` 不是调用者**（它把 `knowledge` 当**参数**收）——原措辞把「使用方」当成了「构造方」 |
+| `docs/phase3-plan.md` Task 2.4 前置 ②④ | 「`--policy` 目前不存在」「装配点归 Task 2.4」 | 回填拍板结论 / 删除线 + 证伪说明 |
+
+### Gate M2（`phase0/verify_p3_m2.py`）——**exit 0，8/8 PASS**
+
+**自足工程**：在 `out/p3_m2_gate/gate_env/` 下自建 `.git` + `generated/local` + suites
+（**不碰真实仓库**）；建仓后断言 `--show-toplevel == 工程根`（P2 M4 Gate 的
+「`rev-parse` 穿透到主仓库」事故在此显式防御）。「一次真实改动」= 改同一个
+`LoginDemoApp.swift` 再提交。
+
+| # | 判据 | 结果 |
+|---|---|---|
+| G1 | 矩阵 #1：`--env-kind production` → 启动即拒（含 `F7`）+ **不留任何库文件** | PASS |
+| G2 | 排序正确（**CRITICAL 居顶**）/ `reasons` 非空可追溯 / `git_commit` 是 40 位 sha / `range` 可见 | PASS（5 条子断言） |
+| G3 | 落库：按 `plan_id` 回查 `test_plans`，`tasks_json` 与输出一致 | PASS |
+| G4 | 幂等：同输入重跑 → 同一 `plan_id`、**库不增长** | PASS |
+| G5 | **矩阵 #5**：本地 LLM 桩返回**跨分重排** → 丢弃重排 + 保留确定性顺序 + `audit` 留痕（`llm_order_rejected`）；给过 id 的解释生效、没给的没有 | PASS |
+| G6 | **矩阵 #6**：`changed_files` 为空 → 空 Plan + 明示 | PASS |
+| G7 | 「无历史」标注 vs「读不出来」exit 3 的分界 | PASS |
+| G8 | 全量回归 `pytest tests` 全绿 | PASS |
+
+### 实测
+
+- 全量 pytest **1609 passed**（Task 2.4 新增 **23**：`test_cli_plan.py`；1586 + 23 = 1609）。
+- Gate M2 脚本 **exit 0**，`out/p3_m2_gate/summary.json` 落档。
+- **九条 A/B 探针全部真红**（每次先读原文、改后立即还原并断言字节相等）：
+  ① 删 F7 前置调用 → 2 red；② `command=` 与函数名不一致 → 1 red（M1 守卫）；
+  ③ `env_kind` 硬编码字面量 → 2 red；④ 去掉 `rev-parse` → 1 red；
+  ⑤ `is not None` 改 `if args.policy` → 1 red；⑥ 去掉「库不存在」判定 → 7 red；
+  ⑦ 去掉落库 → 4 red；⑧ 翻译面收回 `OperationalError` → 1 red；
+  ⑨ 不传 `no_history_reason` → 7 red。
+- **`cat >>` 重复执行**（仓内守卫记着的老坑）本轮又踩一次：两个新测试被追加两遍 →
+  `test_repo_hygiene.py::test_test_files_collect_count_matches_definitions` **抓到**。
+  已去重；全仓重复顶层定义**零命中**。
+- `-W error::pytest.PytestCollectionWarning` 下零警告。
+
+### M2 收口
+
+**Gate M2 判据全绿**：`mta plan` 输出可解释的优先级排序（`reasons` 非空、依据可追溯）；
+评分纯函数可单测（Task 2.2/2.3）；LLM 重排被拒（矩阵 #5）与空改动明示（矩阵 #6）
+在 CLI 端到端跑通。→ 打 tag **`checkpoint-p3-m2`**。

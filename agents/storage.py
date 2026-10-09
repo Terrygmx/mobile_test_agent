@@ -6,10 +6,10 @@ P2「按写者边界分库」与 E9 单写者纪律（进程锁 + `BEGIN IMMEDIA
 用法），幂等可重放；迁移链 `agents/migrations/` 按里程碑增量
 （001 → 002/003/004 随 M3/M4/M5 定型）。
 
-⚠️ **CLI `--agent-db` 尚未接线**（review_p3_task11 P3-1：docstring 不得描述
-「P3 完成态」）。本模块只提供**常量单点** `DEFAULT_AGENT_DB`，Task 2.4
-（`mta plan`，首个自主命令）接线时直接 import——与 graph 侧
-`DEFAULT_GRAPH_DB` → `--graph-db` 同款，避免两处字面量漂移。
+⚠️ **CLI `--agent-db` 已接线**（Task 2.4 的 `mta plan` 直接 import `DEFAULT_AGENT_DB`
+作 `default`——与 graph 侧 `DEFAULT_GRAPH_DB` → `--graph-db` 同款，避免两处字面量
+漂移）。此前 review_p3_task11 P3-1 记的「docstring 写了 `--agent-db` 而该 flag 零命中」
+就此核销。
 
 append-only：agent_trace 只 insert 不 update——每步留痕是审计根基。
 """
@@ -31,8 +31,8 @@ __all__ = ["AGENT_MIGRATIONS_DIR", "AGENT_SCHEMA_VERSION", "DEFAULT_AGENT_DB",
 AGENT_MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 AGENT_SCHEMA_VERSION = latest_version(AGENT_MIGRATIONS_DIR, "agents.migrations")
 
-# agent.db 的默认路径（**单点**）。CLI `--agent-db`（Task 2.4）直接 import
-# 本常量作 default——与 graph 侧 `DEFAULT_GRAPH_DB` 同款，两处字面量必漂移。
+# agent.db 的默认路径（**单点**）。CLI `--agent-db`（Task 2.4 的 `mta plan` 起）
+# 直接 import 本常量作 default——与 graph 侧 `DEFAULT_GRAPH_DB` 同款，两处字面量必漂移。
 DEFAULT_AGENT_DB = Path("out/agent.db")
 
 

@@ -17,6 +17,7 @@ from typing import Sequence
 import yaml
 
 from environment.secrets import EnvSecretProvider
+from agents.storage import DEFAULT_AGENT_DB
 from experience import DEFAULT_EXPERIENCE_DB
 from graph import DEFAULT_GRAPH_DB
 from repository.resolver import Repository, Severity
@@ -102,6 +103,59 @@ def build_parser() -> argparse.ArgumentParser:
                        help="TraceStore SQLite 路径")
     run_p.add_argument("--fake-driver", action="store_true",
                        help="不连真机，组件注入最小桩（开发/CI 冒烟）")
+
+    # --- mta plan（Task 2.4 / P3-08：**首个自主命令**，设计 12 节 / §5.3）---
+    # 前置（`--env-kind` + `_check_autonomous_env`）在 `cmd_plan` 的第一行——
+    # F7 是「启动时校验」，不是「跑一半才拦」。
+    plan_p = sub.add_parser(
+        "plan",
+        help="按 git diff 产出可解释的回归优先级 Plan（P3-07/08；"
+             "自主命令，production 下不可用）")
+    plan_p.add_argument("--build", metavar="ID",
+                        help="本次规划的 build id（默认取 metadata 顶层 build；"
+                             "它同时是 resolve/知识装配的 build 作用域）")
+    plan_p.add_argument("--base-build", metavar="ID",
+                        help="基线 build id：取其 metadata 的 git_commit 作 diff "
+                             "base，并把那份 metadata 作为 drift 回退面"
+                             "（不给 → base=HEAD~1，无回退面）")
+    plan_p.add_argument("--metadata", metavar="PATH",
+                        help="12.3 source_metadata.json 路径（默认 "
+                             "<--generated>/source_metadata.json 或 "
+                             "repository/generated/local/）")
+    plan_p.add_argument("--generated", metavar="DIR",
+                        default="repository/generated/local",
+                        help="generated **build 目录**（默认 "
+                             "repository/generated/local，与 metadata 的默认同一处；"
+                             "`--base-build` 的根取它的父目录）")
+    plan_p.add_argument("--overrides", metavar="DIR",
+                        default="repository/overrides",
+                        help="repository overrides 根目录（默认 "
+                             "repository/overrides；不存在则该来源为空）")
+    plan_p.add_argument("--suites-root", metavar="DIR", default="suites",
+                        help="用例 YAML 根目录（默认 ./suites）")
+    plan_p.add_argument("--repo-root", metavar="DIR", default=".",
+                        help="git 仓库根（默认 CWD；`git -C` 用它）")
+    plan_p.add_argument("--db", metavar="PATH", default="out/trace.db",
+                        help="TraceStore SQLite 路径（历史失败率的来源）")
+    plan_p.add_argument("--exp-db", metavar="PATH",
+                        default=str(DEFAULT_EXPERIENCE_DB),
+                        help="Experience Store 库路径（默认 out/experience.db）")
+    plan_p.add_argument("--agent-db", metavar="PATH",
+                        default=str(DEFAULT_AGENT_DB),
+                        help="agent.db 路径（Plan 落 test_plans 表）")
+    plan_p.add_argument("--policy", metavar="PATH",
+                        help="policy.yaml 路径（不给 → 读默认 "
+                             "config/policy.yaml，读不到用内置默认值；"
+                             "**显式给了却不存在 → 报错**）")
+    plan_p.add_argument("--env-kind", choices=["sandbox", "staging",
+                                               "production"],
+                        default="sandbox",
+                        help="环境种类（F7：production 下自主命令整体不可用，"
+                             "**无豁免 flag**）")
+    plan_p.add_argument("--no-llm", action="store_true",
+                        help="不调 LLM（reasons 只用规则摘要；确定性排序不变）")
+    plan_p.add_argument("--json", action="store_true",
+                        help="结构化输出（默认人类可读）")
 
     # --- mta repo（M3：Repository 管理；generate 为 P1-09 第一子命令）---
     repo_p = sub.add_parser("repo", help="Repository 管理子命令（M3）")
@@ -433,6 +487,25 @@ def _check_autonomous_env(policy, *, env_kind, command: str) -> None:
     return None
 
 
+def _metadata_path(args: argparse.Namespace) -> Path:
+    """12.3 metadata 的**唯一路径规则**（`run` 与 `plan` 共用）。
+
+    `--metadata` 显式给 → 用它；否则 `<--generated 或 repository/generated/local>/
+    source_metadata.json`。⚠️ `--generated` 在本项目里的既有语义是 **build 目录**
+    （`Repository.from_dirs(generated_root=…)` 与 `_resolve_app_build` 都这样用；
+    解析器的 help 文本写成「generated 根目录」是**措辞不一致**，见
+    `docs/p3_data_audit.md` 的 Task 2.4 登记）。
+
+    抽出来的理由：`_resolve_app_build` 与 `cmd_plan` 原先各写一份同样的表达式
+    —— 两处各写一遍必然漂移（Task 2.3 的 `require_paths` 是同一课的第一次）。
+    """
+    explicit = getattr(args, "metadata", None)
+    if explicit:
+        return Path(explicit)
+    return Path(getattr(args, "generated", None)
+                or "repository/generated/local") / "source_metadata.json"
+
+
 def _resolve_app_build(args: argparse.Namespace) -> str:
     """本次 run 的 build id（12.5 / E7 的 `validated_builds` 用它）。
 
@@ -447,15 +520,11 @@ def _resolve_app_build(args: argparse.Namespace) -> str:
     """
     from source import build_identity as bi
 
-    meta_path = (Path(args.metadata) if getattr(args, "metadata", None)
-                 else Path(getattr(args, "generated", None)
-                           or "repository/generated/local")
-                 / "source_metadata.json")
     try:
         # 解析规则与兜底都在 `build_identity.resolve_app_build`（单一入口）
         # ——源图侧（`build_source_graph`）用的是同一个函数，两面 scope 因此
         # 由构造保证一致（review_p2_task52 P3-1）。
-        return bi.resolve_app_build(bi.read_metadata(meta_path))
+        return bi.resolve_app_build(bi.read_metadata(_metadata_path(args)))
     except Exception:  # noqa: BLE001 — 读不到/坏 JSON 都退回默认
         return bi.DEFAULT_APP_BUILD
 
@@ -808,6 +877,207 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(line)
     print(f"run: exit {run.exit_code}")
     return run.exit_code
+
+
+# --- mta plan（Task 2.4 / P3-08：**首个自主命令**） --------------------------
+
+def _plan_range(args: argparse.Namespace) -> tuple[str, str, dict | None]:
+    """`plan` 的 git diff 范围 `(base, head, base_metadata)`。
+
+    - `head` = 本次规划 build 的 `git_commit`（12.3 metadata 顶层），读不到 → `HEAD`；
+    - `base` = `--base-build <id>` 的 metadata 的 `git_commit`；**没给 → `HEAD~1`**
+      （「上一次提交」——Gate 演示与最常见的用法）。`--base-build` 的 metadata 在
+      `<generated 的父目录>/<id>/source_metadata.json`（12.4 布局）；
+    - 第三个返回值是基线 metadata（给 `planner.plan(base_metadata=…)` 用），
+      没给 `--base-build` 时是 `None`（**没有回退面**，不是「空回退面」）。
+
+    ⚠️ **解析结果一律打给用户**（`_render_plan`）：默认 `HEAD~1` 是「口径」不是
+    「猜」——但口径必须可见，否则「我以为是和 main 比」与「其实是和上一次提交比」
+    长得一模一样（Task 2.3 的 `unmatched_changed_files` 同一条纪律）。
+    """
+    from source import build_identity as bi
+
+    metadata = bi.read_metadata(_metadata_path(args))
+    head = metadata.get("git_commit") or "HEAD"
+    if not args.base_build:
+        return "HEAD~1", head, None
+    root = (Path(args.generated).parent if getattr(args, "generated", None)
+            else Path("repository/generated"))
+    base_path = root / args.base_build / "source_metadata.json"
+    base_meta = bi.read_metadata(base_path)     # 不存在/坏 JSON → BuildIdentityError
+    return (base_meta.get("git_commit") or "HEAD~1"), head, base_meta
+
+
+def _render_plan(result, *, args, app_build: str, base: str, head: str,
+                 changed: tuple[str, ...]) -> None:
+    """人读 / `--json` 两种输出（矩阵 #6 的「明示」与矩阵 #5 的「留痕」都在这里可见）。"""
+    import json
+
+    plan = result.plan
+    if args.json:
+        print(json.dumps({
+            **plan.model_dump(mode="json"),
+            "range": {"base": base, "head": head},
+            "changed_files": list(changed),
+            # 过程产物（**不落库**，见 `planner/planner.py` 的偏离登记）：
+            "notes": list(result.notes),
+            "unrankable": [{"testcase_id": u.testcase_id, "reason": u.reason}
+                           for u in result.unrankable],
+            "audit": list(result.audit),
+        }, ensure_ascii=False, indent=2))
+        return
+
+    print(f"plan: {plan.plan_id}")
+    print(f"  build={app_build}  git_commit={plan.git_commit}")
+    print(f"  range: {base}..{head}（改动 {len(changed)} 个文件）")
+    if not plan.tasks:
+        print("  EMPTY PLAN（原因见下面的 notes）")
+    for i, task in enumerate(plan.tasks, 1):
+        print(f"  #{i:<3} {task.testcase_id}  priority={task.priority}"
+              f"  [{task.source}]")
+        for reason in task.reasons:
+            print(f"        - {reason}")
+    for note in result.notes:
+        print(f"  note: {note}")
+    for item in result.unrankable:
+        print(f"  unrankable: {item.testcase_id} -- {item.reason}")
+    for entry in result.audit:
+        print(f"  audit: {entry}")
+    print(f"plan: {len(plan.tasks)} tasks")
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    """`mta plan` —— 设计 §5.3 的 CLI 落点（**首个自主命令**）。
+
+    退出码：0 成功（**含空 Plan**——矩阵 #6 允许「产出空 Plan 并明示原因」，
+    空不是错误）；3 前置错误（env/政策/输入读不到/坏 git ref）。
+
+    **调用顺序照 F7 的语义**：第一行过前置（`load_policy` → `_check_autonomous_env`），
+    过了才做别的事——「启动时校验」不是「跑一半才拦」。
+    """
+    from agents.policy_config import load_policy
+
+    # 1. F7 前置（**第一行**）。`env_kind` 走唯一解析点（不许字面量：
+    #    硬编码 "sandbox" 会让 F7 退化成永真，有守卫钉这条）。
+    #    `--policy` 没给 → 不传参（= `_UNSET` 语义：读默认路径，读不到用内置
+    #    默认值，矩阵 #4）；给了 → 该路径**不存在即报错**（Task 1.2 的 P3-2 语义）。
+    policy = (load_policy(args.policy) if args.policy is not None
+              else load_policy())
+    _check_autonomous_env(policy, env_kind=_resolve_env_kind(args),
+                          command="plan")
+
+    from cli.pipeline import SessionPipeline
+    from experience import SQLiteExperienceStore
+    from knowledge import build_knowledge
+    from planner.models import PlannerInput
+    from planner.planner import plan as run_plan
+    from source import build_identity as bi
+    from source.git_diff import GitDiffError, changed_files
+    from source.vcs import GitError, run_git
+
+    # 2. 输入装配。三类前置错误各自 fail-loud（都带可诊断的消息）：
+    #    metadata 读不到 / 用例发现失败 / git 范围不合法。
+    try:
+        metadata = bi.read_metadata(_metadata_path(args))
+    except Exception as e:  # noqa: BLE001 — BuildIdentityError / OSError 都归前置
+        print(f"PREFLIGHT ERROR: 读不到 12.3 metadata：{e}")
+        print("plan: exit 3")
+        return 3
+    app_build = args.build or bi.resolve_app_build(metadata)
+    try:
+        base, head_ref, base_meta = _plan_range(args)
+    except Exception as e:  # noqa: BLE001 — 基线 metadata 读不到同样归前置
+        print(f"PREFLIGHT ERROR: --base-build 的 metadata 读不到：{e}")
+        print("plan: exit 3")
+        return 3
+
+    repo_root = args.repo_root
+    try:
+        changeset = changed_files(repo_root, base=base, head=head_ref)
+        # `git_commit` 必须是**确定的 sha**：`plan_id` 由 (app_build, git_commit,
+        # changed_files) 内容寻址，而 `HEAD`/`HEAD~1` 是**移动的 ref**——两个
+        # 不同的提交会算出同一个 plan_id，后写的**静默覆盖**前一份
+        # （review_p3_task14 登记过的那条：M2 要做「Plan 可追溯到确定的 commit」
+        # 需额外一次 rev-parse）。
+        git_commit = run_git(repo_root, "rev-parse", head_ref).strip()
+    except (GitDiffError, GitError) as e:
+        print(f"PREFLIGHT ERROR: 取 git 改动失败：{e}")
+        print("plan: exit 3")
+        return 3
+    changed = changeset.changed_files
+
+    pipeline = SessionPipeline(suites_root=args.suites_root,
+                               secrets=EnvSecretProvider(),
+                               # `app_id` 是经验库主键的第一段（`mta run` 用
+                               # `--bundle-id`）。`plan` 只调 `impact_of` /
+                               # `trace_history`，**不碰** experience_lookup /
+                               # graph_query，所以这里不需要它——不为了「以后
+                               # 可能用」加一个 flag（无消费者就不加）。
+                               app_id="", app_build=app_build)
+    try:
+        cases = pipeline.discover()
+    except SessionPipeline.PreflightError as e:
+        print(f"PREFLIGHT ERROR: {e}")
+        print("plan: exit 3")
+        return 3
+
+    repository = Repository.from_dirs(
+        generated_root=getattr(args, "generated", None),
+        overrides_root=args.overrides)
+    # F3：知识底座**只能**经 `knowledge.build_knowledge` 装配（有守卫钉「构造点
+    # 唯一」）。本命令是它的**第一个生产调用者**。
+    knowledge = build_knowledge(
+        experience_store=SQLiteExperienceStore(args.exp_db),
+        trace_db=args.db, cases=cases, app_build=app_build)
+
+    # 3. LLM 与 `mta run` 同款：`--no-llm` 或没有 LLM_API_KEY → 无 LLM
+    #    （确定性半边照常，reasons 只剩规则摘要——plan Steps 的降级要求）。
+    llm = budget = None
+    if not args.no_llm and os.environ.get("LLM_API_KEY"):
+        from llm.budget import LLMBudget
+        from llm.provider import LLMProvider
+
+        llm, budget = LLMProvider(), LLMBudget()
+
+    # 3b. 「没有历史」与「历史读不出来」必须分清（`planner.plan` 的
+    #     `no_history_reason` 边界）：
+    #     - trace 库**不存在** → 合法（还没跑过用例）：历史项按 0.0 计，
+    #       原因进 notes + 每条 reasons 的 history 行；
+    #     - 库存在但读不了（坏 schema / 表缺失 / 多 build 歧义）→ 交给
+    #       `plan()` 抛，下面 catch 成 exit 3（fail-loud，不按 0.0 兜）。
+    no_history_reason = None
+    if not Path(args.db).exists():
+        no_history_reason = (
+            f"trace 库尚不存在（{args.db}）→ 历史失败率按无历史（0.0）计；"
+            f"先跑一次 `mta run` 才有历史，或用 --db 指向已有的 trace 库")
+
+    # 4. 规划（编排层纯逻辑 + 一次可选 LLM 调用）
+    try:
+        result = run_plan(
+            PlannerInput(app_build=app_build, git_commit=git_commit,
+                         changed_files=list(changed)),
+            knowledge=knowledge, cases=cases, metadata=metadata,
+            repository=repository, llm=llm, budget=budget,
+            base_metadata=base_meta, no_history_reason=no_history_reason)
+    except ValueError as e:
+        # `trace_history` 的域错误（库不可读 / 多 build 歧义）——**前置输入问题**，
+        # 不是规划结论。不按「无历史」兜（那正是 `no_history_reason` 划出去的边界）。
+        print(f"PREFLIGHT ERROR: 读 trace 历史失败：{e}")
+        print("plan: exit 3")
+        return 3
+
+    # 5. 落库（`test_plans`，upsert；`plan_id` 内容寻址 → 同输入重跑幂等）。
+    #    `notes`/`unrankable`/`audit` 是**过程产物**，不进这张表（它没有那些列）
+    #    ——所以「必须随 Plan 复核」的结论都在 `reasons` 里（见 Task 2.3 的
+    #    drift 标记）。
+    from agents.storage import SQLiteAgentStore
+
+    SQLiteAgentStore(args.agent_db).save_plan(**result.plan.to_store_dict())
+
+    # 6. 输出
+    _render_plan(result, args=args, app_build=app_build, base=base,
+                 head=head_ref, changed=changed)
+    return 0
 
 
 def cmd_repo(args: argparse.Namespace) -> int:
@@ -1591,6 +1861,8 @@ def main(argv: Sequence | None = None) -> int:
         return cmd_lint(args)
     if args.command == "run":
         return cmd_run(args)
+    if args.command == "plan":
+        return cmd_plan(args)
     if args.command == "repo":
         return cmd_repo(args)
     if args.command == "source":

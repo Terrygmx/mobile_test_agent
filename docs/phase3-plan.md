@@ -243,18 +243,28 @@ M1 基础与安全边界(2d) ─► M2 Planning(2d) ─► M3 Generation(3.5d) �
 >    但永远不拒）。守卫 `tests/fault_injection/test_p3_matrix_m1.py::
 >    test_every_wired_autonomous_command_passes_the_gate` 会在 `cmd_plan` 出现的
 >    那天检查这条。
-> 2. **`policy` 的来源**——`--policy` 这个 flag **目前不存在**（Task 1.2 的
+> 2. **`policy` 的来源**——**✅ 已拍板（Task 2.4 实现时）**：**加了 `--policy`**，
+>    语义按 P3-2：不给 → `load_policy()`（读相对 CWD 的 `config/policy.yaml`，读不到
+>    → 内置默认值，矩阵 #4）；给了 → 该路径，**不存在即报错**（`PolicyConfigError`）。
+>    实现是 `load_policy(args.policy) if args.policy is not None else load_policy()`
+>    —— `is not None` 而非 `if args.policy`：`--policy ""` 必须**报错**而不是静默
+>    退回默认解析（原「二选一」的另一半是直接用 `load_policy()`，会丢掉操作员
+>    指定策略的能力）。以下是原措辞（保留供对照）：`--policy` 这个 flag **此前不存在**（Task 1.2 的
 >    docstring 已改成将来时）。接线时二选一：加 `--policy`（显式路径，按 P3-2 的
 >    语义**不存在即报错**），或直接用 `load_policy()` 的默认解析（相对 CWD 的
 >    `config/policy.yaml`，读不到 → 内置默认值）。**拍板后回填本节**。
 > 3. **调用顺序**：`cmd_plan` 的第一行过前置（`load_policy` → `_check_autonomous_env`），
 >    过了才做别的事——F7 是「启动时校验」，不是「跑一半才拦」。
-> 4. **`AgentToolkit` 的装配点**（Task 1.3 交付，尚未接线）：`guard` 必填，其余按
->    工具需要注入——`executor` / `locator_for`（**用 `SessionPipeline._locator_for`
->    那一份**，别在装配处再写一遍 `{"type","value"}` 转换）/ `repository` /
->    `device_session`（`back` 走它）/ `wait_engine` / `assertion_engine` /
->    `experience_store`，以及 **`agent_db` + `task_id`（BLOCK 的审计落点：不配就
->    在第一次 BLOCK 时抛 `ToolkitAuditError`，不静默丢弃）**。
+> 4. ~~**`AgentToolkit` 的装配点**（Task 1.3 交付，尚未接线）~~ → **已证伪（Task 2.4
+>    实现时）**：`mta plan` **不碰 App**（离线规划：git diff + metadata + 用例集 + 历史），
+>    装配 `AgentToolkit` 会是一个**死对象**（还要为它建真机会话）——所以**没有**在
+>    `cmd_plan` 里装配。真正的装配点是**第一个会驱动设备的命令**（M6 的自主闭环，或
+>    M3 的 Dry Run）。届时按需注入：`guard` 必填；`executor` / `locator_for`（**用
+>    `SessionPipeline._locator_for` 那一份**，别在装配处再写一遍 `{"type","value"}`
+>    转换）/ `repository` / `device_session`（`back` 走它）/ `wait_engine` /
+>    `assertion_engine` / `experience_store`；**`agent_db` + `task_id` 是 BLOCK 的审计
+>    落点**（不配就在第一次 BLOCK 时抛 `ToolkitAuditError`，不静默丢弃）。
+>    ⚠️ 同时更正 Task 1.3 的两处 docstring 声称（「装配点归 Task 2.4」是**推测**）。
 
 **Objective:** 设计 12 节 CLI。
 

@@ -15,19 +15,22 @@
    的 trace 范围（两个 build 不许混进一张图/一段历史）——装配处是唯一能一眼看到
    「这次规划针对哪个 build」的地方。
 
-### ⚠️ 「单一入口」目前**零生产调用者**（review_p3_task22 P3-3）
+### ⚠️ 「单一入口」的第一处**生产调用点** = `cli/main.py::cmd_plan`（Task 2.4）
 
-`build_knowledge` 的**生产**调用点至今只有本包自己（`__init__` 的 re-export + 本模块
-的定义）；唯一的调用方是 `tests/unit/test_knowledge_retrieval.py`。**第一个真实调用
-点是 Task 2.3 的 `planner/planner.py`**——在那之前，上面第 1 条是**约定**而不是事实
-（docstring 不得描述「完成态」，见 `review_p3_task11` 的教训）。
+`build_knowledge` 的生产调用点：`cli/main.py` 的 `cmd_plan`（Task 2.4 起，`mta plan`）。
+⚠️ **`planner/planner.py` 不是调用者** —— 它把 `knowledge` 当**参数**收（依赖注入），
+所以真正的装配点在 CLI。此前这里写「第一个真实调用点是 Task 2.3 的
+`planner/planner.py`」，是把「**使用方**」当成了「**构造方**」：Task 2.3 落地时
+`build_knowledge` 的调用者仍然只有单元测试，这条是 **Task 2.4 接线时才核实的**
+（docstring 不得描述「完成态」——`review_p3_task11` 的教训）。
 
-两条机械保证，各自只钉住一半：
+三条机械保证，各钉一块、互补：
 
 | 守卫 | 钉住 | 钉不住 |
 |---|---|---|
 | `test_build_knowledge_adds_no_retrieval_method` | 工厂返回的实例**公开面 == Protocol 四方法**（防「新增平行检索方法」） | 有人在 P3 侧直接 `P2KnowledgeSources(...)` 绕过本入口 |
-| `test_p2_knowledge_sources_is_constructed_in_one_place` | `P2KnowledgeSources` 的**构造点**全仓只许一处（`phase0/` 与 `tests/` 显式排除） | — |
+| `test_p2_knowledge_sources_is_constructed_in_one_place` | `P2KnowledgeSources` 的**构造点**全仓只许一处（`phase0/` 与 `tests/` 显式排除） | 绕过 `KnowledgeSources` 直连数据源 |
+| `test_planner_package_does_not_touch_data_sources_directly` | `planner/**` **不直连数据源**（`sqlite3` / `tracer` / `graph.storage` / `experience.store` / `source.sqlite_tx` / `agents`）——F3 在 M2 侧的 import 级断言 | — |
 
 ## ⚠️ 对 plan Files 的一处偏离：**没有 `graph store` 参数**
 

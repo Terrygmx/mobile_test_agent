@@ -193,17 +193,23 @@ def _history_by_case(knowledge: KnowledgeSources) -> dict[str, tuple]:
 
 
 def rule_basis(*, hit: bool, rate: float, risk, score: int,
-               drift: bool = False) -> list[str]:
+               drift: bool = False, no_history: bool = False) -> list[str]:
     """确定性打分的**依据**（F13：可解释性由代码保证，不依赖 LLM 在场）。
 
     每条都**扣住一个真实输入**：impact 是否命中、历史失败率、风险等级（带 floor）、
     最终分数。顺序固定 → 同一输入下 `reasons` 的前缀稳定（可 diff、可对账）。
 
-    `drift=True` 时在 **impact 那一行**追加「drift 回退」标记——`reasons` 是**唯一随
-    `test_plans` 落库**的位置（`save_plan` 只收 `tasks_json`），而 drift 回退恰恰是对
-    「命中改动影响面」这句话本身的限定：只记在 `PlanResult.notes` 里，落库的 Plan 上
-    「影响面精确」与「影响面宽」长得一模一样（review_p3_task23 P2-1）。标记**附着在它
-    限定的那一行上**（而不是每条 reasons 都追加一整句 plan 级说明），避免 N 份重复。
+    两个**限定标记**（都附着在它们各自限定的那一行上，而不是每条 reasons 追加一整句）：
+
+    - `drift=True` → impact 行加「drift 回退：影响面比本次 commit 宽」；
+    - `no_history=True` → history 行加「无历史数据」。
+
+    为什么标记必须进 `reasons`（而不是只进 `PlanResult.notes`）：`reasons` 是**唯一随
+    `test_plans` 落库**的位置（`save_plan` 只收 `tasks_json`），而这两个标记恰恰是对
+    「命中改动影响面」「历史失败率 0.00」这两句话本身的限定 —— 只记在 `notes` 里，
+    落库的 Plan 上「影响面精确」与「影响面宽」、「真的没失败过」与「根本没有历史」
+    就长得一模一样（review_p3_task23 P2-1 的同一课）。
+    标记**附着在限定的那一行**（而不是每条追加一整句 plan 级说明），避免 N 份重复。
 
     ⚠️ **编排路径上 `hit` 恒为 `True`**：候选集本身就是影响面（口径 1），所以
     「不在影响面内」那一支在 `plan()` 里不可达、`IMPACT_WEIGHT` 的 +40 在候选集内
@@ -218,9 +224,12 @@ def rule_basis(*, hit: bool, rate: float, risk, score: int,
     impact_line = f"impact: {'命中改动影响面' if hit else '不在影响面内'}"
     if drift:
         impact_line += "（drift 回退：影响面比本次 commit 宽）"
+    history_line = f"history: 历史失败率 {rate:.2f}"
+    if no_history:
+        history_line += "（无历史数据：trace 库尚不存在）"
     return [
         impact_line,
-        f"history: 历史失败率 {rate:.2f}",
+        history_line,
         risk_line,
         f"score: {score}",
     ]
@@ -325,7 +334,8 @@ def plan(planner_input: PlannerInput, *, knowledge: KnowledgeSources,
          cases: Iterable[TestCase], metadata: Mapping,
          repository: RepositoryProtocol, llm: LLMProvider | None = None,
          budget: LLMBudget | None = None,
-         base_metadata: Mapping | None = None) -> PlanResult:
+         base_metadata: Mapping | None = None,
+         no_history_reason: str | None = None) -> PlanResult:
     """设计 §5.3 的编排（**纯逻辑 + 一次可选的 LLM 调用**）。
 
     | 参数 | 说明 |
@@ -336,6 +346,13 @@ def plan(planner_input: PlannerInput, *, knowledge: KnowledgeSources,
     | `repository` | `case_risk` 解析元素风险用 |
     | `llm` / `budget` | **两个都给**才调用 LLM；缺任一个即走规则摘要（见下） |
     | `base_metadata` | 可选；metadata 缺文件级归属时的 drift 回退面 |
+    | `no_history_reason` | 可选；**调用方已知没有历史数据**时给出原因（非空即不读 trace） |
+
+    ⚠️ **`no_history_reason` 的边界**：「trace 库**不存在**」（还没有任何历史）与
+    「库存在但**读不了**」是两回事 —— 前者是合法的空，后者必须 fail-loud。**分不清
+    就该由调用方先分清**（`cli.main.cmd_plan` 用文件存在性判），别用这个开关把
+    「读不出来」也兜住：那会让「历史一直很差」与「历史读不到」在落库的 Plan 上
+    长得一模一样。
 
     **LLM 的门槛是「两个都给」**：只给 `llm` 而不给 `budget` 时不调用——静默造一个
     预算对象会让「这次调用有没有被记账」有两个来源。预算扣减走 `try_acquire()` 的
@@ -384,7 +401,12 @@ def plan(planner_input: PlannerInput, *, knowledge: KnowledgeSources,
     # 同一个 id**，Plan 里出现一条 id 为 "?" 的任务而全程无报错——与 P3-1 同形。
     candidates = [c for c in case_list if c.id in impact]
     # 历史**一次读全量**再按用例分组（不在循环里逐用例调 `trace_history`）。
-    history = _history_by_case(knowledge) if candidates else {}
+    # `no_history_reason` 非空 = 调用方**已知**没有历史数据（如 trace 库尚不存在）：
+    # 此时不读库、历史项按 0.0 计，并把原因写进 notes + 每条 reasons 的 history 行。
+    history = {} if no_history_reason else (
+        _history_by_case(knowledge) if candidates else {})
+    if no_history_reason and candidates:
+        notes.append(no_history_reason)
 
     unrankable: list[Unrankable] = []
     scored: list[dict] = []
@@ -406,7 +428,8 @@ def plan(planner_input: PlannerInput, *, knowledge: KnowledgeSources,
                        "score": score,
                        "basis": rule_basis(hit=cid in impact, rate=rate,
                                            risk=risk, score=score,
-                                           drift=drift_fallback)})
+                                           drift=drift_fallback,
+                                           no_history=bool(no_history_reason))})
 
     scored.sort(key=lambda e: order_key(e["score"], e["meta"].testcase_id))
     deterministic = [e["meta"].testcase_id for e in scored]
