@@ -74,14 +74,22 @@ def test_task_source_accepts_only_the_two_design_values():
         TestPlanTask(**_task(source="generated"))
 
 
-@pytest.mark.parametrize("bad", [[], ()])
-def test_empty_reasons_is_rejected(bad):
-    """`reasons` 为空 → **拒绝创建**（可解释性是 F13 的落地，不是裸分数）。
+@pytest.mark.parametrize("bad", [[], (), [""], ["   "], ["ok", ""], ["ok", "  "]])
+def test_empty_or_blank_reasons_are_rejected(bad):
+    """`reasons` 为空、或**含空串/纯空白** → **拒绝创建**（F13 的落点）。
 
-    `priority` 单独存在时人无法复核、也无法与 LLM 的解释对账。
+    只判容器会被**一个空串**绕过，而空串恰恰是生产者最容易写出的值（Task 2.2/2.3 的
+    理由都是拼接/模板渲染出来的，`f"{impact}"` 在 `impact` 为空时就是 `""`）——
+    `reasons=[""]` 给出的可解释性恰好为零，与「裸分数」在对账时没有区别。
+
+    ⚠️ 参数**不做 `list()` 转换**（review_p3_task21 P3-3）：上一版是
+    `parametrize("bad", [[], ()])` + `reasons=list(bad)`，而 `list([])` 与 `list(())`
+    都是 `[]` —— 两条 test id 喂的是**同一个实参**，测试数 +1、覆盖面 +0。
+    现在 `[]` 与 `()` 各自直接作为 `reasons` 传入（两种真的不同的输入形态，
+    顺带钉住 pydantic 对 tuple 的归一化）。
     """
     with pytest.raises(ValidationError, match="reasons"):
-        TestPlanTask(**_task(reasons=list(bad)))
+        TestPlanTask(**_task(reasons=bad))
 
 
 def test_priority_must_be_within_design_range():
@@ -172,10 +180,8 @@ def test_saved_tasks_json_is_the_model_shape(store):
     这条防的是「往返恰好相等但落库形状漂移」——下游（报告 / `mta plan --json`）
     读的是库里的 JSON，不是内存里的模型。
     """
-    import json
-
     store.save_plan(**_plan().to_store_dict())
-    raw = json.loads(json.dumps(store.get_plan("plan_1")["tasks"]))
+    raw = store.get_plan("plan_1")["tasks"]      # 已经是 json.loads 过的列表
     assert raw == [{"testcase_id": "login_001", "priority": 70,
                     "reasons": ["impact: 命中改动文件"],
                     "source": "existing"}]
@@ -184,21 +190,45 @@ def test_saved_tasks_json_is_the_model_shape(store):
 # --- 分层守卫（防包级循环） ----------------------------------------------------
 
 
-def test_agents_storage_does_not_import_planner():
-    """`agents/storage.py` **不得** import 任何 `planner.*`。
+def test_agents_package_does_not_import_planner():
+    """`agents/**` **任何模块**都不得 import `planner.*`（依赖方向单向）。
 
-    这不是洁癖：`planner/__init__.py` 会 re-export `planner.planner`（Task 2.3 起，
-    它反过来 import `agents.storage`）——一旦 `agents.storage` 反向 import
-    `planner.models`，包初始化期就会形成环。存取转换因此留在 `planner/models.py`
-    （`to_store_dict` / `from_store_dict`），`agents` 侧对 `planner` 的依赖为**零**。
+    这不是洁癖，是**包级无环**：`planner` → `agents`（Task 2.3 起 `planner.planner`
+    import `agents.storage` 存 Plan），反方向一旦出现就成环。而
+    `planner/__init__.py` 会 re-export `planner.planner`，所以 `agents` 侧任何
+    module-level 的 `import planner…` 都会在包初始化期把它拉进来。
+
+    ⚠️ **扫描面是 `agents/` 整个包**（review_p3_task21 P3-2）：上一版只扫
+    `agents/storage.py`——而「最可能在未来 import `planner` 的恰恰不是它」
+    （`agents/tools.py`、`agents/models.py` 都是自然落点），于是
+    「agents 侧对 planner 的依赖为零」这句声称**宽于守卫**（A/B：插进 `models.py`
+    时 14 passed 全绿）。现在逐文件扫、失败时**指名文件**。
+
+    若将来真有正当需要（例如工具层要声明 plan 的返回类型）：用
+    `if TYPE_CHECKING:` 下的 import（不在运行期执行、不成环），并在**本条测试**
+    里为它开一个带理由的白名单——别把整条守卫删掉。
     """
-    src = (_ROOT / "agents" / "storage.py").read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    imported: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            imported.append(node.module)
-        elif isinstance(node, ast.Import):
-            imported.extend(a.name for a in node.names)
-    assert not [m for m in imported if m.split(".")[0] == "planner"], \
-        f"agents/storage.py 不该 import planner：{imported}"
+    offenders: list[str] = []
+    for path in sorted((_ROOT / "agents").rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        imported: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                imported.append(node.module)
+            elif isinstance(node, ast.Import):
+                imported.extend(a.name for a in node.names)
+        bad = [m for m in imported if m.split(".")[0] == "planner"]
+        if bad:
+            offenders.append(f"{path.relative_to(_ROOT)}: {bad}")
+
+    assert not offenders, (
+        "agents 包不该 import planner（依赖方向是 planner → agents，单向）：\n  "
+        + "\n  ".join(offenders)
+        + "\n修法：把类型/转换留在 planner 侧，或用 `if TYPE_CHECKING:` 下的 import。")
+    # 防空转：确认真的扫到了多个文件（范围写错成空时上面的断言会假绿）
+    scanned = [p for p in (_ROOT / "agents").rglob("*.py")
+               if "__pycache__" not in p.parts]
+    assert len(scanned) >= 5, f"只扫到 {len(scanned)} 个 agents/*.py，范围疑似写错"
+    assert (_ROOT / "agents" / "storage.py") in scanned, "storage.py 必须被覆盖到"

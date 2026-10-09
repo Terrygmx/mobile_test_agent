@@ -52,9 +52,10 @@ class TestPlan(BaseModel):
   store 没有理由知道 `TestPlanTask` 的结构；
 - 更要紧的是**避免包级循环**：`agents.storage` 若 import `planner.models`，而
   `planner/__init__.py` 又 re-export `planner.planner`（Task 2.3 起要 import
-  `agents.storage`），就会在包初始化期形成环。把转换留在本模块，`agents` 侧对
-  `planner` 的依赖为**零**——这是结构上的保证，不是「我们小心一点」。
-  `test_planner_models.py::test_agents_storage_does_not_import_planner` 钉住它。
+  `agents.storage`），就会在包初始化期形成环。把转换留在本模块，
+  **`agents/**` 对 `planner` 的依赖为「零」**——这是结构上的保证，不是「我们小心
+  一点」。`test_planner_models.py::test_agents_package_does_not_import_planner`
+  逐文件扫整个 `agents/` 包钉住它（依赖方向单向：`planner → agents`）。
 """
 from __future__ import annotations
 
@@ -124,10 +125,18 @@ class TestPlanTask(_Strict):
     @field_validator("reasons")
     @classmethod
     def _reasons_must_not_be_empty(cls, v: list[str]) -> list[str]:
-        if not v:
+        """容器非空 **且每条 strip 后非空**。
+
+        ⚠️ 只判容器（`if not v`）会被**一个空串**绕过——而空串恰恰是**生产者最容易
+        写出的值**：Task 2.2 的 `priority_score` 与 Task 2.3 的 LLM 解释都在字符串
+        拼接 / 模板渲染里产出理由（`f"{impact}"` 在 `impact` 为空时就是 `""`）。
+        `reasons=[""]` 给出的可解释性**恰好为零**，与「裸分数」在对账时没有区别——
+        那正是 F13 要防的东西（review_p3_task21 P3-1）。
+        """
+        if not v or not all(r.strip() for r in v):
             raise ValueError(
-                "reasons 不能为空——可解释性是 F13 的落地：排序结果必须能被人"
-                "复核（「LLM 觉得」不算理由）")
+                "reasons 不能为空、也不能含空串/纯空白——可解释性是 F13 的落地："
+                "排序结果必须能被人复核（「LLM 觉得」与空串都不算理由）")
         return v
 
 
@@ -145,6 +154,9 @@ class TestPlan(_Strict):
     两条修法（都要动 schema，**不在 Task 2.1 范围**）：
     ① 迁移 002 加 `schema_version` 列；② 把 `tasks_json` 换成带信封的
     `{"schema_version": …, "tasks": […]}`（列名要一并改）。
+    ⚠️ **两种修法都必须同时改 `from_store_dict`**——它现在把 `schema_version` 完全
+    忽略、永远取模型默认值（`get_plan` 的返回里根本没有这个键）。只加列不改读取口，
+    旧行仍会被静默当成新版本。
     **谁 bump 版本谁先处理这一条**——`docs/p3_data_audit.md` 已登记。
     """
 

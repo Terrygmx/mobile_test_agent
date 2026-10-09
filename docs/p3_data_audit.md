@@ -907,3 +907,70 @@ tasks_json`——**没有版本列**，而 `tasks_json` 按列名只装 tasks。
 - **探针**：往 `agents/storage.py` 插 `from planner.models import TestPlan` →
   分层守卫**真红**。
 - 收集警告：`-W error::pytest.PytestCollectionWarning` 下 14 passed（无警告）。
+
+---
+
+## Task 2.1 评审修订记录（review_p3_task21 收口，2026-10-09）
+
+评审「有条件通过 — **0×P2** + 3×P3」，上一轮 `9bfa0b0` 的 3×P3 **3/3 全清** + 两条小观察也落地。
+三条 P3 仍集中在**「声称 vs 落点」**。
+
+### P3-1 `reasons` 的「非空」校验能被**一个空串**绕过
+
+- 症状：`if not v:` 只判**容器**不判**元素** → `reasons=[""]` / `["   "]` / `["ok",""]`
+  **全被接受**，而它们给出的可解释性**恰好为零**（与「裸分数」在对账时没有区别）。
+- 为什么现在要修：这是 plan Task 2.1 Steps **唯一**点名的校验，而它拦不住**生产者最容易
+  写出的那种值**——Task 2.2 的 `priority_score` 与 Task 2.3 的 LLM 解释都在字符串拼接 /
+  模板渲染里产出理由（`f"{impact}"` 在 `impact` 为空时就是 `""`）。等 `mta plan` 渲染出
+  「有 reasons 但读不出理由」的 Plan 再补，`test_plans` 里已经有行、报告里已经有输出——
+  **错的是已落库的数据**。
+- 修法：`if not v or not all(r.strip() for r in v):`（消息写明「空串/纯空白不算理由」）
+  + 参数化扩到 6 例（`[]` / `()` / `[""]` / `["   "]` / `["ok",""]` / `["ok","  "]`）。
+- **探针复现**：把校验退回 `if not v:` → 新增的 4 例（`bad2`–`bad5`）**全红**。
+
+### P3-2 分层守卫只扫 `agents/storage.py`，而声称是「`agents` 侧依赖为零」
+
+- 症状：`planner/models.py` 写着「`agents` 侧对 `planner` 的依赖为**零**——这是结构上的
+  保证」，而守卫只读**一个文件**。评审 A/B：插进 `agents/storage.py` → 真红；
+  插进 **`agents/models.py` → 14 passed 全绿**。
+- 为什么现在要修：「最可能在未来 import `planner` 的恰恰不是 storage.py」——
+  `agents/tools.py`（工具层要声明 plan 的返回类型）、`agents/models.py` 都是自然落点。
+  一句「依赖为零」配只扫一个文件的守卫 = **声称宽于守卫**。
+- 修法（采纳评审的**扩面**项，而不是收窄声称）：守卫改名
+  `test_agents_package_does_not_import_planner`，**逐文件扫整个 `agents/` 包**
+  （`rglob("*.py")` + 逐文件 AST），失败时**指名文件**；并带防空转下界
+  （`>=5` 个文件 + `storage.py` 必须在扫描面内）。同时把 `planner/models.py` 的措辞对齐
+  成「**`agents/**` 对 `planner` 的依赖为「零」**（依赖方向单向：`planner → agents`）」。
+- **为什么是「扩面」而不是「收窄声称」**：这条规则的**真实不变量**是**包级无环**——
+  `planner → agents`（Task 2.3 起 `planner.planner` import `agents.storage`），反方向一旦
+  出现就成环；而 `planner/__init__.py` 会 re-export `planner.planner`，所以 `agents` 侧
+  **任何** module-level 的 `import planner…` 都会在包初始化期把它拉进来。按**包**粒度说
+  「依赖为零」才是与结构一致的表述（只对 `storage.py` 说，是把结构性质降级成一个文件的巧合）。
+  守卫的失败消息里留了**逃生门**：真有正当需要时用 `if TYPE_CHECKING:` 下的 import
+  （不在运行期执行、不成环），并在该测试里为它开一条带理由的白名单——**别把整条守卫删掉**。
+- **探针复现**：插进 `agents/models.py` → 扩面后的守卫**真红**（修复前全绿）。
+
+### P3-3 `parametrize([[], ()])` 的两条其实是**同一个输入**
+
+- 症状：`list([])` 与 `list(())` 都是 `[]` → 两条 test id 喂的是**同一个实参**，
+  测试数 +1、覆盖面 +0。而它是本任务**唯一**钉 F13 那条校验的测试（P3-1 正在说它有洞）
+  ——**在一条保护性测试上虚报覆盖面**比在普通测试上更贵。
+- 修法：**不做 `list()` 转换**，让 `[]` 与 `()` 各自直接作为 `reasons` 传入（两种真的不同
+  的输入形态，顺带钉住 pydantic 对 tuple 的归一化）。
+
+### 小观察：两处已改、两处登记
+
+| 观察 | 处置 |
+|---|---|
+| `test_saved_tasks_json_is_the_model_shape` 里 `json.loads(json.dumps(x))` 是**恒等**（`get_plan` 已经 loads 过） | ✅ 删掉那两个调用，直接取 `get_plan(...)["tasks"]` |
+| `schema_version` 的登记没提 **`from_store_dict` 要跟着读**（它现在完全忽略该键、永远取默认值） | ✅ `TestPlan` docstring 补上：「两种修法**都必须同时改 `from_store_dict`**——只加列不改读取口，旧行仍会被静默当成新版本」 |
+| 三个 `_Strict` 的 lax 口径（`priority=True → 1` 等，与 `agents` / `experience` 两个 `_Strict` **完全一致**） | **登记**：要收紧是**三个包一起动**的单独立项，不是本任务缺口（MEMORY §4 已记该形态） |
+| `plan_id` 的来源未定（upsert 语义依赖它的稳定性） | **登记 + 写进 plan Task 2.3 的接线前置**：① 随机 uuid → upsert 永不发生、库线性增长；② 由 `app_build + git_commit` 派生 → 同 build 重复 plan 会覆盖，但留不下两份。**拍板后回填**，且生成方式只许一处实现 |
+
+### 实测
+
+- 全量 pytest **1455 passed**（本轮 +4：`test_planner_models.py` 14→**18**；1451 + 4 = 1455）。
+- **探针复现两条修复**：① 校验退回「只判容器」→ 空串那 4 例**全红**；
+  ② 插 `from planner.models import TestPlan` 进 `agents/models.py` → 扩面后的守卫**真红**
+  （修复前 14 passed 全绿）。
+- `-W error::pytest.PytestCollectionWarning` 下 18 passed（收集警告仍为零）。

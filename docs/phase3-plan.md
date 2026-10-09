@@ -190,6 +190,14 @@ M1 基础与安全边界(2d) ─► M2 Planning(2d) ─► M3 Generation(3.5d) �
 
 ### Task 2.3: P3-07 — changed_files→targets 映射 + Planner 编排 + LLM 解释层
 
+> **⚠️ 接线前置（Task 2.1 留的，review_p3_task21 小观察 4）**：**`plan_id` 的来源要在
+> 本任务拍板**——`test_plans` 的主键是 `plan_id`，`save_plan` 是 upsert（同 id 覆盖），
+> 所以「重存算不算新计划」**完全取决于 plan_id 是否稳定**：
+> ① 每次随机生成（uuid）→ upsert **永不发生**，库随调用次数线性增长；
+> ② 由 `app_build + git_commit`（+ 可选的 base_build）派生 → 同一 build 重复 plan 会**覆盖**，
+> 但「同一 build 跑了两次想留两份」就不可能。
+> **拍板后回填本节**，并让 `TestPlan.plan_id` 的生成方式只有**一处实现**。
+
 **Objective:** 设计 5.3 节 Git Diff → Impact → TestPlan；LLM 只解释/打平，不决定顺序。
 
 **Files:**
