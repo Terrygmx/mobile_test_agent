@@ -20,8 +20,9 @@ from testcase.schema import GenerationEvidence, TestCase, parse_testcase_dict
 
 _ROOT = Path(__file__).resolve().parents[2]
 
-# 设计 6.2 示例 + `name`：示例漏写了 P1 的必填字段 `name`（P1 契约不改，
-# 夹具补上；schema 不为设计文档的疏漏放宽 `name`）。
+# 设计 6.2 示例 + `name`：示例原漏写 P1 的必填字段 `name`（P1 契约不改，夹具补上；
+# schema 不为设计文档的疏漏放宽 `name`）。设计文档已在 Task 3.1 评审修订时回填 `name`，
+# 夹具保持不变——它同时钉住「缺 `name` 的裸示例过不了 strict parser」这条。
 CANDIDATE = {
     "schema_version": "0.2",
     "id": "search_candidate_empty_result",

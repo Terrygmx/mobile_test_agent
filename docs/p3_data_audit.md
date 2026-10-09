@@ -1558,8 +1558,9 @@ rev-parse」的落点。`range.head` 仍如实显示 metadata 里写的（可能
   `source_refs`，三键**必填**、`extra="forbid"`）；`TestCase` 末尾追加三个可选字段
   （`status: Literal["CANDIDATE"] | None` / `generated_by: str | None` /
   `generation_evidence: GenerationEvidence | None`）。`SCHEMA_VERSION` **不变**（`"0.2"`）。
-- `tests/unit/test_testcase_candidate_fields.py`（12 例）、
-  `tests/unit/test_lint_candidate_compat.py`（4 例）——共 **16** 例。
+- `tests/unit/test_testcase_candidate_fields.py`（**13** 例）、
+  `tests/unit/test_lint_candidate_compat.py`（**3** 例）——共 **16** 例。
+  （8 + 3 个 `def test_`，含 `parametrize` 展开 4 + 3；见「评审修订记录」。）
 
 ### 决策记录
 
@@ -1605,16 +1606,84 @@ plan 的 Steps 写「逐字节不变」，但**加字段后 `model_dump()` 必�
 - **5 条 A/B 探针全部真红**（每次先读原文、改后立即还原并断言字节相等）：
   **A** 删三个字段 → **6** red（含两条 lint 路径测试）；**B** 三列表给默认值 → **3** red；
   **C** 去掉 `extra="forbid"` → **1** red；**D** 三列表改裸 `list` → **1** red；
-  **E** `Literal` 改裸 `str` → **3** red。
+  **E** `Literal` 改裸 `str` → **4** red（`test_status_accepts_only_candidate_literal`
+  的 4 个参数全红）。
 - 真语料：`suites/` **20/20** round-trip 恒等、新字段全 `None`；全量 lint **0 个
   `schema_invalid`**。（其余既有 issue 由环境/生成仓库决定，**不冻结**：用
   `EnvSecretProvider` 实测 **46** 条，全是 `unknown_secret` / `unknown_target`——
   与本次扩展无关。）
 - `-W error::pytest.PytestCollectionWarning` 下零警告。
 
-### 教训（待并入 MEMORY）
+### 教训（已并入 MEMORY §5，2026-10-09）
 
 - **设计示例本身可能过不了 strict parser**：抄示例当夹具前先跑一次——`name` 缺失、
   `schema_version` 笔误（`0.1` vs 现行 `0.2`）是同一类。
 - **「逐字节不变」这类强口径在加字段后必然失真**：要么改口径（语义/round-trip），
   要么别用这个词。
+- **报测试例数要报 `--collect-only` 的数，不是 `def test_` 的数**：本次把 13 报成 12，
+  就是把 4 个 `parametrize` 参数当成 1 个。凡「例数」二字，一律以收集结果为准
+  （探针计数同理：跑 `pytest` 看 `N failed`，别按测试函数个数心算）。
+
+---
+
+## Task 3.1 评审修订记录（2026-10-09，round 1）
+
+**评审报告**：`review/review_p3_task31_2026-10-09.md` —— 结论 **有条件通过，0×P2 + 3×P3**，
+实现本体零缺陷；三条 P3 全是文档/数字口径。评审子代理 6 次 A/B 探针全部真改文件并还原
+（`git diff --stat` 核对为空），另复跑全量 **1625 passed**、语料 20/20、lint 0 个
+`schema_invalid`、46 条既有 issue，均与自述吻合。
+
+### 修订 1（P3-1）：分文件例数 12/4 → **13/3**
+
+- **位置**：本文件「交付」段（原 1561-1562 行）+ 提交 `72106e1` 正文。
+- **实测**：`--collect-only` → `test_testcase_candidate_fields.py` **13**、
+  `test_lint_candidate_compat.py` **3**（`def test_` 8 / 3，含 `parametrize` 展开 4 + 3）。
+  **总数 16 对，分文件数两个都不对**——我写的时候按 `def test_` 计数，忘了展开
+  `parametrize`。
+- **修法**：本文件改为 13/3 并注明展开口径。提交信息属历史记录不可改，以本记录为准。
+
+### 修订 2（P3-2）：探针 E 计数 3 → **4**
+
+- **位置**：本文件「实测」段探针 E + 提交 `72106e1` 正文。
+- **实测**：把 `testcase/schema.py:220` 的 `status: Literal["CANDIDATE"] | None`
+  改成 `status: str | None` → **4 failed**（`test_status_accepts_only_candidate_literal`
+  的 4 个参数全红）。自述 3 是**漏数一个参数**。
+- **性质**：方向是**自述弱于实测**（真实守卫更强，非空转），不改变结论；仍属
+  「口径与实测不符」，一并更正。
+
+### 修订 3（P3-3）：回填设计 §6.2 的勘误（plan 要求、原提交漏做）
+
+- **位置**：`docs/mobile-test-agent-phase3-design.md` §6.2 示例。
+- **问题**：plan Task 3.1 勘误明写「**勘误回填设计文档**」，但原提交只登记了
+  「示例漏 `name`」，`schema_version: "0.1"` **未回填、也未登记为待办** —— 属
+  「声称要做而没做」。设计 §6.2 是 Task 3.3/3.4 抄示例的直接来源，谁抄谁踩。
+- **修法**：示例 `"0.1"` → `"0.2"`，并补上 P1 必填字段 `name:`（与偏离登记 1 同一处）；
+  两处均加行内注说明系 Task 3.1 勘误回填。
+- **验证**：探针把文档里的 6.2 YAML 块抠出来直接喂 `parse_testcase_dict`
+  （仅把伪记法 `steps: [...]` 换成 `[{"action": "launch_app"}]`）→ **PARSED OK**，
+  `status="CANDIDATE"`、`generation_evidence` 三键齐。
+- **连带**：`docs/phase3-plan.md:289` 的 `testcase/schema.py:15` 因本次 drive-by 扩行
+  已漂到 `:19`，一并更正；勘误句改为「已回填」。
+
+### 修订 4（小观察，顺手清）
+
+- `tests/unit/test_testcase_candidate_fields.py` 夹具注释补一句：设计文档已回填 `name`，
+  夹具保持不变（它同时钉住「缺 `name` 的裸示例过不了 strict parser」）。
+- `tests/unit/test_lint_candidate_compat.py` 头部 docstring：「由环境变量…决定」收窄为
+  「由 `SecretProvider` 实现与 `repository/generated/` 内容决定」（该文件用自造
+  `_KnownSecrets`，不读环境变量）。
+
+### 未修订项（登记为后续动作）
+
+- **小观察 1**（`GenerationEvidence` 元素级空串 `[""]` / `["   "]` 放行）：当前无消费者、
+  失败形态不是「结果偏低」，**不升级**。Task 3.4 若生成器可能写空串元素，届时补元素非空闸门。
+- **小观察 2**（语料 lint 测试只钉 `schema_invalid`，窄于 plan 判据 ④）：理由正当
+  （其余 issue 码取决于被 `.gitignore` 的 `repository/generated/local`），且探针 F 证明
+  该测试有牙（`status` 改必填 → 真红），**不判缺陷**。
+
+### 修订后实测
+
+- 全量 pytest **1625 passed**（与修订前一致；本轮只动文档 + 测试注释/docstring，
+  未动实现，未增删测试）。
+- 设计 §6.2 示例探针 **PARSED OK**（见修订 3）。
+- 工作区：`testcase/schema.py` 本轮**未改**；无残留探针脚本。

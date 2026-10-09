@@ -6,9 +6,10 @@
   - 正式 suites/ 全量 lint 不因 schema 扩展产生 `schema_invalid`。
 
 ⚠️ 不冻结「正式语料的总 issue 数」：其余 issue 码（`unknown_secret` /
-`unknown_target`）由环境变量与 `repository/generated/` 内容决定，与本任务无关。
-本任务只钉「扩展没让语料变得不可解析」这一条。实测口径记在
-`docs/p3_data_audit.md` 的 Task 3.1 记录里。
+`unknown_target`）由 `SecretProvider` 实现与 `repository/generated/` 内容决定
+（本文件用自造 `_KnownSecrets`；`docs/p3_data_audit.md` 记的 46 条用
+`EnvSecretProvider` 实测），与本任务无关。本任务只钉「扩展没让语料变得不可解析」
+这一条。实测口径记在 `docs/p3_data_audit.md` 的 Task 3.1 记录里。
 """
 from __future__ import annotations
 

@@ -286,7 +286,7 @@ M1 基础与安全边界(2d) ─► M2 Planning(2d) ─► M3 Generation(3.5d) �
 
 ### Task 3.1: P3-09 — TestCase Schema 扩展（F5）
 
-> **⚠️ 勘误（对照设计 6.2）**：设计示例 `schema_version: "0.1"` 与 P1 现行 `"0.2"`（`testcase/schema.py:15`）不符——**以 0.2 为准**，勘误回填设计文档。扩展方式是 **Modify 既有模型**，不是 `generator/models.py` 平行继承（extra=forbid 下平行模型拒绝新键，且违反 F5"同一 Schema"）。
+> **⚠️ 勘误（对照设计 6.2）**：设计示例 `schema_version: "0.1"` 与 P1 现行 `"0.2"`（`testcase/schema.py:19`）不符——**以 0.2 为准**，勘误已回填设计文档（Task 3.1 一并补上示例漏写的必填字段 `name`）。扩展方式是 **Modify 既有模型**，不是 `generator/models.py` 平行继承（extra=forbid 下平行模型拒绝新键，且违反 F5"同一 Schema"）。
 
 **Objective:** Candidate Test = P1 TestCase + 溯源字段。
 

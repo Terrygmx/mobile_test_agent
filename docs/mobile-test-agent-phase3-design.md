@@ -208,8 +208,9 @@ Candidate Test（status: CANDIDATE，复用 P1 TestCase 格式）
 ### 6.2 Candidate Test（澄清 review 第 68 节的歧义）
 
 ```yaml
-schema_version: "0.1"          # 与 P1 TestCase 同一 Schema
+schema_version: "0.2"          # 与 P1 TestCase 同一 Schema（原写 "0.1" 系笔误，Task 3.1 勘误回填）
 id: search_candidate_empty_result
+name: 搜索空结果                 # P1 必填字段（原示例漏写，Task 3.1 勘误回填）
 status: CANDIDATE               # 唯一新增字段之一
 generated_by: generator_agent
 generation_evidence:
