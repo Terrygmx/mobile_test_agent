@@ -1777,3 +1777,83 @@ plan 的 Steps 写「逐字节不变」，但**加字段后 `model_dump()` 必�
 - 出现「源码与运行结果不一致、而 git 干净」时，**先怀疑陈旧 `.pyc`**，再怀疑回归。
 - 同理：**探针改常量时优先改一个长度不同的值**（`"0.3"` 与 `"0.2"` 等长，size
   不变会让 mtime 成为唯一判据，而它是秒精度）。
+
+---
+
+## Task 3.2 完成记录（P3-10 Coverage Gap 计算，2026-10-09）
+
+**M3 第二个任务**。设计 6.3：`coverage_gap(graph, existing_tests)` —— 找出
+「图里有、现有用例从未覆盖」的转移，作为 Task 3.4 生成候选的输入。
+
+### 交付
+
+- `generator/__init__.py`、`generator/coverage.py`：
+  `coverage_gap(graph, existing_tests) -> list[UncoveredTransition]`（纯函数）、
+  `covered_transitions(existing_tests)`（覆盖集，与前者共用一份推导）、
+  `UncoveredTransition`（frozen dataclass，带 `__post_init__` 入参闸门）、
+  三个分类常量（`CATEGORY_HAPPY_PATH` / `CATEGORY_BRANCHING` /
+  `CATEGORY_ERROR_RECOVERY`）。
+- `tests/unit/test_coverage_gap.py`（**20** 例）。
+
+### 决策记录
+
+1. **全集取 Runtime Graph，不是 Source Graph**（对设计 6.3 字面的一处偏离）。
+   设计原文签 `graph: ScreenGraph`、docstring 写「**Source Graph** 中存在…的
+   Transition」。实测 `build_source_graph` 的转移**恒为 0**（metadata 无导航
+   声明，`graph/builder.py` 模块 docstring 已逐关键词扫过注明）→ 拿它当全集，
+   本函数**恒返回空列表**，正是本仓「形式合法、语义等于没有」那一类。
+   且「**触发**」本就是运行时概念。**已与用户确认。**
+2. **「已覆盖」= 用例静态推导，不读 trace**。runtime 图的每条转移都来自
+   **已执行过的 trace**，以它为全集又拿它当覆盖集 = 自己减自己 → 恒空、判据无
+   鉴别力。故从用例文本推：`wait_for screen:X` / `postcondition screen:X` 是
+   「到过 X」的声明，相邻到达点 + 触发动作 = 一条转移。**已与用户确认。**
+3. **本函数拒绝 `source_of='source'` 的图**（`ValueError`）：静默接受一张恒空
+   的图，等于把「源图没有导航声明」伪装成「没有 gap」。
+4. **trigger 形状复用 `graph/builder.py::_trigger_of`**（造真 `TraceStep` 喂它），
+   不另写 `f"{action}:{target}"` —— plan §2 第 1 条「同一套逻辑」要求，测试里有
+   显式断言。
+5. **分类标签是附注字段，不是分类器**（plan Steps 明文「初版启发」）：只按触发
+   动作形状打三类标，不建立七类分类体系。
+
+### ⚠️ 偏离登记 1：设计签名的 `ScreenGraph` 类型不存在
+
+设计 6.3 写 `graph: ScreenGraph`，但仓内**没有** `ScreenGraph` 类型——`build_source_graph`
+返回的也是 `RuntimeGraph`（`source_of='source'`）。按 plan Task 3.2 的
+`graph: RuntimeGraph` 落地（plan 与设计在此处不一致，以可实现的为准）。
+
+### ⚠️ 偏离登记 2：classification 只覆盖七类中的三类
+
+设计 6.3 列七类（Happy Path / Boundary / Negative / Exception / State
+Transition / Concurrency-Timing / Recovery），本次只实现可由**转移形状**判别的
+三类。**其余四类需要用例语义**（是否边界值、是否异常路径），不是转移本身能回答
+的——Task 3.4 若需要，是扩展 `_classify` 的立项，不是本次遗漏。
+
+### ⚠️ 偏离登记 3：真语料实测「零 gap」是本任务的正常结果，不是空转
+
+全量 20 个用例 → gap = **0**（8 条转移全被覆盖）。这不是判据失灵：
+去掉 `login_again_001` 一个用例 → 如实多出 1 条 gap
+（`LoginView→HomeView@tap:LoginView.login_button`，`observed_count=10`）。
+**鉴别力由「去掉一个用例」证明，不是靠全量结果非空。**
+
+### 实测
+
+- 全量 pytest **1645 passed**（1625 + 20；清 `__pycache__` 后复跑同值）。
+- 真语料 + 真 trace（`out/p1_m2_gate/trace.db`，8 条转移）：
+  覆盖集 **8/8** 与 runtime 图吻合、**零误报**（覆盖集里没有图上不存在的条目）；
+  全量用例 gap=**0**；去掉 `login_again_001` → gap=**1**（见偏离登记 3）。
+- **7 条 A/B 探针全部真红**（每次改完还原、`git diff --stat` 核对为空）：
+  A 全集不减覆盖集 → **4** / B 去自环折叠 → **1** / C 去 source 图闸门 → **1** /
+  D trigger 恒空 → **5** / E 分类恒 HAPPY_PATH → **1** / F 去排序 → **1** /
+  G `observed_count` 恒 0 → **1**。
+- `test_repo_hygiene.py` + `test_knowledge_retrieval.py` → **23 passed**；
+  `-W error::pytest.PytestCollectionWarning` 下零警告。
+
+### 教训（已并入 MEMORY §5）
+
+- **判据要钉在「产生问题的那一侧」，不是钉在结果上看巧合**：本次「自环折叠」
+  的断言原先只在「图里有自环」时才观察得到差异，而 runtime 图按构造**永远没有
+  自环** → A/B 探针去掉折叠后**仍 19 passed**（空转）。改成直接断言
+  `covered_transitions` 的输出不含 `X→X` 后才真红（1 failed）。**守卫空转的
+  第六种形态：断言依赖一个被测对象按构造不会产生的输入。**
+- **「零 gap / 零差异」类结果要先自问鉴别力**：判据的鉴别力由「拿掉一个输入
+  后结果是否变化」证明，不能靠「结果非空」——真语料「全都覆盖了」恰恰是健康态。
