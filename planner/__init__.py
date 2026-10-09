@@ -6,7 +6,8 @@
 `planner/models.py` 的「分层」段），而 `planner.planner` 反过来要 import
 `agents.storage` —— 一旦本文件把 `planner.planner` 拉进包初始化，就会形成
 「`agents.storage` → `planner/__init__` → `planner.planner` → `agents.storage`（半初始化）」
-的**包级循环**。保持本文件只碰「叶子」模块（它们不 import 任何 agents/planner 内部模块）。
+的**包级循环**。保持本文件只碰「叶子」模块——**它们都不 import `agents` 侧任何
+模块**（`risk` 内部引用同包的 `prioritizer`，同包内不成环）。
 """
 from planner.models import (
     PLAN_SCHEMA_VERSION,

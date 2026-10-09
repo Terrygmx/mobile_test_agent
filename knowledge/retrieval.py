@@ -7,12 +7,27 @@
 
 ## 为什么值得有一个（而不是让调用方直接 `P2KnowledgeSources(...)`）
 
-1. **单一入口**：P3 的 planner / explorer / diagnosis 都 `from knowledge import
-   build_knowledge`，不各自伸进 `experience.knowledge`——F3 的「不新建平行的检索
-   接口」需要一个**看得见的**入口，否则「复用同一个 Protocol」只是口头约定。
+1. **单一入口**（⚠️ **目标态，不是既成事实**——见下）：P3 的 planner / explorer /
+   diagnosis **都要** `from knowledge import build_knowledge`，不各自伸进
+   `experience.knowledge`——F3 的「不新建平行的检索接口」需要一个**看得见的**入口，
+   否则「复用同一个 Protocol」只是口头约定。
 2. **`app_build` 的作用域语义在这里显式化**：它是 `graph_query` / `trace_history`
    的 trace 范围（两个 build 不许混进一张图/一段历史）——装配处是唯一能一眼看到
    「这次规划针对哪个 build」的地方。
+
+### ⚠️ 「单一入口」目前**零生产调用者**（review_p3_task22 P3-3）
+
+`build_knowledge` 的**生产**调用点至今只有本包自己（`__init__` 的 re-export + 本模块
+的定义）；唯一的调用方是 `tests/unit/test_knowledge_retrieval.py`。**第一个真实调用
+点是 Task 2.3 的 `planner/planner.py`**——在那之前，上面第 1 条是**约定**而不是事实
+（docstring 不得描述「完成态」，见 `review_p3_task11` 的教训）。
+
+两条机械保证，各自只钉住一半：
+
+| 守卫 | 钉住 | 钉不住 |
+|---|---|---|
+| `test_build_knowledge_adds_no_retrieval_method` | 工厂返回的实例**公开面 == Protocol 四方法**（防「新增平行检索方法」） | 有人在 P3 侧直接 `P2KnowledgeSources(...)` 绕过本入口 |
+| `test_p2_knowledge_sources_is_constructed_in_one_place` | `P2KnowledgeSources` 的**构造点**全仓只许一处（`phase0/` 与 `tests/` 显式排除） | — |
 
 ## ⚠️ 对 plan Files 的一处偏离：**没有 `graph store` 参数**
 
@@ -26,15 +41,17 @@ plan 写的是「组合 experience_store/trace_db/**graph store**/cases/app_buil
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Iterable
 
 from experience.knowledge import KnowledgeSources, P2KnowledgeSources
+from testcase.schema import TestCase
 
 __all__ = ["build_knowledge"]
 
 
 def build_knowledge(*, experience_store, trace_db: str | Path,
-                    cases: Any = (), app_build: str | None = None
+                    cases: Iterable[TestCase] = (),
+                    app_build: str | None = None
                     ) -> KnowledgeSources:
     """把既有数据源组合成 `KnowledgeSources`（**无副作用、不读库**）。
 
@@ -44,6 +61,10 @@ def build_knowledge(*, experience_store, trace_db: str | Path,
     | `trace_db` | `graph_query` / `trace_history` 的 trace 库路径 |
     | `cases` | 已解析的用例对象（`impact_of` 的反向索引数据源） |
     | `app_build` | trace 范围（两个 build 不许混进一张图/一段历史） |
+
+    `cases` 标注成 `Iterable[TestCase]`（`pipeline.discover()` 的返回元素类型；
+    review_p3_task22 小观察 3：原先是 `Any`）——传错形态在**类型检查层**就能发现，
+    而不是等到 `impact_of` 时才发现「装配早就装完了」。
 
     **构造期不碰磁盘**：`P2KnowledgeSources` 把 `trace_db` 存起来、查询时才读
     （`_read_steps` 还会把裸 sqlite 异常转成可诊断的 `ValueError`）。所以「库还没

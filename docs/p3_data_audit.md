@@ -1078,3 +1078,99 @@ plan 的 Files 只列了 `experience/knowledge.py`，但白名单里的三个键
 - P2 回归（`-k "graph or knowledge or impact"`）：**126 passed**（`TraceStep` 的追加
   字段不影响既有消费方）。
 - `-W error::pytest.PytestCollectionWarning` 下两个新文件 **37 passed**（零警告）。
+
+---
+
+## Task 2.2 评审修订记录（review_p3_task22 收口，2026-10-09）
+
+评审「有条件通过 — **0×P2** + 3×P3」，上一轮 `4d572f3` 的 3×P3 **3/3 全清** + 两条小观察
+也落地；**8 条钉子经 A/B 真改文件验证无一空转**。三条 P3 全出在**同一个形状**：**「静默
+降级」**——而它们自己写的两条理由（`case_risk` 的「错误落在看不见那一侧」、`screen_id` 的
+「同一个道理不能对自己网开一面」）恰好就是判据。
+
+### P3-1 `priority_score` 的入参闸门只做了一半（`risk` 无闸门 / `history` 被 `Risk` 绕过）
+
+- 症状（探针实测）：`risk="CRITICAL"` / `"critical"` / `None` / `4` → **全部不报错**，走
+  `RISK_FLOOR.get()` 返回 `None` 的那一支 → **CRITICAL 的 floor 静默失效**；
+  `history=Risk.LOW` → 被当成失败率 1.0（**白拿 30 分**）——因为
+  `class Risk(int, enum.Enum)` 使 `isinstance(Risk.LOW, (int, float))` 为 **真**。
+- 为什么现在修（而不是等 Task 2.3）：**Task 2.3 的编排层是第一个会把「外部来的值」喂进
+  打分的地方**（LLM 输出 / policy.yaml / CLI 参数——全仓的 `strict=True` 教训说明「外部值
+  错型」在本项目里真实发生过），而失败的形态是**分数偏低 → CRITICAL 用例在 Plan 里沉底**，
+  错误方向恰好是「看不见」那一侧。等到 Plan 里出现一个「CRITICAL 排在末尾」的结果，错的
+  已经是**已落库的 Plan**。
+- 修法（各一行）：`isinstance(risk, Risk)` 闸门（消息写明「`RISK_FLOOR.get()` 对非 Risk
+  返回 None → floor 静默失效」）；`history` 判定补 `isinstance(history, Risk)` 排除。
+- **探针复现**：① 删掉 `risk` 闸门 → **5 例**（`CRITICAL`/`critical`/`HIGH`/`4`/`None`）
+  全红；② `history` 判定去掉 `Risk` 排除 → `test_risk_is_not_accepted_as_history` 红。
+- 顺带补 `test_valid_risk_still_works_after_the_gate`：**闸门不能误伤**——四个 `Risk`
+  成员逐一断言「有 floor 的抬到 floor、没有的不抬」。
+
+### P3-2 `case_risk` 的 `getattr(tc_meta, "element_ids", ())` 让「传错对象」静默变 `LOW`
+
+- 症状：探针的替身 repo 一被调用就抛 `AssertionError`，实测**未被调用**——传一个没有
+  `element_ids` 的对象（或把字段名拼成 `element_id`）时函数**静默返回 `Risk.LOW`**。
+- 与 P3-1 同形，且**与本函数自己的 docstring 冲突**：它明写「解析不到的元素**照原样上抛**，
+  不跳过、不当 LOW」，却对**自己的入参**留了一个静默兜底。`getattr` 的默认值把「用例根本
+  没有/拼错了元素字段」与「用例确实不涉及任何元素」压成同一个 `Risk.LOW`——而后者是
+  **有意为之**的兜底（有专测）。两种语义混在一个 LOW 里。
+- 修法：`for element_id in tc_meta.element_ids:`（`TestCaseMeta` 必有该字段）+ 补类型标注
+  `tc_meta: TestCaseMeta`。传错就 `AttributeError`，不静默降级。
+- **探针复现**：恢复 `getattr` 兜底 → `test_case_risk_refuses_a_wrong_meta_object` 红。
+
+### P3-3 `build_knowledge` 的「单一入口」是**现在时声称**，且 F3 的守卫只钉住一半
+
+- 症状：docstring 写「P3 的 planner / explorer / diagnosis **都** `from knowledge import
+  build_knowledge`」，而全仓 `build_knowledge` 的**生产**命中只有 `knowledge/` 包自己两处
+  （`__init__` 的 re-export + 定义）；唯一调用方是单元测试。同时
+  `test_build_knowledge_adds_no_retrieval_method` 钉的是「实例**公开面** == 四方法」——
+  **挡不住**「有人在 P3 侧直接 `P2KnowledgeSources(...)` 绕过入口」。
+- 修法（**两条都做**，而不是二选一）：
+  1. docstring 改**将来时 + 落点**：明写「零生产调用者」、第一个真实调用点是 Task 2.3 的
+     `planner/planner.py`，并用一张表列出两条守卫**各自钉住哪一半、钉不住哪一半**；
+  2. 补守卫 `test_p2_knowledge_sources_is_constructed_in_one_place`：用 **AST** 扫全仓的
+     **真实构造调用**（`ast.Call`，不扫 docstring/注释里的名字——本模块 docstring 自己就
+     写了「而不是让调用方直接 `P2KnowledgeSources(...)`」，文本扫描会把它当成一次构造），
+     要求命中集 == `["knowledge/retrieval.py"]`；`phase0/`（P2 的 gate 脚本）与 `tests/`
+     （集成测试直接测那个类）显式排除；带**防空转下界**（`scanned >= 80`，实测 94）。
+- **探针复现**：在 `planner/risk.py` 里插一个直接构造 `P2KnowledgeSources(...)` 的函数 →
+  守卫**真红**（修复前无此守卫）。
+- 顺带：`test_knowledge_retrieval.py` 里 `P2KnowledgeSources` 是**未使用**的导入，删掉。
+
+### 小观察五条 —— 全部处理
+
+| # | 观察 | 处置 |
+|---|---|---|
+| 1 | `round()` 是**银行家舍入**（`30×0.15=4.5→4` 而 `30×0.05=1.5→2`，方向随尾数奇偶翻转） | ✅ 改 `math.floor(score + 0.5)`（半分一律进位），补 5 例参数化测试钉住（`0.05→2 / 0.15→5 / 0.25→8 / 0.35→11 / 0.45→14`）。**探针**：退回 `round()` → 2 例红 |
+| 2 | 提交信息里「P2 回归 126 passed」是**父提交**上的数 | ✅ 本轮更正为可照抄复现的口径：**146 passed = 126 既有 + 20 新增**（16 来自 `test_knowledge_retrieval.py` 全部 + 4 来自 `test_prioritizer.py` 名字含 `impact` 的）；审计与提交信息都用这个口径 |
+| 3 | `build_knowledge(cases: Any = ())` 无精确标注 | ✅ 改 `Iterable[TestCase]`（`pipeline.discover()` 的返回元素类型），并在 docstring 说明「传错形态在**类型检查层**就能发现，而不是等 `impact_of` 时才发现装配早就装完了」 |
+| 4 | `RISK_FLOOR` 是模块级**可变** `dict` 且被 re-export（`planner.RISK_FLOOR[Risk.HIGH] = 0` 会全局生效） | ✅ 改 `MappingProxyType`（标注 `Mapping[Risk, int]`），注释写明「校准入口只该是这一处常量定义」；补 `test_risk_floor_is_read_only`（读透明 + 写 `TypeError`）。**探针**：退回裸 dict → 该测试红 |
+| 5 | `priority_score` 每次调用都 `frozenset(impact)` → O(用例数 × \|impact\|) | ✅ 已经是 `set`/`frozenset` 时**不重建**（`in` 语义完全相同），注释说明调用方按用例循环传同一个集合；补 `test_impact_accepts_any_iterable` 钉住「非 set 形态（list / 生成器）照常工作」 |
+
+### §五 存疑项之一也顺手修了
+
+`test_case_meta_is_frozen` 用 `pytest.raises(Exception)`（上一轮同类问题已修过一处，此处
+漏了）→ 收窄到 `dataclasses.FrozenInstanceError`（它是 `AttributeError` 的子类，
+`raises(Exception)` 会把「任何异常」都算通过，与「冻结生效」不等义）。
+
+### 给 Task 2.3 的接线前置（已写进 plan）
+
+`planner/planner.py` 必须**经 `knowledge.build_knowledge` 取 `KnowledgeSources`**，
+不许直接构造 `P2KnowledgeSources`（守卫 `test_p2_knowledge_sources_is_constructed_in_one_place`
+钉住）；`priority_score` 的 `risk` 只收 `Risk`（错型 fail-loud），`impact` 传
+`set`/`frozenset` 可免重复拷贝。
+
+### 实测
+
+- 全量 pytest **1508 passed**（本轮 +16：`test_prioritizer.py` 22→**37**、
+  `test_knowledge_retrieval.py` 15→**16**；1492 + 16 = 1508）。
+- P2 回归 `-k "graph or knowledge or impact"`：**146 passed = 126 既有 + 20 新增**
+  （按文件拆分：graph_diff 40 / graph_builder 28 / graph_source 24 / graph_impact 18 /
+  knowledge_sources(集成) 11 / policy_config 3 / experience_schema 1 / agent_tools 1 = 126 既有；
+  knowledge_retrieval 16 + prioritizer 4 = 20 新增）。
+- **六条 A/B 探针全部真红**（每次先读原文、改后立即还原并断言字节相等）：
+  删 `risk` 闸门 → 5 red；`history` 不排除 `Risk` → 1 red；恢复 `getattr` 兜底 → 1 red；
+  `planner/` 里直接构造 `P2KnowledgeSources` → 1 red；`RISK_FLOOR` 退回裸 dict → 1 red；
+  舍入退回 `round()` → 2 red。
+- `-W error::pytest.PytestCollectionWarning` 下两文件 **53 passed**（零收集警告）。
+- 全仓重复顶层定义体检：**零命中**。

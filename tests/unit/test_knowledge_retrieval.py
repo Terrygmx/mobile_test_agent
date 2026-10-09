@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from knowledge import build_knowledge
-from experience.knowledge import KnowledgeSources, P2KnowledgeSources
+from experience.knowledge import KnowledgeSources
 from tracer.storage import TraceStore
 
 APP = "com.phaset0.logindemo"
@@ -84,6 +84,45 @@ def test_build_knowledge_adds_no_retrieval_method(trace_db, tmp_path):
     public = {n for n in dir(ks) if not n.startswith("_")}
     assert public == {"experience_lookup", "graph_query", "impact_of",
                       "trace_history"}, f"多出/少了方法：{public}"
+
+
+def test_p2_knowledge_sources_is_constructed_in_one_place():
+    """`P2KnowledgeSources` 的**构造点**全仓只许一处：`knowledge/retrieval.py`。
+
+    F3 的「单一入口」有两半，上一条守卫只钉住一半（公开面 == 四方法）——它**挡不住**
+    「P3 侧直接 `P2KnowledgeSources(...)` 绕过 `build_knowledge`」
+    （review_p3_task22 P3-3：`build_knowledge` 的生产调用点当时是**零**，那条声称
+    还没有落点，所以补这条机械保证）。
+
+    用 AST 扫**真实构造调用**（`ast.Call`），不扫 docstring/注释里的名字——本模块的
+    docstring 就写了「而不是让调用方直接 `P2KnowledgeSources(...)`」，文本扫描会
+    把它当成一次构造。`phase0/`（P2 的 gate 脚本 `verify_p2_final.py`）与 `tests/`
+    （集成测试直接测那个类）显式排除。
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    excluded = {".venv", ".git", "out", "__pycache__", "tests", "phase0"}
+    hits: list[str] = []
+    scanned = 0
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root)
+        if excluded & set(rel.parts):
+            continue
+        scanned += 1
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = (func.id if isinstance(func, ast.Name)
+                    else getattr(func, "attr", None))
+            if name == "P2KnowledgeSources":
+                hits.append(str(rel))
+    assert scanned >= 80, f"只扫到 {scanned} 个文件，扫描范围疑似写错"
+    assert hits == ["knowledge/retrieval.py"], (
+        f"`P2KnowledgeSources` 的构造点必须只有 knowledge/retrieval.py"
+        f"（F3 的单一入口）——实得 {hits}")
 
 
 def test_build_knowledge_does_not_touch_disk_at_construction(tmp_path):

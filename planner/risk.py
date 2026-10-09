@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from executor.policy import effective_risk
+from planner.prioritizer import TestCaseMeta
 from testcase.schema import Risk
 
 __all__ = ["case_risk", "effective_risk"]
@@ -25,7 +26,7 @@ __all__ = ["case_risk", "effective_risk"]
 _DEFAULT = Risk.LOW
 
 
-def case_risk(tc_meta, repository, *, build: str) -> Risk:
+def case_risk(tc_meta: TestCaseMeta, repository, *, build: str) -> Risk:
     """用例所涉元素的 `effective_risk` 取 **max**（无元素 → `LOW`）。
 
     `tc_meta.element_ids` 用 `Repository.resolve` 的语法（裸名或 `Screen.elem`）。
@@ -37,9 +38,16 @@ def case_risk(tc_meta, repository, *, build: str) -> Risk:
     不当 LOW**：一个 CRITICAL 元素因漂移而解析失败时，静默按 LOW 计会让它在 Plan
     里沉底——**错误的方向恰好是「看不见」那一侧**。要容错的话由调用方显式处理
     （漂移判定是 Task 2.3 的 `planner/impact.py` 的职责，不是本函数顺手兜的）。
+
+    ⚠️ **入参也照同一条纪律办**：`tc_meta` 直接取 `tc_meta.element_ids`，**不用
+    `getattr(..., ())` 兜底**——那个默认值会把「传错对象 / 字段名拼错」与「用例确实
+    不涉及元素」压成同一个 `Risk.LOW`，而后者是**有意为之**的（上面那条兜底）。
+    两种语义混在一个 LOW 里，正是「同一个道理不能对自己网开一面」
+    （review_p3_task22 P3-2：探针实测传错对象时 `resolve` 根本没被调用、静默返回
+    LOW）。传错就 `AttributeError`，不静默降级。
     """
     risks = []
-    for element_id in getattr(tc_meta, "element_ids", ()):
+    for element_id in tc_meta.element_ids:
         eff = repository.resolve(element_id, build=build)
         risks.append(effective_risk(element=getattr(eff, "risk", None),
                                     element_id=eff.id))

@@ -45,8 +45,10 @@ Task 2.3 的编排。
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from typing import Iterable
+from types import MappingProxyType
+from typing import Iterable, Mapping
 
 from testcase.schema import Risk
 
@@ -58,7 +60,13 @@ __all__ = [
 # --- 初版权重（plan Task 2.2 给的数字；**待真实数据校准**，不假装精确） ---------
 IMPACT_WEIGHT = 40      # 用例落在「受影响」集合里
 HISTORY_WEIGHT = 30     # × 历史失败率 ∈ [0, 1]
-RISK_FLOOR: dict[Risk, int] = {Risk.CRITICAL: 90, Risk.HIGH: 70}
+
+# ⚠️ **只读**（`MappingProxyType`）：本表被 `planner/__init__.py` re-export，是可从
+# 任何调用方到达的模块级对象——裸 `dict` 意味着 `planner.RISK_FLOOR[Risk.HIGH] = 0`
+# 会**全局生效**，而校准入口应当只有这一处常量定义（review_p3_task22 小观察 4）。
+# `MappingProxyType` 对读取透明（`.get` / `.items` / `[]` 都不变），只堵住写入。
+RISK_FLOOR: Mapping[Risk, int] = MappingProxyType(
+    {Risk.CRITICAL: 90, Risk.HIGH: 70})
 
 # 设计 §5.1：`priority: int  # 0-100`（`planner/models.py` 的 PRIORITY_MIN/MAX 是同一值）
 _PRIORITY_MIN, _PRIORITY_MAX = 0, 100
@@ -94,24 +102,51 @@ def priority_score(tc_meta: TestCaseMeta, impact: Iterable[str],
     | `history` | `trace_history` 统计出的历史失败率 | `float`，**必须 ∈ [0,1]** |
     | `risk` | 用例所涉元素的 `effective_risk`（`planner.risk.case_risk`） | `Risk` |
 
-    `history` 越界 → `ValueError`（**不静默夹取**）：失败率 > 1 是**统计口径的 bug**
-    （分子分母弄反了之类），夹到 1 会让「算错了」表现为「历史一直很差」——与
-    `planner/models.py` 对 `priority ∈ [0,100]` 的处理同一条理由。
+    **两个入参都有闸门，且失败一律 `ValueError`（不静默降级）**——它们将来由
+    Task 2.3 的编排层从「外部」（LLM 输出 / policy.yaml / CLI 参数）取来，而**错型
+    的失败形态恰好是「分数偏低 → CRITICAL 用例在 Plan 里沉底」**，错误落在
+    「看不见」那一侧（与 `planner/risk.py` / `screen_id` 两处写下的同一条理由）：
 
-    返回值恒在 `[0, 100]`（设计 §5.1 的 `priority` 值域）。
+    - `risk` 不是 `Risk` → 拒。`RISK_FLOOR.get(非 Risk)` 返回 `None`，会走
+      `if floor is not None` 的另一支 → **CRITICAL 的 floor 静默失效**；
+    - `history` 越界 → 拒（**不静默夹取**）：失败率 > 1 是**统计口径的 bug**
+      （分子分母弄反了之类），夹到 1 会让「算错了」表现为「历史一直很差」——
+      与 `planner/models.py` 对 `priority ∈ [0,100]` 的处理同一条理由。
+
+    ⚠️ **`history` 的闸门必须显式排除 `Risk`**：`Risk` 是 `class Risk(int, Enum)`
+    （`testcase/schema.py`），`isinstance(Risk.LOW, (int, float))` 为 **True**——
+    只判数值类型会让**风险枚举被当成失败率**（`Risk.LOW` → 1.0 → 白拿 30 分）。
+
+    返回值恒在 `[0, 100]`（设计 §5.1 的 `priority` 值域），且**半分一律进位**
+    （`math.floor(score + 0.5)`，不是 `round()` 的银行家舍入）——见下。
     """
-    if not isinstance(history, (int, float)) or isinstance(history, bool):
+    if not isinstance(risk, Risk):
+        raise ValueError(
+            f"risk 必须是 Risk，got {risk!r}——`RISK_FLOOR.get()` 对非 Risk 返回 "
+            f"None，会让 CRITICAL 的 floor **静默失效**（分数偏低、用例沉底）")
+    if (isinstance(history, Risk) or isinstance(history, bool)
+            or not isinstance(history, (int, float))):
+        # `bool` 与 `Risk` 都要显式排除：前者是 `int` 的子类、后者是 `int` 枚举，
+        # 都会被裸 `isinstance(x, (int, float))` 放行（见 docstring 的 ⚠️）。
         raise ValueError(f"history 必须是 [0,1] 的数值，got {history!r}")
     if not 0.0 <= float(history) <= 1.0:
         raise ValueError(
             f"history 必须在 [0,1]（历史失败率），got {history!r}——"
             f"越界是统计口径的 bug，夹取会让「算错了」表现为「历史一直很差」")
-    hit = tc_meta.testcase_id in frozenset(impact)
+    if not isinstance(impact, (set, frozenset)):
+        # 调用方（Task 2.3 的编排）按用例循环调用、传的是同一个 impact 集合：
+        # 已经是 set/frozenset 时不重建，避免 O(用例数 × |impact|) 的无谓拷贝
+        # （review_p3_task22 小观察 5；`in` 对两者的语义完全相同）。
+        impact = frozenset(impact)
+    hit = tc_meta.testcase_id in impact
     score = IMPACT_WEIGHT * int(hit) + HISTORY_WEIGHT * float(history)
     floor = RISK_FLOOR.get(risk)
     if floor is not None:
         score = max(score, floor)
-    return int(min(_PRIORITY_MAX, max(_PRIORITY_MIN, round(score))))
+    # `round()` 是**银行家舍入**：`30×0.05=1.5→2` 但 `30×0.15=4.5→4`——方向随尾数
+    # 奇偶翻转，「失败率的 k 倍」与「得分的 k 倍」对不上（review_p3_task22 小观察 1）。
+    # 半分一律进位，让这条关系在整数上可预期（有专测钉住）。
+    return int(min(_PRIORITY_MAX, max(_PRIORITY_MIN, math.floor(score + 0.5))))
 
 
 def order_key(score: int, testcase_id: str) -> tuple[int, str]:

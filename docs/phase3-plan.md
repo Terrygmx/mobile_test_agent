@@ -198,6 +198,21 @@ M1 基础与安全边界(2d) ─► M2 Planning(2d) ─► M3 Generation(3.5d) �
 > 但「同一 build 跑了两次想留两份」就不可能。
 > **拍板后回填本节**，并让 `TestPlan.plan_id` 的生成方式只有**一处实现**。
 
+> **⚠️ 接线前置（Task 2.2 留的，review_p3_task22 P3-3 / 小观察 1、5）**——三条，都影响
+> `planner/planner.py` 的写法：
+> 1. **`KnowledgeSources` 只能经 `knowledge.build_knowledge` 取**：不许在编排层直接
+>    `P2KnowledgeSources(...)`（那正是 F3「单一入口」要防的绕过；守卫
+>    `tests/unit/test_knowledge_retrieval.py::test_p2_knowledge_sources_is_constructed_in_one_place`
+>    扫全仓的真实构造调用，命中集只许 `knowledge/retrieval.py`）。本任务也是
+>    `build_knowledge` 的**第一个生产调用者**——在那之前那条「单一入口」只是约定。
+> 2. **`priority_score` 的入参是硬契约**：`risk` 只收 `Risk`（传字符串/裸 int/None →
+>    `ValueError`，因为 `RISK_FLOOR.get(非 Risk)` 返回 `None` 会让 CRITICAL 的 floor
+>    **静默失效**）；`history` 只收 `[0,1]` 的数值（`Risk` 是 `int` 枚举，**不能**当失败率传）。
+>    编排层从 LLM / policy / CLI 拿到的值必须先过类型，别直接喂。
+> 3. **`impact` 传 `set`/`frozenset`**：`priority_score` 对已去重的集合不重建，而编排层是
+>    **按用例循环调用**（N 个用例 × 同一个 impact 集合）——传 list 会变成 O(N×|impact|)。
+>    在循环外 `frozenset(...)` 一次即可。
+
 **Objective:** 设计 5.3 节 Git Diff → Impact → TestPlan；LLM 只解释/打平，不决定顺序。
 
 **Files:**
