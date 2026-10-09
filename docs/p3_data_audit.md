@@ -823,3 +823,87 @@ policy.yaml + production 一票否决 ✅（函数层；CLI 端到端归 Task 2.
   ② 去掉 `-M` → global 与 local **两条都红**。
 - 恒真断言残留检查：`or cs.renamed == ()` 与 `pytest.raises(Exception)` 只出现在
   **docstring/注释的说明文字**里（描述被删掉的东西），无实际断言残留。
+
+---
+
+## Task 2.1 完成记录（P3-05 planner 数据模型 + Plan 持久化，2026-10-09）
+
+**Objective**：设计 §5.1 的模型落地，Plan 存 agent.db 的 `test_plans` 表。**M2 的第一个任务**。
+
+### 交付
+
+- `planner/__init__.py`（新）：只 re-export `models`（**带一条禁令**，见下）。
+- `planner/models.py`（新）：`PLAN_SCHEMA_VERSION` / `PRIORITY_MIN|MAX` / `PlanSource`
+  （`Literal["existing","generated_gap"]`）/ `_Strict` / `PlannerInput` / `TestPlanTask` /
+  `TestPlan`（含 `to_store_dict` / `from_store_dict`）。
+- `tests/unit/test_planner_models.py`（新，**14 例**）。
+- ⚠️ **`agents/storage.py` 未改动**——见下面的偏离登记。
+
+### 校验与不校验（都对着设计/plan 的原文定）
+
+| 项 | 处置 | 出处 |
+|---|---|---|
+| `reasons` 非空 | **拒绝** | plan Task 2.1 Steps：可解释性是 F13 的落地，「不是裸分数」 |
+| `priority ∈ [0,100]` | **拒绝越界** | 设计 §5.1 行内注释「0-100，确定性评分」——越界是算分 bug，fail-loud 比让 300 分排最前好 |
+| `source` 仅两值 | **拒绝第三值** | 设计 §5.1 的 `Literal`（用 `Literal` 而非 Enum：与设计逐字一致，且 `model_dump(mode="json")` 直接给字符串） |
+| `extra="forbid"` | **拒绝未知键** | 与 `agents/models.py` / `experience/models.py` 同款 |
+| **`changed_files` 允许为空** | **不校验** | 设计矩阵 #6：改动为空 → 空 Plan 且**明示**。把「空」当错误会让「这次真没改什么」与「git diff 失败了」混为一谈——后者在 `source/git_diff.py` 已是 fail-loud 的 `GitDiffError` |
+| **`tasks` 允许为空** | **不校验** | 同上（空 Plan 是合法产物） |
+
+### `schema_version` 是 **TestPlan 自己的版本**
+
+`PLAN_SCHEMA_VERSION = "0.1"` 与 TestCase 的 `"0.2"`（`testcase/schema.py::SCHEMA_VERSION`）
+是**两条独立的版本线**——`test_plan_version_is_independent_of_testcase_schema` 把「两个常量
+不同」钉住（有人把 testcase 的常量搬过来当默认值就会红）。
+
+### 关键决策 1：`agents/storage.py` **不改**（对 plan Files 的一处偏离）
+
+plan Task 2.1 的 Files 写「Modify: `agents/storage.py`（`save_plan / get_plan` 落
+`test_plans` 表）」——但那三个方法（`save_plan` / `get_plan` / `list_plans`）**在 Task 1.1
+建库时已随 `001_agent_schema.sql` 一起落地**，本任务核对后**无需改动**（upsert、排序、
+`created_at` 由 DB 拥有，都已就位）。
+
+更实质的一层：**存取转换刻意留在 `planner/models.py`**（`to_store_dict` /
+`from_store_dict`），`agents/storage.py` 收发的仍是**裸 dict**。两条理由：
+
+1. 那张表的 `tasks_json` 是**不透明 JSON blob**（不像 `agent_tasks` 有逐字段列），
+   store 没有理由知道 `TestPlanTask` 的结构；
+2. **避免包级循环**：`planner/__init__.py` 会 re-export `planner.planner`（Task 2.3 起，
+   它反过来 import `agents.storage`）——一旦 `agents.storage` 反向 import
+   `planner.models`，包初始化期就会成环。保持 `agents` 侧对 `planner` 的依赖为**零**
+   是**结构上的保证**，不是「我们小心一点」。
+   `test_agents_storage_does_not_import_planner`（AST 扫 import）钉住它，并**探针验证**：
+   往 `agents/storage.py` 插一行 `from planner.models import TestPlan` → **真红**。
+
+`planner/__init__.py` 的 docstring 也把这条禁令写给了后来者（「**不要**在这里 re-export
+`planner.planner`」）——Task 2.3 落地时最容易踩的就是它。
+
+### 关键决策 2：`TestPlan` **没有 `created_at`**
+
+设计 §5.1 的模型里没有它，它是 `test_plans` **行**的元数据（§11 的表有 `created_at`）
+→ 由 DB 拥有、由 store 的 dict 携带，`from_store_dict` 明确**忽略**它（不塞进模型，
+也不假装模型有）。
+
+### ⚠️ 登记：`schema_version` **当前不落库**（已知缺口）
+
+设计 §11 的 `test_plans` 只有 `plan_id / app_build / git_commit / created_at /
+tasks_json`——**没有版本列**，而 `tasks_json` 按列名只装 tasks。后果：**读回的行总是当前
+版本**；将来把 `PLAN_SCHEMA_VERSION` 从 `"0.1"` 抬到 `"0.2"` 时，旧行会被**静默**当成新版
+本。两条修法（都要动 schema，**不在 Task 2.1 范围**）：① 迁移 002 加 `schema_version` 列；
+② 把 `tasks_json` 换成带信封的 `{"schema_version": …, "tasks": […]}`（列名要一并改）。
+**谁 bump 版本谁先处理这一条**——已写进 `TestPlan` 的类 docstring。
+
+### 实测踩到的一处（仓内既有手法）
+
+`TestPlan` / `TestPlanTask` 的名字以 `Test` 开头（设计 §5.1 **逐字要求**，不改名），
+被 import 进测试模块后 pytest 会把它们当**测试类**收集 → 两条
+`PytestCollectionWarning`。修法沿用仓内既有手法 `__test__ = False`
+（`executor/assertion.py` 的两个断言异常、`runner/runner.py` 同款）；并用
+`-W error::pytest.PytestCollectionWarning` 复跑确认清零。
+
+### 实测
+
+- 全量 pytest **1451 passed**（Task 2.1 新增 **14**；上一轮基线 1437 + 14 = 1451）。
+- **探针**：往 `agents/storage.py` 插 `from planner.models import TestPlan` →
+  分层守卫**真红**。
+- 收集警告：`-W error::pytest.PytestCollectionWarning` 下 14 passed（无警告）。
