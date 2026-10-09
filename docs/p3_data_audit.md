@@ -1687,3 +1687,93 @@ plan 的 Steps 写「逐字节不变」，但**加字段后 `model_dump()` 必�
   未动实现，未增删测试）。
 - 设计 §6.2 示例探针 **PARSED OK**（见修订 3）。
 - 工作区：`testcase/schema.py` 本轮**未改**；无残留探针脚本。
+
+---
+
+## Task 3.1 评审修订记录（2026-10-09，round 2 / 收口核销）
+
+**评审报告**：`review/review_p3_task31_final_2026-10-09.md` —— 结论 **通过**。
+上一轮 round 1 的 3×P3 + 4 条小观察**全部核销 7/7**；本轮新增 **0×P2 + 2×P3**，
+均为文档 / 版本号口径，**无回归**。
+
+### 核销结论（round 1 的 7 项）
+
+| 项 | 核验 | 结果 |
+|---|---|---|
+| P3-1 分文件例数 12/4 → 13/3 | `--collect-only -q` → **13** / **3**（`def test_` 8 / 3） | ✅ |
+| P3-2 探针 E 计数 3 → 4 | A/B 真改 `Literal`→裸 `str` → **4 failed** | ✅ |
+| P3-3 设计 §6.2 勘误回填 | 抠文档 YAML 块喂真 parser → **PARSED OK**；"0.1"→"0.2" + 补 `name` | ✅ |
+| 小观察 3 / 4 | docstring 措辞收窄；plan:289 `:15`→`:19` | ✅ |
+| 小观察 1 / 2（未升级） | HEAD 复验：空串仍放行、lint 测试仍有牙（探针 F2 → 4 failed） | ✅ |
+
+### 修订 1（P3-1）：`plan:35` 的另两处 `path:line` 引用已漂
+
+- **位置**：`docs/phase3-plan.md:35`（§0「Executor 能力」行）。
+- **实测**：`testcase/schema.py:119` → 实为 **:123**（`action: Literal[...]`）；
+  `:141-149` → 实为 **:145-153**（`condition: Literal[` 起始 + 7 条件 + `]`）。
+  两者在 `4cea731`（P2 完成点）与 `72106e1^` 上**都对**，Task 3.1 把模块 docstring
+  从 7 行扩到 11 行后**同步下移 4 行**。
+- **为什么记一笔**：round 1 的小观察 4 报的正是这个形状，而修订**只修了被点的那一处**
+  （plan:289）。MEMORY §5.A：「修完被点的那一处要顺手扫全包」——`docs/phase3-plan.md`
+  对 `schema.py` 的 `path:line` 引用只有两处（:35 与 :289），扫全的成本是一条 grep。
+- **修法**：`:119` → `:123`、`:141-149` → `:145-153`。
+- **教训**：**改模块 docstring / 头部注释后，grep 一次所有引用该文件的 `path:line`**
+  （扩行会让全文件锚点同步下移）。
+
+### 修订 2（P3-2）：testcase 侧代码里残留的 `0.1` 版本号口径
+
+- **位置与修法**：
+
+| 位置 | 原文 | 修法 |
+|---|---|---|
+| `testcase/lint.py:157` | `f"... failed 0.1 schema: {detail}"` | `"failed {SCHEMA_VERSION} schema: ..."`（**单点派生**，不写第二个字面量） |
+| `testcase/lint.py:4` | 「过不了 0.1 strict parser」 | 删版本号，改「过不了 strict parser」 |
+| `testcase/loader.py:1` / `:35` | 「schema 0.1 分发入口」/「走 0.1 strict 分发」 | 删版本号 |
+| `tests/unit/test_schema.py:178` | 「必须能过 schema 0.1」 | 改「必须能过 strict schema」 |
+
+- **依据**：`SCHEMA_VERSION` 自 `7ae8a7e`（P1-04）起就是 `"0.2"`，`0.1` 在 testcase 侧
+  已不存在；`lint.py:157` 是自 `d4aa543`（P1-03）写入后未改的 P1 存量。
+- **为什么记一笔**：round 2 刚为「设计文档写了过时的 `0.1`」做了勘误回填，理由是
+  **过时的版本号会让人按错的版本去理解/抄写**。代码里这几处是同一形状的**另一半落点**，
+  `lint.py` 那条还是**用户可见的错误文案**（20 条 lint 报错全写「failed 0.1 schema」）。
+- ⚠️ **两处 `0.1` 不是这一族，没动**：
+  ① `planner/models.py:91` `PLAN_SCHEMA_VERSION = "0.1"` 是 **TestPlan 自己的**版本
+  （`test_plans` 信封，与 TestCase 的 0.2 无关；`tests/unit/test_planner_models.py:47-55`
+  与 `tests/unit/test_cli_plan.py:206` 钉着它）；
+  ② `tracer/**` 的 `schema 0.1` 是 **trace schema**（设计 14.2），是另一个 schema。
+- **验证**：
+  - `lint.py` 改为从 `testcase.schema` 导入 `SCHEMA_VERSION`（该文件已 import 同模块）
+    → **版本只有一份定义**。A/B：把 `SCHEMA_VERSION` 改成 `"0.3"` → 报错文案跟着变
+    `failed 0.3 schema` → 证明不是又抄了一个字面量。
+  - 新文案实测：`testcase 'login_again_001' failed 0.2 schema: …`。
+  - 全仓 `grep 'failed 0.1 schema' tests/ phase0/` → 改前**零命中**（无测试钉整条 message）。
+
+### 修订后实测
+
+- 全量 pytest **1625 passed in 17.08s**（与修订前逐位一致）。
+- `tests/unit/test_lint.py` + `test_schema.py` + `test_cli.py` → **55 passed**。
+- `test_repo_hygiene.py` + 两个 Task 3.1 新文件、`-W error::pytest.PytestCollectionWarning`
+  → **21 passed** 零警告。
+- A/B 1 次（`SCHEMA_VERSION` → `"0.3"`，验证文案跟随），已还原，`git diff --stat` 为空。
+
+### ⚠️ 本轮踩的坑：A/B 探针留下**陈旧字节码**，`git diff` 看不出来
+
+改完 `lint.py` 后跑全量 —— `test_plan_version_is_independent_of_testcase_schema`
+**1 failed**（`assert TESTCASE_VERSION == "0.2"` 得到 `0.3`）。而 `testcase/schema.py`
+的 `git diff` **为空**、`grep SCHEMA_VERSION` 也是 `"0.2"`。
+
+**根因**：A/B 探针用 Python 脚本把 `SCHEMA_VERSION = "0.2"` 改成 `"0.3"` 再改回，
+**两次写入落在同一秒内、且字节数不变** → 文件的 `st_mtime`（秒精度）与 `st_size`
+**都与改前完全一致** → CPython 的 `.pyc` 校验（比对 source mtime + size）判定缓存
+**仍然有效**，于是继续用着含 `0.3` 的那份字节码。
+
+**验证**：直接 `import` 拿到 `0.3`；`marshal` 解 `.pyc` 的 `co_consts` 里确实是
+`'0.3'`；而源文件 `sed -n 19p` 是 `"0.2"`。清 `__pycache__` 后恢复 `"0.2"`，
+全量 **1625 passed**。
+
+**教训（已并入 MEMORY §1）**：
+- **A/B 探针还原后要清 `__pycache__`**（或让探针在写入前 `touch` 出一个不同的
+  mtime）；**只核对 `git diff --stat` 挡不住字节码级残留**。
+- 出现「源码与运行结果不一致、而 git 干净」时，**先怀疑陈旧 `.pyc`**，再怀疑回归。
+- 同理：**探针改常量时优先改一个长度不同的值**（`"0.3"` 与 `"0.2"` 等长，size
+  不变会让 mtime 成为唯一判据，而它是秒精度）。

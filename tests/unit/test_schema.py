@@ -175,7 +175,7 @@ def test_wait_text_condition_without_expected_rejected():
 
 
 def test_design_section6_example_passes_validation():
-    """设计 §6 官方示例（R5-1 修复后契约）必须能过 schema 0.1。"""
+    """设计 §6 官方示例（R5-1 修复后契约）必须能过 strict schema。"""
     case = load_testcase_from_dict(
         {
             "schema_version": "0.2",

@@ -1,7 +1,7 @@
 """mta lint 静态检查（设计 6.4，Task 1.3 / P1-01）。
 
 检查项（失败 → 退出码 3 的前置门）：
-  - schema 非法（YAML dict 过不了 0.1 strict parser）→ ERROR；
+  - schema 非法（YAML dict 过不了 strict parser）→ ERROR；
   - target 解析不了 / 短名歧义（委托 Repository.lint，4.1 不允许运行时猜）→ ERROR；
   - `${VAR}` 无法由 SecretProvider 解析（H9）→ ERROR；
   - 用例含 sleep（H11：implicit wait=0）→ ERROR；
@@ -23,7 +23,7 @@ from typing import Any, Protocol
 from pydantic import ValidationError
 
 from repository.resolver import LintIssue, Repository, Severity
-from testcase.schema import TestCase, parse_testcase_dict
+from testcase.schema import SCHEMA_VERSION, TestCase, parse_testcase_dict
 
 SECRET_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 # review_m4_task43 P2-1：合法形态之外的 `${` 一律坏占位符——`${{VAR}}`
@@ -154,7 +154,7 @@ def _schema_error_issue(data: dict, exc: Exception) -> LintIssue:
         detail = str(exc)
     tc_id = data.get("id", "<unknown>") if isinstance(data, dict) else getattr(data, "id", "<unknown>")
     return LintIssue("schema_invalid",
-                     f"testcase {tc_id!r} failed 0.1 schema: {detail}")
+                     f"testcase {tc_id!r} failed {SCHEMA_VERSION} schema: {detail}")
 
 
 def _check_unconsumed_declarations(

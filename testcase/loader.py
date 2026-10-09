@@ -1,4 +1,4 @@
-"""Testcase loader：P0 松散模型兼容层 + 设计 6.3 schema 0.1 分发入口（P1-01）。
+"""Testcase loader：P0 松散模型兼容层 + 设计 6.3 schema 分发入口（P1-01）。
 
 - 旧 `Step/TestCase/load_testcase`：P0 链路（run_phase0_demo / verify_stage5/9）仍在用；
 - `load_testcase_from_dict`：设计 6.3 strict 入口（extra=forbid + 版本分发）；
@@ -32,7 +32,7 @@ class TestCase(BaseModel):
 
 
 def load_testcase(path: str | Path) -> TestCase:
-    """文件级入口：带 schema_version 的新用例走 0.1 strict 分发，否则回落 P0 松散模型。
+    """文件级入口：带 schema_version 的新用例走 strict 分发，否则回落 P0 松散模型。
 
     R5-2：防止 strict 校验被文件级入口静默旁路。
     """
