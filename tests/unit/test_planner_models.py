@@ -15,7 +15,8 @@ from pydantic import ValidationError
 
 from agents.storage import SQLiteAgentStore
 from planner.models import (PLAN_SCHEMA_VERSION, PRIORITY_MAX, PRIORITY_MIN,
-                            PlannerInput, TestPlan, TestPlanTask, plan_id_for)
+                            PlannerInput, TestPlan, TestPlanTask, plan_id_for,
+                            require_paths)
 
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -274,3 +275,39 @@ def test_plan_id_is_content_addressed_not_random():
     """确定性：与调用次数/时间无关（F13 的取向延伸到 Plan 的**标识**上）。"""
     ids = {plan_id_for("1026", "abc1234", ["a.swift"]) for _ in range(5)}
     assert len(ids) == 1
+
+
+def test_plan_id_for_rejects_a_single_string():
+    """单个字符串必须拒（review_p3_task23 P3-2）：它是主键 + upsert 键。
+
+    不拒的话 `plan_id_for("1026", "abc", "a.swift")` **不报错**，且 id 与
+    `plan_id_for("1026", "abc", list("a.swift"))` **完全相同**——形态与正常 id 无从
+    区分，两次 plan 会落到互不相干的行（或覆盖到错误的行），全程无报错。
+    """
+    with pytest.raises(TypeError, match="可迭代"):
+        plan_id_for("1026", "abc", "a.swift")
+    with pytest.raises(TypeError, match="可迭代"):
+        plan_id_for("1026", "abc", b"a.swift")
+
+
+def test_plan_id_for_rejects_non_string_paths():
+    """非 str 元素也拒——旧实现的 `str(p) for p in changed_files` 会**静默强转**
+    （`[42]` → `"42"`），于是「42」与「'42'」两种输入**得到同一个 id**。"""
+    with pytest.raises(TypeError, match="str"):
+        plan_id_for("1026", "abc", ["a.swift", 42])
+    with pytest.raises(TypeError, match="str"):
+        plan_id_for("1026", "abc", [42])
+    # 只有真的 str 才产 id（`"42"` 是合法的路径字符串，与 42 无关）
+    assert plan_id_for("1026", "abc", ["42"]) != plan_id_for("1026", "abc", ["43"])
+
+
+def test_require_paths_is_the_single_gate():
+    """两个调用方共用**同一个**闸门（`plan_id_for` 与 `planner/impact.py`）。"""
+    from planner.impact import _paths
+
+    assert _paths(["a", "b"]) == require_paths(["a", "b"], where="x") == ("a", "b")
+    for bad, match in (("a.swift", "可迭代"), ([1], "str")):
+        with pytest.raises(TypeError, match=match):
+            _paths(bad)
+        with pytest.raises(TypeError, match=match):
+            require_paths(bad, where="x")

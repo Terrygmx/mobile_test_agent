@@ -17,8 +17,8 @@ import pytest
 from knowledge import build_knowledge
 from llm.budget import LLMBudget
 from planner.models import PlannerInput, plan_id_for
-from planner.planner import (Unrankable, failure_rate, llm_order_violations,
-                             plan, rule_basis)
+from planner.planner import (failure_rate, llm_order_violations, plan,
+                             rule_basis)
 from planner.prioritizer import RISK_FLOOR
 from testcase.schema import Risk, parse_testcase_dict
 from tests.fault_injection.fi_support import drift_repo
@@ -117,10 +117,12 @@ def _input(changed=APP_FILE) -> PlannerInput:
                         changed_files=[changed] if changed else [])
 
 
-def _plan(env, *, changed=APP_FILE, llm=None, budget=None, base_metadata=None):
-    return plan(_input(changed), knowledge=env["knowledge"], cases=env["cases"],
-                metadata=env["metadata"], repository=env["repo"], llm=llm,
-                budget=budget, base_metadata=base_metadata)
+def _plan(env, *, changed=APP_FILE, llm=None, budget=None, base_metadata=None,
+          knowledge=None):
+    return plan(_input(changed), knowledge=knowledge or env["knowledge"],
+                cases=env["cases"], metadata=env["metadata"],
+                repository=env["repo"], llm=llm, budget=budget,
+                base_metadata=base_metadata)
 
 
 class _FakeLLM:
@@ -135,6 +137,21 @@ class _FakeLLM:
         if isinstance(self.payload, Exception):
             raise self.payload
         return self.payload
+
+
+class _CountingKnowledge:
+    """只统计 `trace_history` 被调了几次（小观察 2：应当**一次**）。"""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.trace_calls = 0
+
+    def impact_of(self, target_id):
+        return self.inner.impact_of(target_id)
+
+    def trace_history(self, filters):
+        self.trace_calls += 1
+        return self.inner.trace_history(filters)
 
 
 def _payload(order, reasons=None, **extra):
@@ -180,6 +197,19 @@ def test_plan_id_is_content_addressed(env):
     assert a != c
     assert _plan(env, changed=OTHER_FILE).plan.plan_id == plan_id_for(
         BUILD, "abc1234", [OTHER_FILE])
+
+
+def test_history_is_read_once_not_per_candidate(env):
+    """小观察 2：`trace_history` **一次读全量**再按 `testcase_id` 分组。
+
+    `trace_history(filters)` 每次调用都会 `read_trace_steps` 读**全库**再在 Python 里
+    过滤，所以「在候选循环里逐用例调用」是 O(候选数 × 全库步骤数)。本 Plan 有 4 个候选
+    ——按旧写法会调 4 次。
+    """
+    counting = _CountingKnowledge(env["knowledge"])
+    result = _plan(env, knowledge=counting)
+    assert len(result.tasks) == 4
+    assert counting.trace_calls == 1, f"读了 {counting.trace_calls} 次全量 trace"
 
 
 # --- 矩阵 #6：空改动 ----------------------------------------------------------
@@ -339,6 +369,20 @@ def test_ignored_llm_fields_are_audited(env):
 # --- 坏引用用例（不猜、不静默丢） ---------------------------------------------
 
 
+def test_plan_refuses_wrong_shaped_cases(env):
+    """传错形态的用例对象 → **报错**，不静默塌成 id `"?"`（与 P3-1 同形）。
+
+    原先 `candidates` 的过滤条件用 `getattr(c, "id", "?")`：所有坏对象塌成同一个
+    `"?"`，Plan 里出现一条 id 为 `"?"` 的任务而全程无报错。
+    """
+    class _NoId:
+        steps: list = []
+
+    with pytest.raises(AttributeError, match="id"):
+        plan(_input(APP_FILE), knowledge=env["knowledge"], cases=[_NoId()],
+             metadata=env["metadata"], repository=env["repo"])
+
+
 def test_unresolvable_case_is_listed_not_silently_dropped(env):
     """进了影响面但元素解析不到 → 不猜风险（猜 LOW 会让它沉底），**列出来**。"""
     result = _plan(env)
@@ -378,6 +422,18 @@ def test_drift_fallback_when_metadata_lacks_attribution(env):
     assert any("精度损失" in n for n in result.notes), result.notes
     assert [t.testcase_id for t in result.tasks] == ["signin_008"]
     assert [u.testcase_id for u in result.unrankable] == ["gone_007"]
+    # **P2-1 的落点**：精度损失必须随 Plan **落库**（`reasons`），不能只在不落库的
+    # `notes` 里——否则落库的 Plan 上「影响面精确」与「影响面宽」长得一模一样。
+    reasons = result.tasks[0].reasons
+    assert reasons[0] == "impact: 命中改动影响面（drift 回退：影响面比本次 commit 宽）"
+    assert result.plan.tasks[0].reasons == reasons, "落库的就是这一份"
+
+
+def test_no_drift_marker_when_the_primary_path_was_used(env):
+    """没走回退面时**不加** drift 标记（标记是限定语，不是装饰）。"""
+    reasons = _plan(env).tasks[0].reasons
+    assert reasons[0] == "impact: 命中改动影响面"
+    assert not any("drift" in r for r in reasons)
 
 
 def test_missing_attribution_without_base_metadata_fails_loud(env):
@@ -408,6 +464,37 @@ def test_failure_rate_counts_runs_not_steps():
     assert failure_rate([]) == 0.0, "空历史 = 没有失败证据，不是「一直失败」"
 
 
+def test_failure_rate_refuses_wrong_shaped_steps():
+    """入参直接取属性、**不用 `getattr` 兜底**（P3-1：同形第三次）。
+
+    探针实测（修复前）：两个缺 `testcase_run_id` 的 FAILED 步骤 → **1.0**（两个 run 塌成
+    一个）；缺 `status` → **0.0**。失败率占 30 分权重——塌成 0 让有失败史的用例**沉底**、
+    塌成 1 让没失败史的用例白拿 30 分，两侧都是「看不见」那一侧。
+    """
+    class _NoRunId:
+        status = "FAILED"
+
+    class _NoStatus:
+        testcase_run_id = 1
+
+    with pytest.raises(AttributeError):
+        failure_rate([_NoRunId(), _NoRunId()])
+    with pytest.raises(AttributeError):
+        failure_rate([_NoStatus()])
+
+
+def test_llm_violations_are_capped_and_marked_truncated():
+    """`_MAX_VIOLATIONS` 的截断是**真分支**（纯函数直接喂 21 条违规）。"""
+    from planner.planner import _MAX_VIOLATIONS
+
+    n = _MAX_VIOLATIONS + 5
+    ordered = [(f"c{i:03d}", 100 - i) for i in range(n)]      # 每条分数都不同
+    proposed = [cid for cid, _ in reversed(ordered)]          # 全反序 → 每一步都违规
+    out = llm_order_violations(ordered, proposed)
+    assert len(out) == _MAX_VIOLATIONS + 1
+    assert out[-1] == {"kind": "truncated"}, out[-1]
+
+
 def test_rule_basis_states_every_input():
     basis = rule_basis(hit=True, rate=0.25, risk=Risk.CRITICAL, score=90)
     assert basis == ["impact: 命中改动影响面", "history: 历史失败率 0.25",
@@ -417,7 +504,23 @@ def test_rule_basis_states_every_input():
     assert RISK_FLOOR.get(Risk.LOW) is None
 
 
-def test_plan_result_exposes_tasks():
-    """`PlanResult.tasks` 是 `plan.tasks` 的只读视图（CLI 用）。"""
-    r = Unrankable(testcase_id="x", reason="r")
-    assert r.testcase_id == "x"
+def test_rule_basis_marks_the_drift_fallback_on_the_impact_line():
+    """drift 标记**附着在它限定的那一行**上（不是每条 reasons 追加一整句）。"""
+    plain = rule_basis(hit=True, rate=0.0, risk=Risk.LOW, score=40)
+    drift = rule_basis(hit=True, rate=0.0, risk=Risk.LOW, score=40, drift=True)
+    assert drift[0].startswith(plain[0]) and drift[0] != plain[0]
+    assert "drift 回退" in drift[0]
+    assert drift[1:] == plain[1:], "只影响 impact 那一行"
+
+
+def test_plan_result_tasks_is_a_view_of_the_plan(env):
+    """`PlanResult.tasks` 是 `plan.tasks` 的**只读视图**（CLI 渲染用）。
+
+    （旧名 `test_plan_result_exposes_tasks` 的 docstring 是这句，函数体却只构造了
+    `Unrankable`——名实不符，review_p3_task23 小观察 3。`Unrankable` 本身由
+    `test_unresolvable_case_is_listed_not_silently_dropped` 覆盖。）
+    """
+    result = _plan(env)
+    assert isinstance(result.tasks, tuple)
+    assert result.tasks == tuple(result.plan.tasks)
+    assert result.tasks and result.tasks[0] is result.plan.tasks[0]

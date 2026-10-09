@@ -278,3 +278,73 @@ def test_two_builds_in_one_db_are_refused_without_app_build(tmp_path):
 def _store(tmp_path):
     from experience import SQLiteExperienceStore
     return SQLiteExperienceStore(tmp_path / "experience.db")
+
+
+# --- F3 在 M2 侧的 import 级断言（review_p3_task23 P3-3） ---------------------
+
+# 直连数据源的模块前缀——它们各自是某个库的读写实现，绕过 `KnowledgeSources`
+# 就是「第二套检索接口」的开端（F3）。`agents` 同时是分层守卫的另一半。
+_FORBIDDEN_DATASOURCE_IMPORTS = (
+    "sqlite3", "tracer", "agents",
+    "graph.storage", "experience.store", "source.sqlite_tx",
+)
+
+
+def _all_imports(path):
+    """文件里**全部** import 的模块名（含函数内的按需导入——按需导入也是直连）。"""
+    import ast
+
+    out: list[str] = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            out.append(node.module)
+        elif isinstance(node, ast.Import):
+            out.extend(a.name for a in node.names)
+    return out
+
+
+def _is_datasource(module: str) -> bool:
+    return any(module == f or module.startswith(f + ".")
+               for f in _FORBIDDEN_DATASOURCE_IMPORTS)
+
+
+def test_planner_package_does_not_touch_data_sources_directly():
+    """**F3 在 M2 侧的 import 级断言**（plan 的 F→矩阵映射：M2–M5 各任务都要有）。
+
+    Task 2.3 是 `KnowledgeSources` 的**第一个生产调用者**——「单一入口」从约定变成事实
+    就在这一格；M3–M5 还有 generator / explorer / diagnosis 三个同类调用方要来，这一格
+    不钉，就要在每个任务里重复判断一次。
+
+    与已有的两条守卫各钉一半、**互补**：
+
+    | 守卫 | 钉住什么 |
+    |---|---|
+    | `test_agents_package_does_not_import_planner` | `agents/**` **不** import `planner`（反向依赖） |
+    | `test_p2_knowledge_sources_is_constructed_in_one_place` | `P2KnowledgeSources(` 的**构造点**只有 `knowledge/retrieval.py` |
+    | **本条** | `planner/**` 不**直连数据源**（`sqlite3` / `tracer` / `graph.storage` / `experience.store` / `source.sqlite_tx` / `agents`） |
+
+    AST 扫**全部** import（含函数内的按需导入），失败**指名文件**；带防空转下界
+    （文件数 + 必须覆盖到 `planner/planner.py`——扫描面写错时立刻可见）。
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2] / "planner"
+    files = [p for p in sorted(root.rglob("*.py")) if "__pycache__" not in p.parts]
+    assert len(files) >= 6, f"只扫到 {len(files)} 个 planner/*.py，扫描面疑似写错"
+    names = {p.name for p in files}
+    assert {"planner.py", "impact.py", "models.py"} <= names, names
+
+    offenders = {p.name: sorted({m for m in _all_imports(p) if _is_datasource(m)})
+                 for p in files}
+    offenders = {k: v for k, v in offenders.items() if v}
+    assert not offenders, (
+        f"planner/** 必须只经 KnowledgeSources，不得直连数据源（F3）：{offenders}")
+
+
+def test_datasource_predicate_matches_whole_modules_not_prefixes():
+    """判据自证：`graph.storage` 命中，而**同前缀的邻居**（`graph.impact`）不误伤。"""
+    assert _is_datasource("sqlite3") and _is_datasource("tracer.storage")
+    assert _is_datasource("graph.storage") and _is_datasource("agents.storage")
+    assert not _is_datasource("graph.impact")
+    assert not _is_datasource("source.build_diff")
+    assert not _is_datasource("experience.knowledge")

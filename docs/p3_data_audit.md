@@ -1309,3 +1309,118 @@ Task 2.1 写的禁令理由是「`planner.planner` 要 import `agents.storage` �
   没接上，返回 `None` → `frozenset(None)` 抛 TypeError）。测试当场抓到。
 - 全仓重复顶层定义体检（含 `llm/`）：**零命中**。
 - `-W error::pytest.PytestCollectionWarning` 下 `test_planner_models.py` 24 passed（零警告）。
+
+---
+
+## Task 2.3 评审修订记录（review_p3_task23 收口，2026-10-09）
+
+评审「有条件通过 — **1×P2** + 3×P3」，上一轮 `15ced55` 的 3×P3 + 5 条小观察 **5/5 全清**，
+九条钉子经评审复跑**无一空转**（其中「候选集改全体」实际红 **14** 条，比自述的 7 条更强）。
+唯一的 P2 出在**契约的落点比契约本身弱一级**。
+
+### P2-1 `drift_targets` 要求「必须写进 `reasons`」，调用方写进了**不落库的** `notes`
+
+- 症状：`drift_targets` 的 docstring 写「调用方**必须**把精度损失写进 Plan 的 `reasons`
+  （open question #2 的原文要求），**不能只把它记在日志里**」，而 `_resolve_targets` 把它
+  `notes.append` 了。`notes` 属于 `PlanResult`（**过程产物**），
+  `save_plan(plan_id, *, app_build, git_commit, tasks)` **只写 `tasks_json`** —— 于是落库的
+  Plan 里每条 `reasons` 都写「impact: 命中改动影响面」，却没有任何一处说明**这个「命中」
+  来自回退面**。
+- 为什么是现在：drift 面的影响面**比本次 commit 宽**（它是 build 之间的元素变化）。等人
+  回头复核一份**已落库**的 Plan 时，「影响面是精确的」与「影响面是宽的」长得一模一样
+  —— 正是本任务自己在 `unmatched_changed_files` 上写下的那条理由。
+- 为什么不能只算「已登记的偏离」：提交信息把它写在偏离登记 ②（「精度损失写进 reasons 落在
+  notes 里」），但落点**弱于** docstring 自己写下的硬要求（MUST + 明确排除「只记日志」）。
+  契约与落点差一格 —— 判定标准正是「口径与实测不符」。
+- 修法（采纳评审**倾向的**方案 1，并处理它指出的「plan 级结论重复 N 次」）：
+  `rule_basis` 加 `drift` 参数，把标记**附着在它限定的那一行上**：
+  `impact: 命中改动影响面（drift 回退：影响面比本次 commit 宽）` —— 不是每条 reasons
+  追加一整句 plan 级说明。`notes` 保留完整说明（CLI 一眼可见）。
+- 顺带把这条约束**写进模块 docstring 的偏离登记**（评审 §三 P2-1 的第二半）：
+  「`notes` / `unrankable` / `audit` **不进 `test_plans`**，所以任何『必须随 Plan 一起被
+  复核』的结论都不能只放在它们里」。
+- **探针复现**：`drift=drift_fallback` → `drift=False` → 落库 reasons 的断言**真红**。
+
+### P3-1 `failure_rate` 的 `getattr` 兜底 —— 同形在本包**第三次**
+
+- 症状（探针实测）：两个缺 `testcase_run_id` 的 FAILED 步骤 → **1.0**（两个 run 塌成一个）；
+  缺 `status` → **0.0**。两个方向都不报错。失败率占 **30 分**权重 —— 塌成 0 让有失败史的
+  用例**沉底**、塌成 1 让没失败史的用例白拿 30 分，两侧都是「看不见」那一侧。
+- 为什么现在修：这是同一形状在本包的第三次 —— ① 上一轮 `planner/risk.py` 的
+  `getattr(tc_meta, "element_ids", ())` 刚被判 P3-2；② 本任务自己在 `planner/impact.py::
+  _paths` 为「单个字符串」写了同一条纪律；③ 本函数却没有用这条纪律对待自己的入参。
+- 修法：`run_id = step.testcase_run_id` / `failed = step.status == _FAILED_STEP`
+  （`TraceStep` 两个字段都在，Task 2.2 才把它们读出来）。
+- **顺手清掉同形的第二处**（评审没点，但同一条纪律）：`plan()` 里
+  `candidates = [... if getattr(c, "id", "?") in impact]` 与 `cid = getattr(case, "id", "?")`
+  → 改 `c.id`。传错形态的用例对象原先会让**所有对象塌成同一个 `"?"`**，Plan 里出现一条
+  id 为 `"?"` 的任务而全程无报错。补 `test_plan_refuses_wrong_shaped_cases` 钉住。
+- **探针复现**：恢复 `getattr` → `test_failure_rate_refuses_wrong_shaped_steps` 红；
+  恢复 `getattr(c, "id", "?")` → `test_plan_refuses_wrong_shaped_cases` 红。
+
+### P3-2 `plan_id_for` 缺兄弟函数刚加上的单字符串闸门
+
+- 症状（探针实测）：`plan_id_for("1026", "abc", "a.swift")` **不报错**，且 id 与
+  `plan_id_for("1026", "abc", list("a.swift"))` **完全相同**，长度与前缀（`plan_` + 16 hex）
+  与正常 id 无从区分。而 `plan_id` 是 `test_plans` 的**主键 + upsert 键** —— 两次 plan 会
+  落到互不相干的行（或覆盖到错误的行），全程无报错。
+- 修法：**抽唯一的闸门** `planner/models.py::require_paths(value, *, where)`，
+  `plan_id_for` 与 `planner/impact.py::_paths` **共用它**（原先两处各有一份判据 —— 这正是
+  「同一概念只许一处实现」要防的漂移）。顺带修掉旧实现的 `str(p) for p in changed_files`：
+  它把非 str **静默强转**成字符串（`[42]` → `"42"`），现在一并交给闸门（非 str 元素也拒）。
+- **探针复现**：去掉 `require_paths` → 单字符串 / 非 str 两条**都红**。
+
+### P3-3 F3 在 Task 2.3 的 import 级断言**缺位**
+
+- 症状：plan 的「F1–F13 → 矩阵项映射」写 **F3 → M2–M5 各任务 import 级断言**。实测
+  `planner/**` 的顶层 import 表**干净**（无 `sqlite3`/`tracer`/`graph`/`experience`/`agents`），
+  属性成立 —— 但**没有任何测试钉它**。已有的两条守卫各钉一半、都不是这一半：
+  `agents/**` 不 import `planner`（**反向**依赖）；`P2KnowledgeSources(` 的构造点唯一
+  （挡不住 planner 侧直连 `sqlite3` / `tracer.storage`）。
+- 为什么现在修：Task 2.3 是 `KnowledgeSources` 的**第一个生产调用者** —— 「单一入口」从
+  约定变成事实就在这一格；M3–M5 还有三个同类调用方要来。
+- 修法：`tests/unit/test_knowledge_retrieval.py::test_planner_package_does_not_touch_data_sources_directly`
+  —— AST 扫 `planner/**` 的**全部** import（含函数内的按需导入，按需导入也是直连），
+  失败**指名文件**，带防空转下界（文件数 + 必须覆盖到 `planner.py`/`impact.py`/`models.py`）。
+  判据 `_is_datasource` 另有**自证测试**（`graph.storage` 命中而 `graph.impact` 不误伤）。
+- **探针复现**：往 `planner/planner.py` 插 `import sqlite3` → 守卫**真红**。
+
+### 小观察六条 —— 全部处理
+
+| # | 观察 | 处置 |
+|---|---|---|
+| 1 | `rule_basis(hit=…)` 在编排路径上**恒真**（候选集 == 影响面） | ✅ docstring 写明「编排路径上 `hit` 恒为 True，`IMPACT_WEIGHT` 的 +40 在候选集内区分度为零 —— 这是口径 1 的正确推论」。**参数保留**：本函数是纯函数，契约由「命中/未命中」两值定义，不由某一个调用方的用法定义（`hit=False` 有直接调用的专测） |
+| 2 | `trace_history` 在候选循环里**逐用例**调用 → O(候选数 × 全库步骤数) | ✅ 提到循环外**一次读全量**再按 `testcase_id` 分组（`_history_by_case`；分组键正是 Task 2.2 追加到 `TraceStep` 上的字段）。补 `test_history_is_read_once_not_per_candidate`（spy 计数 = **1**，旧写法是 4） |
+| 3 | `test_plan_result_exposes_tasks` 名实不符（docstring 说视图，函数体只构造 `Unrankable`） | ✅ 改名 `test_plan_result_tasks_is_a_view_of_the_plan` 并**真的测视图**（`result.tasks == tuple(result.plan.tasks)` 且元素同一）；`Unrankable` 由坏引用那条测试覆盖 |
+| 4 | `test_planner_e2e.py` 用真 sqlite（plan 的 Files 写「纯内存 fixture」） | ✅ 补进**提交信息**的偏离登记（文件 docstring 早写了理由：替身 SQL 会让「列名/字段写错」静默通过） |
+| 5 | `plan()` 的 `cases` / `knowledge` / `repository` / `llm` / `budget` / `metadata` 无类型标注 | ✅ 补标注（`KnowledgeSources` / `Iterable[TestCase]` / `RepositoryProtocol` / `LLMProvider` / `LLMBudget` / `Mapping`），全部放 `if TYPE_CHECKING:` —— `from __future__ import annotations` 已把标注变成字符串，**运行期不付导入代价** |
+| 6 | `impact.py` 按需导入 `diff_builds` 而 `planner.py` 顶层导入 `source.coverage`，风格不一致 | ✅ 统一为**顶层导入**（编排路径本来就要付这笔代价；风格一致比省一次导入更值） |
+
+### §五 存疑项之一顺手补测
+
+`_MAX_VIOLATIONS = 20` 的 `truncated` 分支原先无测试（评审以为需要 20+ 条同分组用例）——
+其实 `llm_order_violations` 是**纯函数**，直接喂 21 条全反序即可。
+补 `test_llm_violations_are_capped_and_marked_truncated`（**探针**：删掉截断逻辑 → 真红）。
+
+### 登记（未改，评审也未要求）
+
+- `_llm_pass` 的 `except Exception`（`noqa: BLE001`）：捕获 provider 故障并如实降级 +
+  `budget.record_failure()`，与「吞掉」有本质区别。**但**它同时会吞掉我们自己的 bug ——
+  将来若要区分「provider 挂了」与「我们的 bug」，这里需要收窄（评审 §五 记的一笔）。
+- `MAX_REASON_CHARS` 截断后的 `reasons` 与 `TestPlanTask` 其它校验的交互未测（200 字符内
+  应当安全）。
+- 「坏引用用例」的三选一口径仍待 M2 Gate 演示后回设计层确认。
+
+### 实测
+
+- 全量 pytest **1586 passed**（本轮 +11：`test_planner_e2e.py` 24→**30**、
+  `test_planner_models.py` 24→**27**、`test_knowledge_retrieval.py` 16→**18**；
+  1575 + 11 = 1586）。
+- **九条 A/B 探针全部真红**（每次先读原文、改后立即还原并断言字节相等）：
+  ① 去掉 drift 标记 → 1 red；② 恢复 `failure_rate` 的 `getattr` → 1 red；
+  ③ 去掉 `plan_id_for` 的闸门 → 2 red；④ `planner` 直连 `sqlite3` → 1 red；
+  ⑤ `history` 置空 → 3 red；⑥ `history` 退回循环内 → 1 red；
+  ⑦ `PlanResult.tasks` 置空 → 8+ red；⑧ 删掉违规数截断 → 1 red；
+  ⑨ 恢复 `getattr(c, "id", "?")` → 1 red。
+- 全仓重复顶层定义体检：**零命中**。
+- `-W error::pytest.PytestCollectionWarning` 下 `test_planner_models.py` 27 passed（零警告）。

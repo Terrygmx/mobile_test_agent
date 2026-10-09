@@ -83,6 +83,7 @@ __all__ = [
     "TestPlan",
     "TestPlanTask",
     "plan_id_for",
+    "require_paths",
 ]
 
 # TestPlan **自己的**版本（设计 §5.1 的 `schema_version: str = "0.1"`）。
@@ -99,6 +100,32 @@ PlanSource = Literal["existing", "generated_gap"]
 # `plan_id` 的哈希长度（16 hex = 64 bit，碰撞概率对本项目的规模而言可忽略；
 # 短是为了 CLI 输出与日志里好读）。
 _PLAN_ID_HASH_LEN = 16
+
+
+def require_paths(value: Iterable[str], *, where: str) -> tuple[str, ...]:
+    """「一串路径」的**唯一入参闸门**（`changed_files` 这类字段共用）。
+
+    两个调用方：`plan_id_for`（`plan_id` 的输入）与 `planner/impact.py`
+    （文件→target 映射的输入）。**同一个判据只许有一份实现**——两处各写一遍必然漂移，
+    而这两处的失败形态恰好都是「结果看起来正常」。
+
+    拒两件事：
+
+    - **单个 `str` / `bytes`**：`for p in "a.swift"` 会安静地逐字符迭代出 7 个「路径」，
+      全都匹配不到任何东西 → 表现为「空 Plan」或「一个形态完全正常的 `plan_id`」，
+      而不是「你传错了」；
+    - **非 `str` 的元素**：绑进 `dict.get` / 字符串拼接时一条也匹配不到（与过滤值的
+      类型闸门同一条理由：非 str 的值不会报错，只会静默不生效）。
+    """
+    if isinstance(value, (str, bytes)):
+        raise TypeError(
+            f"{where} 必须是**路径的可迭代**，不是单个字符串（got {value!r}）"
+            f"——传路径元组（如 `GitChangeSet.changed_files`）")
+    out = tuple(value)
+    bad = [p for p in out if not isinstance(p, str)]
+    if bad:
+        raise TypeError(f"{where} 里必须全是 str，got {bad[:3]!r}")
+    return out
 
 
 def plan_id_for(app_build: str, git_commit: str,
@@ -123,8 +150,15 @@ def plan_id_for(app_build: str, git_commit: str,
 
     `changed_files` 先 `sorted` 再入哈希：git 的输出顺序是确定的，但调用方可能来自
     `--changed-files` 之类的手工输入，排序让「集合相同」等价于「id 相同」。
+
+    ⚠️ **`changed_files` 过 `require_paths` 闸门**（review_p3_task23 P3-2）：它是
+    `test_plans` 的**主键 + upsert 键**，而一个「看起来完全正常」的错误 id 会让两次
+    plan 落到互不相干的行（或覆盖到错误的行），全程无报错——正是 `planner/impact.py`
+    为同一件事写下的那句理由。原先的 `str(p) for p in changed_files` 还会把非 str
+    **静默强转**成字符串（`[42]` → `"42"`），一并交给闸门处理。
     """
-    parts = [app_build, git_commit, *sorted(str(p) for p in changed_files)]
+    paths = require_paths(changed_files, where="changed_files")
+    parts = [app_build, git_commit, *sorted(paths)]
     digest = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
     return f"plan_{digest[:_PLAN_ID_HASH_LEN]}"
 

@@ -35,7 +35,7 @@ F13 要求「可解释，**不是『LLM 觉得』**」。所以数值依据（im
 LLM 给的排列里段位序列必须**非递减**。把低分用例排到高分之前 → 段位下降 → **判违规，
 整条顺序丢弃、保留确定性顺序，并留审计**（`PlanResult.audit`）。
 
-## ⚠️ 偏离登记：`PlanResult` 是 plan 之外的**过程产物**
+## ⚠️ 偏离登记：`PlanResult` 是 plan 之外的**过程产物**（且**不落库**）
 
 设计 §5.1 的 `TestPlan` 只有 `schema_version / plan_id / app_build / git_commit / tasks`
 ——**没有**承载「为什么是这个 Plan」的字段。但本任务的 Steps 明确要求两件事必须可见：
@@ -43,6 +43,14 @@ LLM 给的排列里段位序列必须**非递减**。把低分用例排到高分
 所以编排层返回 `PlanResult(plan, notes, unrankable, audit)`：`plan` 是**持久化产物**
 （`save_plan` 只收它），其余三项是**过程结论**（CLI 渲染；M6 起写 `agent_trace`）。
 不给 `TestPlan` 加字段——那要动 `test_plans` 的 schema（设计 §11 的表没有这些列）。
+
+⚠️ **由此推出一条硬约束**：`notes` / `unrankable` / `audit` **不进 `test_plans`**
+（`save_plan(plan_id, *, app_build, git_commit, tasks)` 只写 `tasks_json`）。所以任何
+「**必须随 Plan 一起被复核**」的结论都不能只放在它们里——要么进 `reasons`
+（唯一落库的可解释性位置），要么在 M6 写进 `agent_trace`。
+**第一条落地的就是 drift 回退的精度损失**（`rule_basis(drift=True)`）：
+它是**对 `reasons` 里那句「impact: 命中改动影响面」本身的限定**，只记在 `notes` 里
+等于「落库的 Plan 里，精确影响面与宽影响面长得一模一样」。
 
 ## ⚠️ 偏离登记：`failure_rate` 按**运行**统计
 
@@ -54,17 +62,24 @@ LLM 给的排列里段位序列必须**非递减**。把低分用例排到高分
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 from planner.impact import (ImpactMappingError, changed_targets, drift_targets,
-                            metadata_has_file_attribution,
                             unmatched_changed_files)
-from planner.models import PlannerInput, TestPlan, TestPlanTask, plan_id_for
+from planner.models import (PlannerInput, TestPlan, TestPlanTask, plan_id_for,
+                            require_paths)
 from planner.prioritizer import (RISK_FLOOR, TestCaseMeta, order_key,
                                  priority_score)
 from planner.risk import case_risk
 from repository.resolver import AmbiguousReferenceError, UnknownReferenceError
 from source.coverage import collect_refs
+
+if TYPE_CHECKING:            # 只为类型标注；`from __future__ import annotations`
+    from experience.knowledge import KnowledgeSources   # 已把标注变成字符串，
+    from llm.budget import LLMBudget                    # 运行期不付这笔导入代价
+    from llm.provider import LLMProvider
+    from repository.resolver import RepositoryProtocol
+    from testcase.schema import TestCase
 
 __all__ = [
     "PlanResult",
@@ -142,32 +157,69 @@ def failure_rate(steps: Iterable[Any]) -> float:
        把它算成失败会让「恢复能力强」表现为「历史很差」；
     3. **空历史 → 0.0**（不是 1.0）：没有历史 = 没有失败**证据**。给 1.0 会让所有新用例
        凭空拿到满分历史项，反而挤掉真正有失败史的老用例。
+
+    ⚠️ **入参直接取属性，不用 `getattr` 兜底**（review_p3_task23 P3-1——**同一个形状在本包
+    第三次出现**：`planner/risk.py` 的 `tc_meta.element_ids`、`planner/impact.py::_paths`
+    的单字符串闸门，都是这条）。`getattr(step, "testcase_run_id", None)` 会让**传错形态**
+    静默塌成 `0.0` 或 `1.0`（探针实测：两个缺 `testcase_run_id` 的 FAILED 步骤 → `1.0`；
+    缺 `status` → `0.0`），而失败率占 **30 分**权重——塌成 0 让有失败史的用例**沉底**、
+    塌成 1 让没失败史的用例白拿 30 分，两侧都是「看不见」那一侧。传错就 `AttributeError`。
     """
     runs: dict[Any, bool] = {}
     for step in steps:
-        run_id = getattr(step, "testcase_run_id", None)
-        failed = getattr(step, "status", None) == _FAILED_STEP
+        run_id = step.testcase_run_id
+        failed = step.status == _FAILED_STEP
         runs[run_id] = runs.get(run_id, False) or failed
     if not runs:
         return 0.0
     return sum(1 for failed in runs.values() if failed) / len(runs)
 
 
+def _history_by_case(knowledge: KnowledgeSources) -> dict[str, tuple]:
+    """`testcase_id` → 该用例的全部历史步骤。**一次读全量**再分组。
+
+    `trace_history(filters)` 每次调用都会 `read_trace_steps` 读**全库**再在 Python 里
+    过滤（见 `experience/knowledge.py`），所以「在候选循环里逐用例调用」是
+    O(候选数 × 全库步骤数)。分组键 `testcase_id` 正是 Task 2.2 追加到 `TraceStep` 上的
+    字段，这里直接用它（review_p3_task23 小观察 2；M6 的自主闭环规模会疼）。
+    """
+    grouped: dict[str, list] = {}
+    for step in knowledge.trace_history({}):
+        grouped.setdefault(step.testcase_id, []).append(step)
+    return {k: tuple(v) for k, v in grouped.items()}
+
+
 # --- 规则摘要（reasons 的确定性部分） -----------------------------------------
 
 
-def rule_basis(*, hit: bool, rate: float, risk, score: int) -> list[str]:
+def rule_basis(*, hit: bool, rate: float, risk, score: int,
+               drift: bool = False) -> list[str]:
     """确定性打分的**依据**（F13：可解释性由代码保证，不依赖 LLM 在场）。
 
     每条都**扣住一个真实输入**：impact 是否命中、历史失败率、风险等级（带 floor）、
     最终分数。顺序固定 → 同一输入下 `reasons` 的前缀稳定（可 diff、可对账）。
+
+    `drift=True` 时在 **impact 那一行**追加「drift 回退」标记——`reasons` 是**唯一随
+    `test_plans` 落库**的位置（`save_plan` 只收 `tasks_json`），而 drift 回退恰恰是对
+    「命中改动影响面」这句话本身的限定：只记在 `PlanResult.notes` 里，落库的 Plan 上
+    「影响面精确」与「影响面宽」长得一模一样（review_p3_task23 P2-1）。标记**附着在它
+    限定的那一行上**（而不是每条 reasons 都追加一整句 plan 级说明），避免 N 份重复。
+
+    ⚠️ **编排路径上 `hit` 恒为 `True`**：候选集本身就是影响面（口径 1），所以
+    「不在影响面内」那一支在 `plan()` 里不可达、`IMPACT_WEIGHT` 的 +40 在候选集内
+    **区分度为零**（review_p3_task23 小观察 1）。这是口径 1 的正确推论，不是 bug；
+    参数保留是因为本函数是**纯函数**，它的契约由「命中/未命中」两值定义，不由某一个
+    调用方的用法定义（`hit=False` 那一支有直接调用它的专测）。
     """
     floor = RISK_FLOOR.get(risk)
     risk_line = f"risk: {risk.name}"
     if floor is not None:
         risk_line += f"（floor {floor}）"
+    impact_line = f"impact: {'命中改动影响面' if hit else '不在影响面内'}"
+    if drift:
+        impact_line += "（drift 回退：影响面比本次 commit 宽）"
     return [
-        f"impact: {'命中改动影响面' if hit else '不在影响面内'}",
+        impact_line,
         f"history: 历史失败率 {rate:.2f}",
         risk_line,
         f"score: {score}",
@@ -232,26 +284,29 @@ def llm_order_violations(ordered: Sequence[tuple[str, int]],
 
 def _resolve_targets(planner_input: PlannerInput, metadata: Mapping,
                      base_metadata: Mapping | None, cases: Sequence[Any],
-                     notes: list[str]) -> tuple[str, ...]:
-    """改动文件 → targets，缺文件级归属时回退 drift 面（plan Task 2.3 的回退）。
+                     notes: list[str]) -> tuple[tuple[str, ...], bool]:
+    """改动文件 → `(targets, 是否走了 drift 回退)`。
 
     回退面要 `cases`：`diff_builds` 的范围由**用例到达的屏**决定（`planner/impact.py`
     的 `drift_targets` 会显式拒绝空 cases）。
+
+    第二个返回值是给 `rule_basis(drift=…)` 的——回退一旦发生，**Plan 的所有分数都建立
+    在那个宽影响面上**，这件事必须随 Plan 落库（见 `rule_basis` 的说明）。
     """
     changed = list(planner_input.changed_files)
     try:
-        return changed_targets(changed, metadata)
+        return changed_targets(changed, metadata), False
     except ImpactMappingError as e:
         if base_metadata is None:
             raise
         notes.append(
             f"metadata 缺文件级归属（{e}）→ 回退 build 间 drift 面"
             f"（base_metadata）；⚠️ 精度损失：drift 是 build 之间的元素变化，"
-            f"比「本次 commit 改了哪些文件」宽")
-        return drift_targets(base_metadata, metadata, cases)
+            f"比「本次 commit 改了哪些文件」宽（这条已随 reasons 落库）")
+        return drift_targets(base_metadata, metadata, cases), True
 
 
-def _case_metas(cases: Sequence[Any]) -> dict[str, TestCaseMeta]:
+def _case_metas(cases: Sequence[TestCase]) -> dict[str, TestCaseMeta]:
     """用例 id → `TestCaseMeta`（`element_ids` 走 P1 的引用收集单点）。
 
     `collect_refs` 已经滤掉 `screen:` 引用（屏引用不是元素引用，`resolve` 也解析不了），
@@ -266,8 +321,10 @@ def _case_metas(cases: Sequence[Any]) -> dict[str, TestCaseMeta]:
             for cid, ids in refs.items()}
 
 
-def plan(planner_input: PlannerInput, *, knowledge, cases: Iterable[Any],
-         metadata: Mapping, repository, llm=None, budget=None,
+def plan(planner_input: PlannerInput, *, knowledge: KnowledgeSources,
+         cases: Iterable[TestCase], metadata: Mapping,
+         repository: RepositoryProtocol, llm: LLMProvider | None = None,
+         budget: LLMBudget | None = None,
          base_metadata: Mapping | None = None) -> PlanResult:
     """设计 §5.3 的编排（**纯逻辑 + 一次可选的 LLM 调用**）。
 
@@ -289,8 +346,8 @@ def plan(planner_input: PlannerInput, *, knowledge, cases: Iterable[Any],
     """
     notes: list[str] = []
     case_list = list(cases)
-    targets = _resolve_targets(planner_input, metadata, base_metadata, case_list,
-                               notes)
+    targets, drift_fallback = _resolve_targets(planner_input, metadata,
+                                              base_metadata, case_list, notes)
 
     if not planner_input.changed_files:
         # 矩阵 #6：空改动 → 空 Plan 并明示（不编造依据）。
@@ -323,12 +380,16 @@ def plan(planner_input: PlannerInput, *, knowledge, cases: Iterable[Any],
     metas = _case_metas(case_list)
     # 候选集 = 影响面内的用例（口径 1）。按用例**原始顺序**遍历，保证同一输入下
     # 未排序阶段的处理顺序也确定（最终顺序由 order_key 全序决定）。
-    candidates = [c for c in case_list if getattr(c, "id", "?") in impact]
+    # `case.id` 直接取属性（不用 `getattr` 兜底）：传错对象时 `"?"` 会让**所有用例塌成
+    # 同一个 id**，Plan 里出现一条 id 为 "?" 的任务而全程无报错——与 P3-1 同形。
+    candidates = [c for c in case_list if c.id in impact]
+    # 历史**一次读全量**再按用例分组（不在循环里逐用例调 `trace_history`）。
+    history = _history_by_case(knowledge) if candidates else {}
 
     unrankable: list[Unrankable] = []
     scored: list[dict] = []
     for case in candidates:
-        cid = getattr(case, "id", "?")
+        cid = case.id
         meta = metas.get(cid) or TestCaseMeta(testcase_id=cid)
         try:
             risk = case_risk(meta, repository, build=planner_input.app_build)
@@ -339,12 +400,13 @@ def plan(planner_input: PlannerInput, *, knowledge, cases: Iterable[Any],
             unrankable.append(Unrankable(
                 testcase_id=cid, reason=f"{type(e).__name__}: {e}"))
             continue
-        rate = failure_rate(knowledge.trace_history({"testcase_id": cid}))
+        rate = failure_rate(history.get(cid, ()))
         score = priority_score(meta, impact, rate, risk)
         scored.append({"case": case, "meta": meta, "risk": risk, "rate": rate,
                        "score": score,
                        "basis": rule_basis(hit=cid in impact, rate=rate,
-                                           risk=risk, score=score)})
+                                           risk=risk, score=score,
+                                           drift=drift_fallback)})
 
     scored.sort(key=lambda e: order_key(e["score"], e["meta"].testcase_id))
     deterministic = [e["meta"].testcase_id for e in scored]

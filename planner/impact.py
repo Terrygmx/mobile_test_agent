@@ -42,6 +42,9 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping
 
+from planner.models import require_paths
+from source.build_diff import diff_builds
+
 __all__ = [
     "ImpactMappingError",
     "changed_targets",
@@ -114,23 +117,13 @@ def _file_index(metadata: Mapping) -> dict[str, tuple[str, ...]]:
 
 
 def _paths(changes: Iterable[str]) -> tuple[str, ...]:
-    """`changes` → 路径元组。**只收 iterable of str**，单个 `str` 显式拒绝。
+    """`changes` → 路径元组。判据在**唯一闸门** `planner.models.require_paths`。
 
-    输入就是 `GitChangeSet.changed_files`（重命名已取旧 + 新、去重保序）。
-
-    ⚠️ 单个字符串**必须拒**：`for p in "a.swift"` 会安静地逐字符迭代出 7 个「路径」，
-    它们全都匹配不到 → 表现为「空 Plan」而不是「你传错了」（P3-1/P3-2 同款：
-    错误落在看不见那一侧）。非 str 的元素同理——绑进 `dict.get` 一条也匹配不到。
+    输入就是 `GitChangeSet.changed_files`（重命名已取旧 + 新、去重保序）。闸门拒两件事
+    （单个字符串 / 非 str 元素），理由写在 `require_paths` 的 docstring 里——这里只是
+    一个**带好 `where` 的转发**，不复制判据。
     """
-    if isinstance(changes, (str, bytes)):
-        raise TypeError(
-            f"changes 必须是**路径的可迭代**，不是单个字符串（got {changes!r}）"
-            f"——传 `GitChangeSet.changed_files`（tuple[str, ...]）")
-    out = tuple(changes)
-    bad = [p for p in out if not isinstance(p, str)]
-    if bad:
-        raise TypeError(f"changes 里必须全是 str，got {bad[:3]!r}")
-    return out
+    return require_paths(changes, where="changes")
 
 
 def changed_targets(changes: Iterable[str], metadata: Mapping) -> tuple[str, ...]:
@@ -188,11 +181,12 @@ def drift_targets(base_metadata: Mapping, metadata: Mapping,
       「旧有新无 / 新有旧无」——它们已在 `added`/`removed` 里（build_diff 的纪律：
       猜测与事实**并存**），所以这里不需要额外处理；
     - ⚠️ **精度损失**：drift 是「build 之间的元素变化」，比「本次 commit 改了哪些文件」
-      **宽**（它不知道哪些变化来自这次改动）。调用方**必须**把这一点写进 Plan 的
-      `reasons`（open question #2 的原文要求），不能只把它记在日志里。
+      **宽**（它不知道哪些变化来自这次改动）。调用方**必须**把这一点写进 **Plan 的
+      `reasons`**（open question #2 的原文要求），**不能只把它记在日志里**——因为
+      `reasons` 是唯一随 `test_plans` **落库**的位置（`save_plan` 只收 `tasks_json`；
+      `PlanResult.notes` 是不落库的过程产物）。`planner/planner.py` 的
+      `rule_basis(drift=True)` 就是这条要求的落点。
     """
-    from source.build_diff import diff_builds      # 只有回退面才需要它，故按需导入
-
     case_list = list(cases)
     if not case_list:
         raise ImpactMappingError(
