@@ -147,6 +147,13 @@ class TraceStep:
     `observed_at` 来自**所属 testcase_run** 的时间：`steps` 表本身没有时间戳
     （P1 schema 如此），所以时间精度到 testcase_run 级——这是可得的最细粒度，
     不假装更细。
+
+    `testcase_id` / `failure_type` 是 Task 2.2（P3-06）**追加**的两个字段——它们
+    本来就在库里（`testcase_runs.testcase_id` / `steps.failure_type`，后者一直是
+    `steps` 的列），只是 `read_trace_steps` 早先没读出来，于是 P3 的
+    `KnowledgeSources.trace_history` 无法按它们过滤。**追加而非重排**：两个新字段
+    都带默认值、放在末尾，既有构造点（全是关键字实参）与消费方（`build_runtime_graph`
+    / `graph.diff`）不受影响。
     """
 
     testcase_run_id: int
@@ -156,3 +163,5 @@ class TraceStep:
     status: str | None = None
     detail: dict = field(default_factory=dict)
     observed_at: str | None = None
+    testcase_id: str = ""
+    failure_type: str | None = None

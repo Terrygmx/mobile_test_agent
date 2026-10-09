@@ -974,3 +974,107 @@ tasks_json`——**没有版本列**，而 `tasks_json` 按列名只装 tasks。
   ② 插 `from planner.models import TestPlan` 进 `agents/models.py` → 扩面后的守卫**真红**
   （修复前 14 passed 全绿）。
 - `-W error::pytest.PytestCollectionWarning` 下 18 passed（收集警告仍为零）。
+
+---
+
+## Task 2.2 完成记录（P3-06 KnowledgeSources 装配 + filters 扩展 + priority_score，2026-10-09）
+
+**Objective**：设计 §5.2 的确定性打分；F3 的装配入口定型。
+
+### 交付
+
+- `knowledge/__init__.py` + `knowledge/retrieval.py`（新）：`build_knowledge(...)`
+  ——**只装配，不新增检索方法**。
+- `planner/prioritizer.py`（新）：`TestCaseMeta` / `priority_score` / `order_key` /
+  三个初版常量。
+- `planner/risk.py`（新）：`case_risk`（**转发** P1 的 `effective_risk`，取用例所涉
+  元素的 max）。
+- `experience/knowledge.py`（改）：`trace_history` 的过滤键从 `{app_build, limit}`
+  扩到 `{app_build, testcase_id, failure_type, limit}` + `screen_id`（fail-loud，见下）。
+- `graph/models.py` + `graph/builder.py`（**改，P2 追加式**）：`TraceStep` 补
+  `testcase_id` / `failure_type`，`read_trace_steps` 把它们读出来（见下面的偏离登记）。
+- `planner/__init__.py`（改）：re-export `prioritizer` / `risk`（仍**不**碰
+  `planner.planner`——那条禁令的理由写进了 docstring）。
+- 测试：`tests/unit/test_prioritizer.py`（**22**）+ `tests/unit/test_knowledge_retrieval.py`
+  （**15**）。
+
+### 打分公式（设计 §5.2 + plan 给的初版数字）
+
+```text
+score = 40 × [用例落在受影响集合里] + 30 × 历史失败率∈[0,1]
+score = max(score, RISK_FLOOR[risk])          # CRITICAL→90 / HIGH→70
+score = clamp(score, 0, 100)                  # 设计 §5.1 的 priority 值域
+```
+
+- **纯函数**（F13）：四入参即全部输入，不读库/不看 LLM/不依赖时间——有专测
+  （重复调用同结果）。
+- **`history` 越界 fail-loud，不静默夹取**：失败率 > 1 是**统计口径的 bug**
+  （分子分母弄反之类），夹到 1 会让「算错了」表现为「历史一直很差」——与
+  `planner/models.py` 对 `priority ∈ [0,100]` 同一条理由。
+- ⚠️ **HIGH 的 70 与「impact 命中 + 历史满」的 70 会打平**（base 上限恰好是
+  40+30=70）。plan 的判据是「CRITICAL 进**顶部区间**」（≥70），不是「HIGH 严格高于
+  所有非 HIGH」；平局按 `order_key` 的 `testcase_id` 字典序裁决。**这条算术后果写进了
+  模块 docstring 并配了专测**——将来调参时它会红，提醒改的人是有意为之还是碰巧。
+- `order_key(score, id) = (-score, id)`：全序、与输入顺序无关（有专测）；**LLM 只许在
+  同一 key 的组内做 tie-break**，跨组顺序由它钉住（矩阵 #5 的判据由 Task 2.3 的编排
+  层执行）。
+
+### ⚠️ 偏离登记 1：`build_knowledge` **没有 `graph store` 参数**
+
+plan 的 Files 写「组合 experience_store/trace_db/**graph store**/cases/app_build」，
+但 P2 的实现**不接受** graph store：`P2KnowledgeSources.graph_query` 用
+`read_trace_steps` + `build_runtime_graph` **从 trace 现建**运行时图——那是 **12.1 的
+定档**（「trace 是运行时图的唯一来源」）。若装配处再传一个 `graph.db` 句柄，就会出现
+**第二个图来源**，正是 12.1 要避免的。故**不设该参数**（也不设一个收了不用的死参数）。
+
+### ⚠️ 偏离登记 2：**必须**顺带改 P2 的 `TraceStep` / `read_trace_steps`
+
+plan 的 Files 只列了 `experience/knowledge.py`，但白名单里的三个键**在 `TraceStep` 上
+不存在**（它只有 `testcase_run_id/step_index/step_type/target_id/status/detail/observed_at`）：
+
+| 键 | 数据在哪 | 处置 |
+|---|---|---|
+| `failure_type` | `steps.failure_type`——**一直是 `steps` 的列**，只是没被读出来 | 追加读入 |
+| `testcase_id` | `testcase_runs.testcase_id`——SQL 里**已经 JOIN 了这张表**，只是没选该列 | 追加读入 |
+| `screen_id` | **哪里都没有**：`steps` 表不记 screen；`target_id` 是**解析后的裸元素 id**（不含屏）；`detail_json` 也没有（`runner._record` 的 payload 只有 step_index/action_type/status/error/latency_ms） | **fail-loud**（见下） |
+
+两个新字段是**追加式**的（带默认值、放在末尾）：既有构造点全是关键字实参、消费方
+（`build_runtime_graph` / `graph.diff`）不读新字段——P2 回归
+（`-k "graph or knowledge or impact"` 126 例）全绿。
+
+### ⚠️ `screen_id`：**fail-loud，不静默放过**
+
+`trace_history({"screen_id": ...})` 会**报错**而不是返回未过滤的结果。理由与该方法自己
+的未知键检查**同一条**：静默接受一个过滤不了的键，等于把「想过滤没过滤」伪装成
+「结果恰好都对」——同一个道理不能对自己网开一面。
+
+**数据源缺口的两条候选修法**（都不在 Task 2.2 范围，需设计层拍板）：
+① 在 `steps` 表加 `screen_id` 列（P1 schema 变更 + recorder 写入点 + 迁移）；
+② 让知识层持有 Repository，用 `target_id → eff.screen` 反查（但知识层是**数据层**，
+引入 Repository 依赖是分层倒退，且漂移元素会解析失败）。
+**谁需要 `screen_id` 过滤谁先处理这一条。**
+
+### `planner/risk.py`：转发而非复制
+
+- `effective_risk` 在模块层 re-export；测试用 **import 级断言**
+  （`planner.risk.effective_risk is executor.policy.effective_risk`）钉住「转发」——
+  光测行为相同**挡不住**「有人抄了一份判定逻辑、恰好结果一样」。
+- 取值 = 用例所涉元素 `effective_risk` 的 **max**（设计 §5.3「不管改动大小」）：取 max
+  而非均值，因为「用例里有 CRITICAL 元素」不该被同用例里的 LOW 元素稀释。
+- **解析不到的元素照原样上抛**（`UnknownReferenceError`），**不跳过、不当 LOW**：一个
+  CRITICAL 元素因漂移而解析失败时，静默按 LOW 计会让它在 Plan 里**沉底**——错误的
+  方向恰好是「看不见」那一侧。容错由调用方显式处理（漂移是 Task 2.3 的职责）。
+
+### 顺带修掉的一处（Task 2.1 同款）
+
+`TestCaseMeta` 名字以 `Test` 开头（设计 §5.2 逐字要求）→ 被 import 进测试模块后 pytest
+会当**测试类**收集 → `__test__ = False`（仓内既有手法）。`-W error::PytestCollectionWarning`
+下 37 passed（零警告）。
+
+### 实测
+
+- 全量 pytest **1492 passed**（Task 2.2 新增 **37**：prioritizer 22 + knowledge 15；
+  上一轮基线 1455 + 37 = 1492）。
+- P2 回归（`-k "graph or knowledge or impact"`）：**126 passed**（`TraceStep` 的追加
+  字段不影响既有消费方）。
+- `-W error::pytest.PytestCollectionWarning` 下两个新文件 **37 passed**（零警告）。

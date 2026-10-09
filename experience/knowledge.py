@@ -111,12 +111,44 @@ class P2KnowledgeSources:
         return affected_testcases(target_id, ref_index(self._cases))
 
     def trace_history(self, filters: dict) -> list:
-        unknown = set(filters) - {"app_build", "limit"}
+        """trace 的 steps 即历史（按 filters 过滤）。
+
+        **过滤键**（Task 2.2 / P3-06 从 `{app_build, limit}` 扩到五个）：
+
+        | 键 | 语义 | 值 |
+        |---|---|---|
+        | `app_build` | 范围（SQL 层，`_read_steps`） | `str` 或 `None`（None = 不过滤） |
+        | `testcase_id` | 该用例的历史（`testcase_runs.testcase_id`） | 同上 |
+        | `failure_type` | 该失败分类的历史（`steps.failure_type`） | 同上 |
+        | `limit` | 取**最后** N 条 | 非负 `int` |
+        | `screen_id` | ⚠️ **不可用**——见下 | — |
+
+        **顺序语义**：其余过滤键**先**应用、`limit` **最后**——`limit=10` +
+        `failure_type=APP_CRASH` 是「最近 10 条崩溃步骤」，不是「最近 10 条步骤里
+        恰好崩溃的那些」。既有调用只传 `app_build`/`limit`，顺序变化对它们无影响。
+
+        ⚠️ **`screen_id` 是 fail-loud 而不是静默放过**：trace 里**没有屏信息**——
+        `steps` 表不记 screen，`target_id` 是**解析后的裸元素 id**（不含屏），
+        `detail_json` 也没有（`runner._record` 的 payload 只有
+        step_index/action_type/status/error/latency_ms）。**静默接受一个过滤不了的键，
+        等于把「想过滤没过滤」伪装成「结果恰好都对」**——那正是本方法上面那条
+        未知键检查要防的事，同一个道理不能对自己网开一面。
+        数据源缺口与两条候选修法登记在 `docs/p3_data_audit.md`（Task 2.2 记录）。
+        """
+        unknown = set(filters) - {"app_build", "screen_id", "testcase_id",
+                                  "failure_type", "limit"}
         if unknown:
             # 过滤键是接口契约的一部分：静默忽略拼错的键会把「想过滤没
             # 过滤」伪装成「结果恰好都对」。
             raise ValueError(f"未知过滤键: {sorted(unknown)}（支持: "
-                             f"app_build, limit）")
+                             f"app_build, testcase_id, failure_type, limit；"
+                             f"screen_id 见 docstring 的说明）")
+        if "screen_id" in filters:
+            raise ValueError(
+                "screen_id 过滤暂不可用：trace 里没有屏信息（steps 表不记 screen，"
+                "target_id 是解析后的裸元素 id，detail_json 也没有）。"
+                "**不静默返回未过滤结果**——要么先按 testcase_id 缩小范围，"
+                "要么等数据源补齐（见 docs/p3_data_audit.md 的 Task 2.2 记录）")
         app_build = filters.get("app_build", _UNSET)
         # 值也过闸门（与下面 limit 同款纪律）：非 str/None 的值会绑进 SQL 的
         # 等值比较、**一条也匹配不到**——「过滤生效了，只是库里没有」与
@@ -126,6 +158,15 @@ class P2KnowledgeSources:
             raise ValueError(
                 f"app_build 必须是 str 或 None，got {app_build!r}")
         steps, _app_id, _build = self._read_steps(app_build)
+        # 逐字段过滤（`None` = 不过滤，与 app_build 同款语义；非 str → fail-loud）
+        for key, attr in (("testcase_id", "testcase_id"),
+                          ("failure_type", "failure_type")):
+            value = filters.get(key, _UNSET)
+            if value is _UNSET or value is None:
+                continue
+            if not isinstance(value, str):
+                raise ValueError(f"{key} 必须是 str 或 None，got {value!r}")
+            steps = [s for s in steps if getattr(s, attr) == value]
         limit = filters.get("limit")
         if limit is not None:
             if not isinstance(limit, int) or limit < 0:
