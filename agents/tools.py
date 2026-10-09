@@ -70,6 +70,9 @@ Agent（Planner/Explorer/Diagnosis/Subagent）
 与 `steps.failure_type` 对账时，**读 `ToolResult.step_failure_type`**——它把两处
 合并成一个读取口，不必让每个调用方都记得「两处查找」。
 
+（两处**当前**由调用点形态保证不同时存在；`step_failure_type` 取**外层优先**，
+不是「互斥」——见该属性的 docstring。）
+
 ### 判定类工具的 `value` 词汇（一套，不是三套）
 
 有判定的工具在 `value` 里放 **`passed: bool`**：`assert_*`（断言是否通过）、
@@ -222,9 +225,12 @@ class ToolResult:
     def step_failure_type(self) -> str | None:
         """与 `steps.failure_type` 对齐的**唯一读取口**（两处落点在此合并）。
 
-        外层的「动作没做成」优先，其次内层的「判定结论」；两者互斥（见类
-        docstring 的表），所以 `or` 不会掩盖任何一类。M2 的 Agent 循环把工具
-        结论映射进 `agent_trace` 时读这个属性即可。
+        **外层优先、内层作为回退**——由**当前的调用点形态**保证两者不同时存在
+        （见类 docstring 的表），但**没有机械守卫**：若真有一天两处都有值，
+        外层胜出、内层被静默掩盖。措辞刻意写「优先 / 回退」而不是「互斥」
+        （review_p3_task14 小观察 1）：后者会让人以为这个属性不可能丢掉一类。
+
+        M2 的 Agent 循环把工具结论映射进 `agent_trace` 时读这个属性即可。
         """
         if self.failure_type is not None:
             return self.failure_type

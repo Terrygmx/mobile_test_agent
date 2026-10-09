@@ -46,7 +46,11 @@ __all__ = ["FileChange", "GitChangeSet", "GitDiffError", "changed_files"]
 # 未列出的字母（`U` unmerged / `X` unknown / `B` broken pair）不丢：它们仍在
 # `GitChangeSet.changes` 里，只是不落进四个分类视图（设计 §5.1 只要「改了哪些
 # 文件」，分类是给人看的；把未知状态硬塞进某个桶反而是编造）。
-_ADDED = frozenset({"A", "C"})       # C（复制）也**新建了一个文件**
+#
+# ⚠️ `C` 单独成常量：`_ADDED` 与 `_parse_name_status_z` 都要判它，写两处 `"C"`
+# 就会漂移（review_p3_task14 小观察 2：「同一概念只许一处实现」）。
+_COPIED = frozenset({"C"})
+_ADDED = frozenset({"A"}) | _COPIED  # C（复制）也**新建了一个文件**
 _MODIFIED = frozenset({"M", "T"})    # T = type change（普通文件 ↔ 符号链接）
 _DELETED = frozenset({"D"})
 _RENAMED = frozenset({"R"})
@@ -155,7 +159,7 @@ def _parse_name_status_z(raw: str, *, where: str) -> tuple[FileChange, ...]:
     while i < len(tokens):
         status = tokens[i][:1]
         i += 1
-        if status in _RENAMED or status == "C":
+        if status in _RENAMED or status in _COPIED:
             if i + 1 >= len(tokens):
                 raise GitDiffError(
                     f"{where}: git 输出被截断（{status} 后面缺路径）：{raw!r}")

@@ -1,4 +1,9 @@
-"""vcs.py — git 调用的**唯一实现**（Task 1.4 / P3-04）。
+"""vcs.py — git 调用的**统一实现**（Task 1.4 / P3-04；**新代码一律走这里**）。
+
+⚠️ 不是「唯一」：`source/metadata.py` 与 `tracer/recorder.py` 的 `_git_commit` 仍各自
+`subprocess` 调 git（P1 存量，且形态不同——见下面「为什么要有这个模块」）。
+首句只说「统一」不说「唯一」，是因为扫首句的人拿到的印象必须与实测一致
+（review_p3_task14 P3-3）。
 
 抽自 `experience/promoter.py::_git`（Task 1.4 的重构要求：promoter 改调本函数，
 **行为与报错消息逐字不变**——那是 P2 的回归保证）。`source/git_diff.py` 也用它。

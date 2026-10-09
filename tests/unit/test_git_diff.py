@@ -16,7 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from source.git_diff import GitChangeSet, GitDiffError, changed_files
+from source.git_diff import (FileChange, GitChangeSet, GitDiffError,
+                             changed_files)
 from source.vcs import GitError, run_git
 
 # 与 test_promoter.py 同款：HOME 指到 tmp_path → 不读用户 global gitconfig
@@ -180,20 +181,38 @@ def test_git_error_is_a_runtime_error():
 # --- 解析健壮性（`-z` 与 `-M` 的存在理由） ------------------------------------
 
 
-def test_rename_detection_is_independent_of_user_config(repo, tmp_path):
-    """用户把 `diff.renames` 关掉，重命名仍必须被识别为 `R`。
+@pytest.mark.parametrize("config_path", ["global", "local"])
+def test_rename_detection_is_independent_of_user_config(repo, tmp_path,
+                                                        monkeypatch,
+                                                        config_path):
+    """用户把 `diff.renames` 关掉（**global 或仓库本地**），重命名仍必须是 `R`。
 
     git 2.9 起默认开，但那是**用户配置**——有人在 `~/.gitconfig` 里关掉，
     「重命名分类正确」就会在**他的机器上**静默不成立。故显式传 `-M`。
+
+    ⚠️ **global 通路怎么走**（review_p3_task14 P3-2）：`run_git` 用
+    `subprocess.run(...)` **不传 `env=`**（继承 `os.environ`），所以**被测代码**
+    看到的是真实 HOME / 真实 global gitconfig；而 fixture 的 `HOME=tmp_path`
+    只作用于测试**自己的** `_git` helper（它显式传 `env=`），**管不到被测代码**。
+    上一版只写了仓库本地 `config diff.renames false`——钉的是**另一条**配置通路，
+    与 docstring 声称的 `~/.gitconfig` 名实不符。现在用 `GIT_CONFIG_GLOBAL` 指到
+    一份真配置（git 2.54 实测：无 `-M` → `D`+`A`，带 `-M` → `R100`），global
+    路径才算真被走过。
     """
-    _git(repo, tmp_path, "config", "diff.renames", "false")
+    if config_path == "global":
+        cfg = tmp_path / "gitconfig"
+        cfg.write_text("[diff]\n\trenames = false\n", encoding="utf-8")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(cfg))
+    else:
+        _git(repo, tmp_path, "config", "diff.renames", "false")
+
     (repo / "keep.txt").rename(repo / "moved.txt")
     _git(repo, tmp_path, "add", "-A")
     _git(repo, tmp_path, "commit", "-qm", "rename only")
 
     cs = changed_files(repo, base="HEAD~1")
     assert cs.renamed == (("keep.txt", "moved.txt"),), \
-        "显式 -M 必须压过用户的 diff.renames=false"
+        f"显式 -M 必须压过 {config_path} 配置里的 diff.renames=false"
     assert cs.added == () and cs.deleted == ()
 
 
@@ -214,18 +233,46 @@ def test_filenames_with_tabs_and_newlines_parse_correctly(repo, tmp_path):
     assert set(cs.added) == {weird_tab, weird_nl}
 
 
-def test_copy_contributes_only_the_new_path(repo, tmp_path):
-    """复制（`C`）只把**新路径**算作改动：源文件内容没变，不该被算受影响。"""
-    _git(repo, tmp_path, "config", "diff.renames", "true")
+def test_copy_is_reported_as_add_under_shipped_flags(repo, tmp_path):
+    """shipped flags（`--name-status -z -M`）下，复制会被报成 **`A`** 而不是 `C`。
+
+    探针实测：`-C` 单档只看「被修改的文件」作复制源，`-C -C` / `--find-copies-harder`
+    才报 `C100`；用户配置 `diff.renames=copies` 也逼不出 `C`。**所以 `C` 分支在
+    shipped flags 下不可达**——它的守卫只能在纯函数层（见下一条）。
+    """
     (repo / "copy.txt").write_text((repo / "edit.txt").read_text())
     _git(repo, tmp_path, "add", "-A")
     _git(repo, tmp_path, "commit", "-qm", "copy")
 
-    cs = changed_files(repo, base="HEAD~1", head="HEAD")
-    # `git diff` 对「新增一个内容相同的文件」默认按 A 报（C 需要 -C）；
-    # 两种形态都断言：新增只收新路径，复制也只收新路径。
-    assert cs.added == ("copy.txt",) or cs.renamed == ()
-    assert "edit.txt" not in cs.changed_files
+    cs = changed_files(repo, base="HEAD~1")
+    assert cs.added == ("copy.txt",)
+    assert cs.renamed == ()
+    assert "edit.txt" not in cs.changed_files, "源文件没变，不该算受影响"
+
+
+def test_copied_status_yields_only_the_new_path():
+    """复制（`C`）只把**新路径**算作改动：源文件内容没变，不该被算受影响。
+
+    `_parse_name_status_z` 是**纯函数**——直接喂 git 的 `-z` 形状，不必依赖 git
+    真的产出 `C`（shipped flags 下它不可达，见上一条）。
+
+    ⚠️ 这是 `C` 分支**唯一**的守卫（review_p3_task14 P3-1）：原来的 git 层断言
+    是 `cs.added == (...) or cs.renamed == ()`——右分支恒真（`C` 不在 `_RENAMED`
+    里），整条断言**不可能失败**；把 `_ADDED` 换成 `{"C"}` 它照样绿。声称「有
+    专测」而实际恒真，是「文档声称的能力必须有落点」的第 4 次。
+    """
+    from source.git_diff import _parse_name_status_z
+
+    changes = _parse_name_status_z(
+        "C100\x00edit.txt\x00copy.txt\x00", where="probe")
+    assert changes == (
+        FileChange(status="C", path="copy.txt", old_path="edit.txt"),)
+
+    cs = GitChangeSet(repo_root=".", base="b", head="h", changes=changes)
+    assert cs.changed_files == ("copy.txt",), "旧路径不进（源文件没变）"
+    assert cs.added == ("copy.txt",)
+    assert cs.renamed == ()
+    assert len(cs) == 1
 
 
 def test_changeset_is_deterministic(repo, tmp_path):

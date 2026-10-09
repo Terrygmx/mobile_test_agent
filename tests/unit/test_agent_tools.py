@@ -20,7 +20,8 @@ import pytest
 from agents.models import AssetTier
 from agents.tools import (ALLOWED_TOOLS, BANNED_TOOLS, GUARDED_TOOLS, NOT_WIRED,
                           TOOL_METHODS, AgentToolkit, ToolDependencyError,
-                          ToolNotWired, ToolViolation, ToolkitAuditError)
+                          ToolNotWired, ToolResult, ToolViolation,
+                          ToolkitAuditError)
 from executor.guard import EnvKind, Guard
 from tests.fault_injection.fi_support import FakeDS, FakeExecutor, drift_repo
 
@@ -447,7 +448,7 @@ def test_assert_text_maps_tool_vocabulary_to_6_2_conditions(repo):
 def test_step_failure_type_merges_both_places(repo):
     """`step_failure_type` 是**唯一读取口**：外层「动作没做成」+ 内层「判定结论」。
 
-    两处互斥（见 `ToolResult` docstring 的表），所以 `or` 不掩盖任何一类。
+    当前由调用点形态保证两处不同时存在（见 `ToolResult` docstring 的表）。
     M2 的 Agent 循环把工具结论映射进 `agent_trace` 时读这个属性即可——不必让
     每个调用方都记得「两处查找」。
     """
@@ -469,6 +470,20 @@ def test_step_failure_type_merges_both_places(repo):
     # 成功路径：两处都没有
     r3 = _toolkit(repo).call("swipe", direction="up")
     assert r3.step_failure_type is None
+
+
+def test_step_failure_type_prefers_the_outer_place():
+    """两处**同时**有值时（当前调用点不产出这种，但若产出）**外层优先**。
+
+    措辞是「优先 / 回退」而不是「互斥」（review_p3_task14 小观察 1）：互斥没有
+    机械守卫（AST 扫 3 个 `ToolResult(...)` 构造点，无一处同写两处），而这条断言
+    至少把「两处都有时谁赢」钉成**可预期**的行为。
+    """
+    both = ToolResult(tool="wait", tier=AssetTier.READ_ONLY, ok=False,
+                      failure_type="OUTER", value={"failure_type": "INNER"})
+    assert both.step_failure_type == "OUTER"
+    assert ToolResult(tool="x", tier=AssetTier.READ_ONLY,
+                      value={"failure_type": "INNER"}).step_failure_type == "INNER"
 
 
 def test_assert_failure_type_does_not_depend_on_the_exception_message(repo):

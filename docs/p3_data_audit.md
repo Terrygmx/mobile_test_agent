@@ -746,3 +746,80 @@ P3-2 的先例）。
 **Gate M1 的 5 条判据全部满足**：agent.db 迁移幂等 ✅ / 单写者生效（异常路径已修）✅ /
 policy.yaml + production 一票否决 ✅（函数层；CLI 端到端归 Task 2.4）/
 工具注册表静态断言进 CI ✅ / `source/git_diff.py` ✅。→ 打 tag **`checkpoint-p3-m1`**。
+
+---
+
+## Task 1.4 评审修订记录（review_p3_task14 收口，2026-10-09）
+
+评审「有条件通过 — **0×P2** + 3×P3」，上一轮 `16808d0` 的 1×P2 + 3×P3 **4/4 全清**，
+**Gate M1 五条判据逐条有落点**。三条 P3 都出在**同一处**：**「声称的验证范围」**——
+一条恒真的断言、一个自称钉 `~/.gitconfig` 实际只钉了仓库本地 config 的测试、一句自称
+「唯一实现」但同包里还有第二处的 docstring。
+
+### P3-1 `test_copy_contributes_only_the_new_path` 的断言**恒真**，而 `C` 在 shipped flags 下不可达
+
+- 症状：`assert cs.added == ("copy.txt",) or cs.renamed == ()` —— `C` 不在 `_RENAMED`
+  里，所以右分支**恒真**，整条断言**不可能失败**（把 `_ADDED` 换成 `{"C"}` 它照样绿）。
+- 评审探针（C 可达性）：`extra=()` → `A|copy.txt`；`-C`（单档）→ 仍 `A`；
+  `-C -C` / `--find-copies-harder` → `C100|edit.txt|copy.txt`；用户配置
+  `diff.renames=copies` 也逼不出 `C`。**即 `C` 在 shipped flags 下不可达**。
+- 连带：`_ADDED` 的 `"C"` 与解析器的 `status == "C"` 分支是**防御性死代码**；而模块
+  docstring 决定 3、提交信息、本审计文档都写「复制（C）…**专测**」——**声称超出验证范围**。
+  这是 `MEMORY.md` §5「文档声称的能力必须有落点」的第 4 次（前三次：`--agent-db` /
+  `args.policy` / 「都经 `agents/tools.py`」）。
+- 修法（采纳评审的**推荐**项 = 加真测，而不是撤声称）：
+  1. git 层那条改成 `test_copy_is_reported_as_add_under_shipped_flags`（**删掉恒真的
+     `or`**，断言 `added == ("copy.txt",)` / `renamed == ()` / 源文件不进 `changed_files`），
+     并把「`C` 在 shipped flags 下不可达」写进 docstring（这正是纯函数测存在的理由）；
+  2. 新增 `test_copied_status_yields_only_the_new_path`——`_parse_name_status_z` 是**纯函数**，
+     直接喂 `"C100\x00edit.txt\x00copy.txt\x00"`，断言 `FileChange(status="C",
+     path="copy.txt", old_path="edit.txt")` 且 `changed_files == ("copy.txt",)`（旧路径不进）。
+     这是 `C` 分支**唯一**的守卫。
+- **探针复现**：把 `changed_files` 改成「复制也收旧路径」→
+  `test_copied_status_yields_only_the_new_path` **真红**（修复前那条恒真断言不会红）。
+
+### P3-2 `-M` 的钉子自称钉 `~/.gitconfig`，实际只钉了**仓库本地** config
+
+- 症状：`run_git` 的 `subprocess.run(...)` **不传 `env=`** → 被测代码继承 `os.environ`、
+  看到**真实 HOME / 真实 global gitconfig**；而 fixture 的 `HOME=tmp_path` 只作用于测试
+  **自己的** `_git` helper（它显式传 `env=`），**管不到被测代码**。测试里那句
+  `git config diff.renames false` 写进的是**仓库本地** `.git/config` → 与 docstring
+  声称的「`~/.gitconfig`」**名实不符**。
+- 后果：这是全模块**唯一**在钉「用户配置不该改变结论」的地方，却钉的是另一条通路；
+  一旦有人为隔离给 `run_git` 加 `env=`，它会**静默失去意义**。
+- 修法：`monkeypatch.setenv("GIT_CONFIG_GLOBAL", <一份含 [diff] renames=false 的文件>)`
+  ——**实测 git 2.54 生效**（无 `-M` → `D`+`A`，带 `-M` → `R100`）；并**参数化**
+  `["global", "local"]` 两条配置通路都钉。
+- **探针复现**：去掉 `-M` → `test_rename_detection_is_independent_of_user_config[global]`
+  与 `[local]` **两条都红**（修复前只有 local 那条是"真走过"的）。
+
+### P3-3 `source/vcs.py` 首句自称「git 调用的**唯一实现**」，而同包里还有第二处
+
+- 症状：首句「唯一实现」，而实测全仓 `subprocess.run(["git"…` 有 3 处
+  （`vcs.py` + `source/metadata.py:52` + `tracer/recorder.py:107`）——**第二个实现就在
+  同一个 `source/` 包里**。同文件第 15 行**已经披露**了范围（「本次只收敛 promoter 那一条
+  ……不顺手改」），审计文档也登记了，所以**不是隐瞒**；问题只在**首句**：扫首句的人拿到的
+  印象与实测不符。
+- 修法（1 行）：首句改「**统一实现**（新代码一律走这里）」，并加一句「⚠️ 不是「唯一」：
+  `source/metadata.py` 与 `tracer/recorder.py` 的 `_git_commit` 仍各自 subprocess 调 git
+  （P1 存量）」——范围披露保留在下面，只把首句对齐实测。
+
+### 小观察（评审标「不建议单独立项」）—— 两条都改了
+
+| 观察 | 处置 |
+|---|---|
+| `step_failure_type` 的「两者互斥」没有机械守卫（AST 扫 3 个 `ToolResult(...)` 构造点，无一处同写两处） | ✅ 措辞改成「**外层优先、内层作为回退**」并明写「**没有机械守卫**：若两处都有值，外层胜出、内层被静默掩盖」；模块 docstring 同步；补 `test_step_failure_type_prefers_the_outer_place` 把「谁赢」钉成**可预期**行为 |
+| `"C"` 在模块里有两处落点（`_ADDED` 与解析器的裸字面量） | ✅ 提 `_COPIED = frozenset({"C"})`，`_ADDED = frozenset({"A"}) \| _COPIED`，解析器改判 `status in _COPIED`（同一概念一处实现） |
+
+另两条观察**留 M2**（评审也未要求本任务处理）：`changed_files` 目前生产零调用者（边界
+如实）；`GitChangeSet.head` 记的是传入的 ref 串而非解析后的 SHA（M2 若要做「Plan 可追溯
+到确定的 commit」需额外一次 `rev-parse`）。
+
+### 实测
+
+- 全量 pytest **1437 passed**（本轮 +3：`test_git_diff.py` 17→**19**、
+  `test_agent_tools.py` 55→**56**；1434 + 3 = 1437）。
+- **探针复现两条修复**：① 让「复制也收旧路径」→ C 分支的纯函数测试**真红**；
+  ② 去掉 `-M` → global 与 local **两条都红**。
+- 恒真断言残留检查：`or cs.renamed == ()` 与 `pytest.raises(Exception)` 只出现在
+  **docstring/注释的说明文字**里（描述被删掉的东西），无实际断言残留。
