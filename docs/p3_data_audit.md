@@ -3190,6 +3190,25 @@ P1-1 把「前置错误不再 traceback」修在 `graph_query` 那一侧，而 `
 ⑦ 迁移对既有行的回填只在新建库路径验证；⑧ `git revert` 在脏工作区的行为是
 git 2.54 实测，其他版本可能不同。
 
+### 修订后实测（2026-10-10，tag 前）
+
+- 全量 `pytest tests`（macOS）：**1866 passed / 0 failed**（= 1857 + 本轮新增
+  钉子 9 条：P1-A ×1、P1-B ×2、P2-C ×1、P2-E ×1、P3-F 参数化后 ×4）。过程中
+  本仓自己的 `test_no_duplicate_top_level_definitions` 抓到一次真事故：
+  `test_rollback_survives_a_dirty_staging_area` 被追加了两份（编辑工具重放）——
+  **守卫确实在工作**（MEMORY §5.D 的教训不是白记的）。
+- **M3 Gate `phase0/verify_p3_m3.py` → exit 0**，**11/11 PASS**；G6 的新判据
+  （失败 reject 前后决策四列快照对比）真跑，G8 复跑全量 1866。
+- **AST 守卫探针**（`out/probe_ast.py`，判红以 **pytest 退出码**为准）：7 种
+  规避形态（嵌套未调用函数 / `if _GATE_DISABLED:` / 不可达 except / lambda /
+  `if False:` / `while 0:` / 删真调用）**逐一 1 red**，基线与还原 0 red / OK。
+  ⚠️ 过程教训：第一版探针按「输出里有 `N failed` 文本」判红，正则落空把**真红
+  全部误报成 0 red**——判据要钉在机器可依赖的信号（退出码）上，不是输出措辞上。
+- P1-A / P1-B / P2-C 的钉子各配 A/B 探针（还原修法 → 各 1 red），探针后
+  `git diff --stat` 为空。
+- **收口**：`docs/handover.md` §9 刷到 M3 收口态 → **tag `checkpoint-p3-m3`
+  打在 `84c47c9`**（round 2 修订提交；tag 不可再动）。
+
 ### 教训（已并入 MEMORY §5）
 
 - **修一条真缺陷时，要问「这条修法覆盖它声称的**全部输入**吗」**：P1-1 在
