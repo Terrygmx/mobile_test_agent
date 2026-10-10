@@ -1990,9 +1990,14 @@ SKIP」）。
    两处指纹输入形状不同（XML `page_source` vs step 序列），字面同一函数不可行；
    抽 `source/hashing.py::stable_hash`，规范化（排序 / 去重 / 顺序 / 字段编码）
    留在各自调用方。红线不变：**禁相似度算法**。
-2. **三个分量、每个步骤恰好落入一个分量**：`screens`（屏目标的 wait / assertion /
-   postcondition）、`actions`（动作步骤，含 value）、`assertions`（**element 目标**
-   的 wait / assertion / postcondition）。分量内保序，分量间不保序。
+2. **三个分量；落点按「这件事是什么」分，不是按步骤数**（⚠️ **原写「每个步骤恰好
+   落入一个分量」为假，review_p3_task33 P3-2 实测证伪，已改**）：`actions`（动作
+   步骤本身，含 value）、`screens`（**屏目标**的 wait / assertion，以及动作的
+   postcondition **当目标是屏**）、`assertions`（**element 目标**的 wait /
+   assertion，以及动作的 postcondition **当目标是 element**）。
+   **带 `postcondition` 的动作步骤落两个分量**（动作进 actions，到达点/观测按目标
+   类型进 screens/assertions）——真语料 `login_again_001` / `logout_001` 各 1 处。
+   分量内保序，分量间不保序。
 3. **token 用 `repr(元组)` 而非手工拼接**：元组 repr 自带定界（括号 + 引号转义），
    字段里含 `|` / `:` / `,` 也不会与相邻 token 粘连。**有测试钉住**（见 A/B 探针 B）。
 4. **不进指纹的字段**：`id` / `name` / `suite` / `tags` / `precondition` / `cleanup`
@@ -2013,6 +2018,10 @@ SKIP」）。
   （两个分量各自相同）。真语料无「把独立步骤对调」的用例；Task 3.4 若产生此类
   形态，改为保留全局顺序（登记）。
 - **`postcondition` 无 `expected` 字段**，element 目标的 token 里以空串占位。
+- ⚠️ **`precondition` 不进指纹 → 真语料已有 2 对同指纹**（口径于 round 1 拍板，
+  详见下方「评审修订记录」修订 2）：`reset_logout_001` vs `login_001`（步骤逐字
+  相同、仅 `reset` 不同）与 `search_001` vs `search_filter_001`（连 precondition
+  都相同）。前者是**已知且接受**的代价，Task 3.4 接线后若 SKIP 掉它则升级 P2。
 
 ### 实测
 
@@ -2050,6 +2059,75 @@ SKIP」）。
   （见 `docs/windows_dev_notes.md` §2）。
   **已核销（2026-10-10，macOS）**：`pytest tests` → **1685 passed / 0 failed**（exit 0），
   6 条 POSIX-only 测试在 macOS 上全绿。
+
+---
+
+## Task 3.3 评审修订记录（round 1，2026-10-10）
+
+**核销对象**：`review/review_p3_task33_2026-10-10.md`（对 `1ede89f` 的独立两段评审）。
+结论 **通过（spec 合规）+ 3×P3 + 3 条小观察、0×P2、0 回归**；三条 P3 本轮**全部修订**。
+
+### 修订 1（P3-1）：`_screen_tokens` 的 **wait** 分支零覆盖 + 测试名实不符
+
+**缺陷**：`test_screen_wait_polarity_changes_fingerprint` 的 docstring 说「`screen:X
+exists` 与 `not_exists` 是不同用例」，实际改的是 **`steps[6]`（`AssertionStep`）**，
+于是钉住的是 **assertion** 分支，**wait** 分支的 `w.condition` 零测试——把
+`out.append(repr(("wait", w.target.id, w.condition)))` 的 `w.condition` 换成常量，
+**19 passed 全绿**（评审探针 E2 实测 0 red）。
+
+**修法**：该测试改回 `steps[5]`（真正的 `WaitStep`），**并补一条独立的 assertion
+分支钉子**——两侧各钉一条，删任一侧的分支都至少红一条。
+
+### 修订 2（P3-3）：`precondition` 不入指纹的**代价**未登记 + 无钉子（**用户拍板**）
+
+**事实**：真语料 20 例**已有 2 对同指纹**——`reset_logout_001`（`reset: LOGOUT`）vs
+`login_001`（`reset: RELAUNCH`）**步骤逐字相同、仅 `precondition` 不同**；
+`search_001` vs `search_filter_001` **连 precondition 都相同**（语料里真的冗余）。
+
+**拍板（用户，2026-10-10）**：**`precondition`（含 `reset`）不进指纹**。理由：
+`precondition` 描述「**怎么起跑**」，不描述「**做什么**」——与 `id` / `name` / `suite`
+同类，否则同一用例换个 `reset` 策略或换个 suite 就会被判成新用例而绕过去重。
+代价是第一对同指纹**已知且接受**（该 `reset` 维度目前无自动消费者）。
+
+**修法**：① docstring 的「已登记的边界」段写明该碰撞与口径；② 补
+`test_precondition_does_not_affect_fingerprint`（把 `reset` 纳入指纹 → 必红）；
+③ 补 `test_real_corpus_has_a_known_fingerprint_collision` **故意钉住这个碰撞**
+（含前提核验：两条用例确实只差 precondition）——将来谁把 `reset` 纳入指纹、或改这两条
+语料，它会红，逼人回到口径重新拍板，而不是让 SKIP 悄悄发生。
+
+### 修订 3（P3-2）：docstring / 审计称「每个步骤恰好落入一个分量」**为假**
+
+**事实**：带 `postcondition` 的 `ActionStep` **同时落两个分量**（动作进 `actions`，
+`postcondition` 按目标类型进 `screens` / `assertions`）；真语料 `login_again_001` /
+`logout_001` 各 1 处（复核吻合）。
+
+**修法**：`candidates/fingerprint.py` 的落点表改为「**按目标类型**分」并把「动作 +
+postcondition 落两个分量」写成显式规则；本文件「决策记录 #2」同步改写（**不改行为**
+——这是声称与实现对齐，不是行为变更）。
+
+### 小观察的处置（评审明示不单独立项）
+
+1. `docs/windows_dev_notes.md` §2 第 2 条的**归因文字**笼统（真机制是 `{repo_root!r}`
+   的 `repr` 把反斜杠转义成 `\\`，不是「`str()` 用了反斜杠」）——**下一轮顺手改**。
+2. `test_fingerprint` 无生产调用者，docstring 用「用途」措辞——**可接受，不改**。
+3. `candidates/__init__.py` 的将来时文件清单——**符合 MEMORY §5.C 写法，留着**。
+
+### 修订后实测
+
+- 全量 pytest **1691 passed**（1688 + 3 例：`test_test_fingerprint.py` 19 → **22**）。
+- A/B 探针（每次改完还原 → 清 `__pycache__` → 核对 md5）：**E2** wait 条件改常量 →
+  1 red（修订前 0 red）；**E2b** 删 screen-wait 分支整体 → 1 red；**E4** 删
+  screen-assertion 分支整体 → 1 red（新钉子独立成立）；**把 `precondition` 纳入指纹**
+  → 2 red；**改真语料 `reset: LOGOUT`→`RELAUNCH`** → 1 red（碰撞钉的第二条路径）。
+
+### 教训（已并入 MEMORY §5）
+
+- **测试名里的「wait」可能改的是 assertion 步**：**测试名与它实际触碰的分支要对账**
+  ——写「守卫某分支」的测试时，**先跑一次 mutant 确认它真的钉住了那个分支**（本仓
+  §5.C 形态⑦的姊妹形态：名字钉一处、实际钉另一处，两处都不算被覆盖）。
+- **「同一个概念只许一处实现」也适用于「口径」**：`precondition` 不进指纹这个口径
+  出现在 docstring / 审计 / 测试三处，任何一处漂移都会让「已知的 SKIP」重新变成意外
+  ——用一条**故意钉住碰撞**的测试把它们绑在一起。
 
 ---
 

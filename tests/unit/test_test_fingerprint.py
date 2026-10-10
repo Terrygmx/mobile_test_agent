@@ -75,6 +75,44 @@ def test_candidate_provenance_fields_do_not_affect_fingerprint():
     assert fingerprint(a) == fingerprint(b)
 
 
+def test_precondition_does_not_affect_fingerprint():
+    """`precondition`（含 `reset`）描述「**怎么起跑**」，不描述「做什么」→ 不进指纹。
+
+    与 `id` / `name` / `suite` / `tags` 同类：否则同一条用例换个 `reset` 策略、
+    或换进另一个 suite，就会被判成「新用例」而绕过去重。
+    """
+    a = _case("c")                                  # precondition = {}
+    b = _case("c", precondition={"reset": "LOGOUT"})
+    c = _case("c", precondition={"reset": "RELAUNCH"})
+    assert fingerprint(a) == fingerprint(b) == fingerprint(c)
+
+
+def test_real_corpus_has_a_known_fingerprint_collision():
+    """⚠️ **登记一个已知且已接受的边界**（review_p3_task33 P3-3，口径已拍板）。
+
+    真语料 `reset_logout_001`（`reset: LOGOUT`）与 `login_001`（`reset: RELAUNCH`）
+    **步骤逐字相同、仅 `precondition` 不同** → 同指纹 → Task 3.4 的去重会 **SKIP
+    掉其中一条**（「LOGOUT 重置后登录」这条重置策略回归不再被生成）。
+
+    这条测试**故意把这个碰撞钉住**：将来若有人把 `reset` 纳入指纹（或改动这两条
+    语料），它会红，从而逼人回到 `candidates/fingerprint.py` 的边界段与审计记录
+    重新拍板——而不是让这个 SKIP 悄悄发生。
+    """
+    import yaml
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    def _real(rel: str) -> object:
+        return parse_testcase_dict(
+            yaml.safe_load((root / rel).read_text(encoding="utf-8")))
+    logout = _real("suites/regression/reset_logout_001.yaml")
+    login = _real("suites/smoke/login_001.yaml")
+    # 前提核验：两条用例确实只差 precondition（否则这条测试测的是别的东西）
+    assert logout.precondition != login.precondition
+    assert [s.model_dump() for s in logout.steps] == \
+        [s.model_dump() for s in login.steps]
+    assert fingerprint(logout) == fingerprint(login)
+
+
 def test_deterministic():
     a = _case("login_001")
     assert fingerprint(a) == fingerprint(a)
@@ -100,7 +138,27 @@ def test_screen_target_change_changes_fingerprint():
 
 
 def test_screen_wait_polarity_changes_fingerprint():
-    """`screen:X exists` 与 `screen:X not_exists` 是不同用例。"""
+    """`wait_for screen:X exists` 与 `wait_for screen:X not_exists` 是不同用例。
+
+    ⚠️ **改的必须是 `steps[5]`（`WaitStep`）**：`_case()` 的 `steps[6]` 是
+    `AssertionStep`，改它会钉到 `_screen_tokens` 的 **assertion** 分支，让
+    **wait 分支的 `w.condition` 零覆盖**——原版就是这么写的，名实不符
+    （review_p3_task33 P3-1：改 `w.condition` 为常量 → 19 passed 全绿）。
+    """
+    a = _case("c")
+    b = _case("c")
+    b.steps[5] = _one_step(
+        {"wait_for": {"target": "screen:HomeView", "condition": "not_exists",
+                      "timeout": 10}})
+    assert fingerprint(a) != fingerprint(b)
+
+
+def test_screen_assertion_polarity_changes_fingerprint():
+    """`assertion screen:X exists` 与 `... not_exists` 是不同用例。
+
+    assertion 分支的**独立**钉子——与上面那条 wait 分支**各钉一侧**，
+    删任一侧的分支都至少红一条（P3-1 之前这两侧由同一条测试假装覆盖）。
+    """
     a = _case("c")
     b = _case("c")
     b.steps[6] = _one_step(

@@ -20,13 +20,19 @@ test_fingerprint(tc) = stable_hash([
 ])
 ```
 
-**每个步骤恰好落入一个分量**，分量内保持步骤顺序：
+**落点规则**（⚠️ **不是**「每个步骤恰好落入一个分量」——review_p3_task33 P3-2
+实测证伪了原措辞），分量内保持步骤顺序：
 
 | 步骤形态 | 落入 | token（`repr` 元组） |
 |---|---|---|
-| `wait_for screen:X` / `assertion screen:X` / `postcondition screen:X` | screens | `(kind, X, condition)` |
 | 动作步骤（launch_app / terminate_app / tap / input / swipe / back） | actions | `(action, "type:id", direction, value)` |
-| **element 目标**的 wait / assertion / postcondition | assertions | `(kind, condition, "type:id", expected)` |
+| **屏目标**的 `wait_for` / `assertion` | screens | `(kind, X, condition)` |
+| **element 目标**的 `wait_for` / `assertion` | assertions | `(kind, condition, "type:id", expected)` |
+| 动作的 `postcondition`（按**目标类型**） | screens（屏）/ assertions（element） | `(kind, …)` |
+
+⚠️ **带 `postcondition` 的动作步骤落两个分量**：动作本身是行为 → `actions`；
+`postcondition` 声明的到达点 / 观测是另一件事 → 按目标类型进 `screens` / `assertions`。
+真语料 `login_again_001` / `logout_001` 各有 1 处此形态（`tap` + `postcondition screen:X`）。
 
 token 用 `repr(元组)` 而非手工拼接：元组 repr 自带定界（括号 + 引号转义），
 字段里含 `|` / `:` / `,` 也不会与相邻 token 粘连——「两个不同用例撞成同一
@@ -49,6 +55,19 @@ token 用 `repr(元组)` 而非手工拼接：元组 repr 自带定界（括号 
   故可入指纹。
 - **`expected` 参与断言 token**：`text_equals "Welcome"` 与 `text_equals "Hi"`
   是两条不同的用例。
+- ⚠️ **`precondition`（含 `reset`）不进指纹 → 真语料已有同指纹用例**（已拍板，
+  见 `docs/p3_data_audit.md` Task 3.3 修订记录）：真语料 **20 例里有 2 对同指纹**：
+  - `reset_logout_001`（`reset: LOGOUT`）vs `login_001`（`reset: RELAUNCH`）——
+    **步骤逐字相同、仅 `precondition` 不同**。Task 3.4 的去重会 **SKIP 掉其中
+    一条**，即「LOGOUT 重置后登录」这条**重置策略回归**不再被生成。
+  - `search_001` vs `search_filter_001`——**连 `precondition` 都相同**，是语料里
+    真的冗余（同一用例进了两个 suite）。
+
+  **口径**：`precondition` 描述「**怎么起跑**」，不描述「**做什么**」——故与
+  `id` / `name` / `suite` 同类，不进指纹（否则同一用例换 suite 就被判成新用例）。
+  代价是第一对同指纹**已知且接受**：该 `reset` 维度目前无自动消费者，登记于此；
+  **若 Task 3.4 接线后 SKIP 掉它，升级为 P2**——届时在 `test_candidates` 的
+  SKIP 留痕里带上「与哪条既有用例撞指纹」，让人工能看见被跳过的是哪一条。
 """
 from __future__ import annotations
 
