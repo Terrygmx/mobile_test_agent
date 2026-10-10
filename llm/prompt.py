@@ -38,11 +38,15 @@ risk_level 规则：tap 普通按钮/输入框为 LOW；涉及删除/支付/提�
 
 import re                                    # noqa: E402
 import xml.etree.ElementTree as ET           # noqa: E402
+from typing import get_args                       # noqa: E402
 
+from testcase.schema import (ActionStep, AssertionSpec,   # noqa: E402
+                             WaitSpec)
 from tracer.redactor import redact           # noqa: E402
 
-__all__ = ["build_plan_rationale_prompt", "build_recovery_prompt",
-           "redact_ui_tree"]
+__all__ = ["GENERATOR_ACTIONS", "GENERATOR_CONDITIONS",
+           "build_generation_prompt", "build_plan_rationale_prompt",
+           "build_recovery_prompt", "redact_ui_tree"]
 
 # 10.4：发送前脱敏的运行时文本模式（手机号 / 邮箱 / 订单号——
 # 保留 label / type / 层级，只遮值；过度脱敏会让恢复失效）。
@@ -185,4 +189,89 @@ def build_plan_rationale_prompt(*, app_build: str, git_commit: str,
         basis = "; ".join(str(b) for b in (e.get("basis") or []))
         lines.append(f'  - {e.get("testcase_id")}: priority={e.get("priority")}'
                      f'（依据: {basis}）')
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Test Generator 模板（设计 §6.1；Task 3.4 / P3-12）
+# ---------------------------------------------------------------------------
+
+# 候选步骤的合法动作（与 `testcase/schema.py::ActionStep.action` 的 Literal
+# **同一词表**）。解析层（`llm/parser.py::parse_candidate_steps`）用它把模型
+# 编出来的动作名挡在进入 schema 之前。
+#
+# ⚠️ **从 schema 派生，不手抄**：手抄一份必然与 schema 漂移，而漂移的方向是
+# 「模型按 prompt 编的动作过不了 schema」或「schema 收紧后 prompt 还在放行」
+# ——两种都要到很远的地方才炸。`tests/unit/test_llm_contract.py` 有一条同源
+# 断言钉住。
+GENERATOR_ACTIONS = tuple(get_args(
+    ActionStep.model_fields["action"].annotation))
+
+# 合法观测条件 = `WaitSpec.condition` **∪** `AssertionSpec.condition`（两份
+# Literal 各自成词表：`active` 只对屏成立、`element_count` 只对元素成立）。
+# 这里取并集——**按步骤形态的精确约束由 P1 schema 承担**（F5：不新造校验器），
+# 契约层只挡「模型编的词」（如 `visible` 用在 assertion 上、`goto` 之类）。
+GENERATOR_CONDITIONS = tuple(dict.fromkeys(
+    get_args(WaitSpec.model_fields["condition"].annotation)
+    + get_args(AssertionSpec.model_fields["condition"].annotation)))
+
+
+def build_generation_prompt(*, gaps: list[dict], requirement: str = "",
+                            bug_history: list[dict] | None = None,
+                            suite: str = "") -> str:
+    """为**一条 coverage gap** 生成候选步骤序列（设计 §6.1 的第 1 步）。
+
+    `gaps` 的每条：`{"from_screen", "to_screen", "trigger", "category",
+    "observed_count"}`——来自 `generator/coverage.py::coverage_gap`，与
+    `changed_files` 一样是**仓库派生数据（可信区）**。本模板里**没有运行时
+    观测**（page_source / UI 树），所以没有 `[UNTRUSTED …]` 区；分区结构照旧
+    保留——将来若有人往这里塞 trace 里的原始观测，必须先建不可信区，而不是
+    直接拼进可信段（与 `build_plan_rationale_prompt` 同一条纪律）。
+
+    三条硬约束写进 prompt，对应的**强制**在解析层与校验层，不靠模型自觉：
+
+    1. **只输出步骤数组**，不输出 `id` / `name` / `suite`（那些由生成器定，
+       且候选的 `id` 要参与指纹去重——让模型编 id 只会制造同义不同名）；
+    2. **动作与条件必须在白名单内**（`GENERATOR_ACTIONS` / `GENERATOR_CONDITIONS`）；
+    3. **不要声明 `risk` / `idempotency`**——风险由 metadata + Guard 判（H4），
+       幂等由 7.4 的关键词表推导；模型声明的会被忽略（`ignored_fields` 留痕）。
+    """
+    lines = [
+        "[SYSTEM INSTRUCTIONS]",
+        "你是 iOS UI 回归测试的**用例生成器**。只输出一个 JSON 对象，无其他文字。",
+        "输出格式（仅此一种）：",
+        '{"steps": [ <步骤对象>, ... ]}',
+        "步骤对象只能是以下三种形态之一：",
+        '  1) {"action": "<动作>", "target": "<屏幕>.<元素>"}'
+        '  —— 动作 ∈ ' + "|".join(GENERATOR_ACTIONS),
+        '  2) {"wait_for": {"target": "screen:<屏幕>", "condition": "<条件>",'
+        ' "timeout": <秒>}}',
+        '  3) {"assertion": {"target": "<屏幕>.<元素>", "condition": "<条件>",'
+        ' "timeout": <秒>}}',
+        "条件 ∈ " + "|".join(GENERATOR_CONDITIONS) + "；"
+        "text_equals / text_contains / element_count 必须带 expected 字段。",
+        "只输出 steps 数组，不要输出 id / name / suite / status——那些由系统填。",
+        "不要声明 risk 或 idempotency：风险由系统元数据与 Guard 判定，"
+        "你声明的会被忽略（H4）。",
+        "target 必须用 `<Screen>.<element>` 或 `screen:<Screen>` 形态，"
+        "屏幕名与元素 id 必须来自下面给出的上下文，不要编造。",
+        "",
+        "[TRUSTED GENERATION CONTEXT]",
+    ]
+    if suite:
+        lines.append(f"目标套件: {suite}")
+    if requirement:
+        lines += ["", "需求描述（人工给出，可信）:", requirement]
+    lines += ["", "待覆盖的转移（来自 UI Graph 的实测覆盖缺口，可信）:"]
+    for g in gaps:
+        lines.append(
+            f'  - {g.get("from_screen")} -> {g.get("to_screen")}'
+            f'（触发: {g.get("trigger") or "(未记录)"}，'
+            f'类别: {g.get("category")}，实测次数: {g.get("observed_count")}）')
+    if bug_history:
+        lines += ["", "相关历史失败（来自 trace 的历史记录，可信）:"]
+        for h in bug_history:
+            lines.append(
+                f'  - {h.get("testcase_id")}: {h.get("failure_type")}'
+                f'（{h.get("count")} 次）')
     return "\n".join(lines)

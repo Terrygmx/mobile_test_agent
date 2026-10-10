@@ -730,7 +730,11 @@ def cmd_run(args: argparse.Namespace) -> int:
                   "metadata_mismatch=1, override=1")
 
     # 2. 组件装配（fake-driver：最小桩；真机：Appium 会话，Task 2.7 接线）
-    from executor.guard import EnvKind, Guard
+    #    ⚠️ **装配本体在 `cli.pipeline.wire_device_stack`**（Task 3.4 抽出）：
+    #    Dry Run（`generator/dry_run.py` 的调用方）需要同一套装配，各写一份
+    #    必然漂移。本命令只负责「解参数 + 报前置错误」，装配语义在那边。
+    from cli.pipeline import wire_device_stack
+    from executor.guard import EnvKind
 
     # review_p2_task11 P3-2：app_bundle_id 落 runs 行——Candidate 主键
     # 第一段（app_id, screen_id, target_id），种子清单不能是 NULL。
@@ -738,108 +742,31 @@ def cmd_run(args: argparse.Namespace) -> int:
         bi_fields.setdefault("app_bundle_id", args.bundle_id)
     store.start_run(run_id, suite=args.suite, env_kind=env_kind.value,
                     **bi_fields)
-    if args.fake_driver:
-        class _StubEx:
-            def find(self, strategies):
-                # Executor 契约：返回单个元素；多匹配抛 AmbiguousElement
-                return _StubElement()
-
-            def perform(self, action, element, value=None):
-                pass
-
-            def swipe(self, direction):
-                pass
-
-        class _StubElement:
-            """wait/assertion 引擎对元素的最小契约：可见、可用。"""
-
-            def is_displayed(self):
-                return True
-
-            def is_enabled(self):
-                return True
-
-            @property
-            def text(self):
-                return ""
-
-            def get_attribute(self, name):
-                return ""
-
-        class _StubDS:
-            def ensure_alive(self):
-                pass
-
-        ex = _StubEx()
-        runner = StepRunner(ex, _StubDS(), Guard(env_kind), run_id=run_id)
-    else:
-        # Task 2.7 接线（M4 Gate 前置）：真机 Appium 会话组件装配。
-        # caps 由 simctl 解析（M2/F5 时代是脚本内硬编码）；Guard 用
-        # --env-kind（P2-2 接线，默认 sandbox——production 拦截语义
-        # 见矩阵 #22 与 --allow-production）；DeviceSession 不挂
-        # TraceStore 做 recorder（record_infra 契约不匹配——infra 落库
-        # 由 pipeline 负责，JSONL 留作 debug 副本）。装配失败 = 前置配置
-        # 错误 → exit 3（fail-loud）。
-        from environment.manager import EnvironmentManager
-        from executor.executor import Executor
-        from session.app_session import AppSession
-        from session.device_session import (DeviceSession,
-                                            resolve_local_caps)
-
-        udid = args.udid or bi.resolve_booted_udid()
-        bundle_id = args.bundle_id or ""
-        if not bundle_id:
+    pipeline.store = store
+    udid = args.udid
+    if not args.fake_driver:
+        if not args.bundle_id:
             store.end_run(run_id, status="ABORTED", exit_code=3)
             print("PREFLIGHT ERROR: 真机路径需要 --bundle-id")
             print("run: exit 3")
             return 3
-        try:
-            appium_url = os.environ.get("APPIUM_URL",
-                                        "http://127.0.0.1:4723")
-            ds = DeviceSession(appium_url, resolve_local_caps(udid, bundle_id))
-            ds.connect()
-        except Exception as e:
-            store.end_run(run_id, status="ABORTED", exit_code=3)
-            print(f"PREFLIGHT ERROR: 设备会话建立失败：{e}")
-            print("run: exit 3")
-            return 3
-        app = AppSession(ds, bundle_id)
-        env = EnvironmentManager(app)
-        ex = Executor(ds)
-        runner = StepRunner(ex, ds, Guard(env_kind), run_id=run_id)
-
-    pipeline.store = store
-    if args.fake_driver:
-        pipeline.deps = PipelineDeps(env=None)  # app 级动作走 pipeline 内建桩
-    else:
-        # 真机 deps（M2 Gate 同链路）：EnvironmentManager 真做
-        # precondition.reset / cleanup（R16-4）。
-        pipeline.deps = PipelineDeps(env=env, repo=repo, app=app,
-                                     device_session=ds, executor=ex,
-                                     store=store)
-    pipeline._step_runner = runner
-    # 9.3-4：LLM 候选的 Guard 复检与动作步同一实例（10.1：Guard 不受 LLM
-    # 输出影响——同一策略对象才保证这一点）
-    pipeline.recovery.guard = runner.guard
-    lifecycle = Lifecycle(store=store)
-    pipeline._lifecycle = lifecycle
-    pipeline._run_id = run_id
-    if not args.fake_driver:
-        # H7 闭环：非幂等动作的 postcondition 真实执行（checker 复用
-        # WaitEngine 条件矩阵，M2 Gate 同款）。
-        from cli.pipeline import make_postcondition_checker
-        runner.postcondition_checker = make_postcondition_checker(
-            pipeline, runner)
+        udid = udid or bi.resolve_booted_udid()
+    try:
+        stack = wire_device_stack(
+            pipeline, env_kind=env_kind, run_id=run_id, udid=udid,
+            bundle_id=args.bundle_id, repo=repo,
+            fake_driver=args.fake_driver)
+    except Exception as e:  # noqa: BLE001 — 设备会话建立失败 = 前置配置错误
+        store.end_run(run_id, status="ABORTED", exit_code=3)
+        print(f"PREFLIGHT ERROR: 设备会话建立失败：{e}")
+        print("run: exit 3")
+        return 3
 
     # 2. 跑（P3-5：统一走 run_all——H10 中止语义/未执行清单只在套件层可达）
     try:
         run = pipeline.run_all(cases, run_id=run_id)
     finally:
-        if not args.fake_driver and ds.driver is not None:
-            try:
-                ds.driver.quit()
-            except Exception:
-                pass  # 会话收尾失败不影响结果判定
+        stack.close()
 
     # 3. --no-llm 语义（R18-4 最终定档，Task 4.2）：flag 真实禁用 LLM
     #    Recovery；确定性恢复（settle/postcondition/memo）不受影响。
@@ -860,7 +787,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         write_run_report(
             run, args.html, llm_calls=llm_calls,
             # R18-4/R17-3：分母是**步骤数**（lifecycle 累计），不是用例数
-            executed_steps=lifecycle.steps_recorded,
+            executed_steps=stack.lifecycle.steps_recorded,
             wda_restarts=0,
             # 10.5：熔断首页告警
             llm_broken=(budget.broken if budget is not None else False),

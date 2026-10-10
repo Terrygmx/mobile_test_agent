@@ -18,9 +18,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-__all__ = ["LLM_INVALID_OUTPUT", "MAX_REASON_CHARS", "ParsedLLMOutput",
-           "PlanRationale", "parse_llm_output", "parse_plan_reasons",
-           "ALLOWED_ACTIONS"]
+__all__ = ["LLM_INVALID_OUTPUT", "MAX_REASON_CHARS", "ParsedCandidateSteps",
+           "ParsedLLMOutput", "PlanRationale", "parse_candidate_steps",
+           "parse_llm_output", "parse_plan_reasons", "ALLOWED_ACTIONS"]
 
 LLM_INVALID_OUTPUT = "LLM_INVALID_OUTPUT"
 
@@ -189,4 +189,162 @@ def parse_plan_reasons(raw: str) -> PlanRationale:
             ids = tuple(i.strip() for i in order)
             if len(set(ids)) == len(ids):        # 重复 → 不是排列，作废
                 out.order = ids
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Test Generator 契约（设计 §6.1；Task 3.4 / P3-12）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ParsedCandidateSteps:
+    """`{"steps": [...]}` 的解析结果（生成器产出的**候选步骤序列**）。
+
+    `steps` 是**已收窄**的原始 dict 列表：动作/条件过白名单、形态可识别。
+    它们**还没**过 P1 schema——那是 `generator/validator.py::validate_schema`
+    的职责（`mta lint` 的同一实现，F5）。这里只做「契约层」的收窄：把模型
+    编出来的动作名/条件名挡在进入 schema 之前，好让错误信息说清「这是模型
+    编的」而不是抛一坨 pydantic 校验错。
+
+    `valid` = `steps` 非空。**空 steps 视为非法**：设计 §6.1 的产物是「候选
+    步骤序列」，一个空数组不是候选（它会在 schema 层被拒，但那时错误是
+    「用例没有步骤」——不如在契约层就说「模型没给步骤」）。
+
+    `ignored_fields`：模型多输出的键（`id` / `name` / `risk` / `idempotency`…）
+    ——忽略但**必须可见**（H4：模型越权的痕迹不能静默消失）。
+    """
+
+    steps: list = field(default_factory=list)
+    ignored_fields: dict = field(default_factory=dict)
+
+    @property
+    def valid(self) -> bool:
+        return bool(self.steps)
+
+
+# 候选步骤里允许出现的**顶层键**（三种步骤形态的判别键 + 动作步的附属键）。
+# 白名单而非黑名单：黑名单会让模型新编的键（如 `"goto"`）静默落进步骤 dict，
+# 然后被 `TestCase` 的 `extra="forbid"` 在很远的地方拦下——那时错误信息指向
+# 「候选 schema 非法」，人看不出是模型编的键。
+_STEP_KEYS = frozenset({
+    "action", "target", "value", "direction", "sensitive", "postcondition",
+    "wait_for", "assertion",
+})
+# 附属键里**不许**由模型声明的那两个（H4 / 7.4：风险与幂等由系统推导）
+_FORBIDDEN_STEP_KEYS = frozenset({"risk", "idempotency"})
+
+
+def _target_ok(target) -> bool:
+    """`target` 必须是 `"<Screen>.<element>"` 或 `{"type","id"}` 形态。
+
+    字符串形态由 `TargetRef._accept_sugar`（`testcase/schema.py`）解析——这里
+    只判「非空 str」或「含 type/id 的 dict」，具体解析留给 schema（单一实现）。
+    """
+    if isinstance(target, str):
+        return bool(target.strip())
+    if isinstance(target, dict):
+        return (isinstance(target.get("type"), str)
+                and isinstance(target.get("id"), str)
+                and bool(target["type"].strip()) and bool(target["id"].strip()))
+    return False
+
+
+def _clean_step(raw) -> tuple[dict | None, dict]:
+    """单步收窄 → (合法步骤 | None, 被忽略的键)。
+
+    `None` = 这一步不合法（调用方**整条候选作废**，不是「跳过这一步」——
+    丢一步会让动作序列变成另一条用例，那是**静默改语义**）。
+    """
+    ignored: dict = {}
+    if not isinstance(raw, dict):
+        return None, {"<non-dict step>": raw}
+    for k, v in raw.items():
+        if k in _FORBIDDEN_STEP_KEYS:
+            ignored[k] = v
+        elif k not in _STEP_KEYS:
+            ignored[k] = v
+    known = {k: v for k, v in raw.items() if k in _STEP_KEYS}
+
+    # 形态 1：动作步
+    if "action" in known:
+        action = known.get("action")
+        if not isinstance(action, str):
+            return None, ignored
+        action = action.strip()
+        if action not in ALLOWED_ACTIONS:
+            # `launch_app` / `terminate_app` 不在 10.4 的恢复白名单里（那是
+            # 恢复动作的白名单），但它们是合法用例动作——生成器侧另有一张表。
+            from llm.prompt import GENERATOR_ACTIONS
+            if action not in GENERATOR_ACTIONS:
+                return None, ignored
+        step: dict = {"action": action}
+        if "target" in known:
+            if not _target_ok(known["target"]):
+                return None, ignored
+            step["target"] = known["target"]
+        if "value" in known:
+            if not isinstance(known["value"], str):
+                return None, ignored
+            step["value"] = known["value"]
+        if "direction" in known:
+            if known["direction"] not in ("up", "down", "left", "right"):
+                return None, ignored
+            step["direction"] = known["direction"]
+        if "sensitive" in known:
+            step["sensitive"] = bool(known["sensitive"])
+        if "postcondition" in known:
+            post = known["postcondition"]
+            if not isinstance(post, dict) or not _target_ok(post.get("target")):
+                return None, ignored
+            step["postcondition"] = post
+        return step, ignored
+
+    # 形态 2/3：观测步（wait_for / assertion），二者互斥
+    for key in ("wait_for", "assertion"):
+        if key in known:
+            spec = known[key]
+            if not isinstance(spec, dict) or not _target_ok(spec.get("target")):
+                return None, ignored
+            condition = spec.get("condition")
+            from llm.prompt import GENERATOR_CONDITIONS
+            if condition not in GENERATOR_CONDITIONS:
+                return None, ignored
+            return {key: spec}, ignored
+    return None, ignored
+
+
+def parse_candidate_steps(raw: str) -> ParsedCandidateSteps:
+    """严格解析生成器的输出。**不抛异常**——返回 `valid=False` 的结果，调用方
+    按 `LLM_INVALID_OUTPUT` 分流（与 `parse_llm_output` / `parse_plan_reasons`
+    同一套纪律：任何类型不符的字段**不采纳**，「尽量解释一下」是给幻觉开后门）。
+
+    **任一步不合法 → 整条作废**（`steps` 清空）：候选是一个动作序列，丢一步
+    就是另一条用例（见 `_clean_step`）。
+    """
+    out = ParsedCandidateSteps()
+    if not isinstance(raw, str):
+        return out
+    obj = _extract_json(raw)
+    if not isinstance(obj, dict):
+        return out
+
+    extra = {k: v for k, v in obj.items() if k != "steps"}
+    if extra:
+        out.ignored_fields = extra
+
+    steps = obj.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return out
+    cleaned: list[dict] = []
+    ignored: dict = dict(out.ignored_fields)
+    for idx, raw_step in enumerate(steps):
+        step, step_ignored = _clean_step(raw_step)
+        if step is None:
+            return out                      # 整条作废
+        cleaned.append(step)
+        for k, v in step_ignored.items():
+            ignored[f"steps[{idx}].{k}"] = v
+    out.steps = cleaned
+    out.ignored_fields = ignored
     return out

@@ -483,3 +483,158 @@ def test_parse_plan_reasons_uses_raw_decode_for_nested_json():
     p = parse_plan_reasons(raw)
     assert p.reasons["a"] == 'nested {"x": 1}'
     assert p.order == ("a",)
+
+
+# ---------------------------------------------------------------------------
+# Test Generator 契约（设计 §6.1；Task 3.4 / P3-12）
+# ---------------------------------------------------------------------------
+
+
+def test_generation_prompt_states_the_three_hard_rules():
+    """prompt 必须写出三条硬约束（对应的**强制**在 parser 与 validator，不靠模型自觉）。"""
+    from llm.prompt import build_generation_prompt
+
+    prompt = build_generation_prompt(
+        gaps=[{"from_screen": "SearchView", "to_screen": "DetailView",
+               "trigger": "tap:SearchView.search_field",
+               "category": "Happy Path", "observed_count": 9}],
+        requirement="搜索无结果也要能返回", suite="smoke",
+        bug_history=[{"testcase_id": "search_001",
+                      "failure_type": "WAIT_TIMEOUT", "count": 3}])
+    assert "[SYSTEM INSTRUCTIONS]" in prompt
+    assert '"steps"' in prompt
+    assert "不要输出 id / name / suite" in prompt, "id 由系统定（指纹去重靠它）"
+    assert "不要声明 risk 或 idempotency" in prompt, "H4 / 7.4"
+    assert "H4" in prompt
+    # 可信区里带上真实上下文
+    assert "SearchView -> DetailView" in prompt
+    assert "搜索无结果也要能返回" in prompt and "smoke" in prompt
+    assert "search_001" in prompt and "WAIT_TIMEOUT" in prompt
+
+
+def test_generation_prompt_has_no_untrusted_zone():
+    """只喂仓库派生数据（gap / 需求 / 历史）——**没有**运行时观测，故无不可信区。"""
+    from llm.prompt import build_generation_prompt
+
+    prompt = build_generation_prompt(
+        gaps=[{"from_screen": "A", "to_screen": "B", "trigger": "tap:A.x",
+               "category": "Happy Path", "observed_count": 1}])
+    assert "[UNTRUSTED" not in prompt
+
+
+def test_generation_prompt_action_and_condition_vocab_match_schema():
+    """prompt 里列的 action/条件词表必须与 schema 的 Literal **同源**。
+
+    两处各写一份 → 模型按 prompt 编出的动作/条件名会走到 schema 才炸，而错误
+    信息是 pydantic 的（人看不出是模型编的）。这里钉住「派生自 schema」这件事
+    本身（`llm/prompt.py` 用 `get_args(...)` 取，不手抄）。
+    """
+    from typing import get_args
+
+    from llm.prompt import GENERATOR_ACTIONS, GENERATOR_CONDITIONS
+    from testcase.schema import ActionStep, AssertionSpec, WaitSpec
+
+    assert set(GENERATOR_ACTIONS) == set(
+        get_args(ActionStep.model_fields["action"].annotation))
+    # 条件 = WaitSpec ∪ AssertionSpec（两份 Literal 各自成词表）
+    assert set(GENERATOR_CONDITIONS) == set(
+        get_args(WaitSpec.model_fields["condition"].annotation)) | set(
+        get_args(AssertionSpec.model_fields["condition"].annotation))
+    assert "active" in GENERATOR_CONDITIONS, "屏 wait 的 active 必须在内"
+    assert "element_count" in GENERATOR_CONDITIONS, "元素断言的条件必须在内"
+
+
+def test_parse_candidate_steps_happy_path():
+    from llm.parser import parse_candidate_steps
+
+    p = parse_candidate_steps(json.dumps({"steps": [
+        {"action": "launch_app"},
+        {"action": "tap", "target": "HomeView.go_search"},
+        {"wait_for": {"target": "screen:SearchView", "condition": "active",
+                      "timeout": 10}},
+        {"assertion": {"target": "SearchView.search_results",
+                       "condition": "element_count", "expected": 0,
+                       "timeout": 5}}]}))
+    assert p.valid and len(p.steps) == 4
+    assert p.steps[1] == {"action": "tap", "target": "HomeView.go_search"}
+    assert p.ignored_fields == {}
+
+
+@pytest.mark.parametrize("raw", ["不是 JSON", "[]", "{}", "", None, 42,
+                                 '{"steps": []}', '{"steps": "tap"}',
+                                 '{"steps": [{"action": "teleport"}]}',
+                                 '{"steps": [{"nope": 1}]}',
+                                 '{"steps": [{"action": "tap", "target": 42}]}',
+                                 '{"steps": [{"wait_for": {"target": "screen:X",'
+                                 ' "condition": "maybe"}}]}',
+                                 '{"steps": [{"wait_for": {}}]}'])
+def test_parse_candidate_steps_invalid_is_empty(raw):
+    """任何不合法的形态 → `valid=False`（**不抛异常**，与另两个契约同款）。"""
+    from llm.parser import parse_candidate_steps
+
+    assert not parse_candidate_steps(raw).valid
+
+
+def test_parse_candidate_steps_is_all_or_nothing():
+    """**任一步不合法 → 整条作废**：候选是一个动作序列，丢一步就是另一条用例。"""
+    from llm.parser import parse_candidate_steps
+
+    p = parse_candidate_steps(json.dumps({"steps": [
+        {"action": "launch_app"},
+        {"action": "teleport"}]}))
+    assert p.steps == [] and not p.valid
+
+
+def test_parse_candidate_steps_records_ignored_fields():
+    """H4：模型越权声明的 `risk` / `idempotency` 与自编的 `id` 必须**可见**。"""
+    from llm.parser import parse_candidate_steps
+
+    p = parse_candidate_steps(json.dumps({
+        "steps": [{"action": "tap", "target": "HomeView.go_search",
+                   "risk": "LOW", "idempotency": "IDEMPOTENT",
+                   "goto": "next"}],
+        "id": "model_invented_id", "name": "模型编的名字"}))
+    assert p.valid
+    assert p.steps == [{"action": "tap", "target": "HomeView.go_search"}]
+    assert p.ignored_fields["id"] == "model_invented_id"
+    assert p.ignored_fields["steps[0].risk"] == "LOW"
+    assert p.ignored_fields["steps[0].idempotency"] == "IDEMPOTENT"
+    assert p.ignored_fields["steps[0].goto"] == "next"
+
+
+def test_parse_candidate_steps_uses_raw_decode_for_nested_json():
+    """P0 P2-6 的老坑：非贪婪正则会截断嵌套 JSON（与另两个契约同款）。"""
+    from llm.parser import parse_candidate_steps
+
+    raw = ('前言 {"steps": [{"action": "tap", "target": "A.b",'
+           ' "postcondition": {"target": "screen:B", "condition": "active"}}]}'
+           ' 后记')
+    p = parse_candidate_steps(raw)
+    assert p.valid
+    assert p.steps[0]["postcondition"]["target"] == "screen:B"
+
+
+def test_contract_layer_defers_precise_rules_to_p1_schema():
+    """分层：契约层只挡「模型编的词」，**精确约束归 P1 schema**（F5）。
+
+    `wait_for screen:X condition=visible` —— `visible` 在 `WaitSpec` 的词表里
+    （对**元素**成立），但屏语义下只有 `active` 合法。契约层放行它、由
+    `validate_schema` 的 lint 拒掉：这是**刻意**的（在这里重写一遍屏/元素
+    条件矩阵，就是第二份 schema 校验器）。
+    """
+    from llm.parser import parse_candidate_steps
+
+    p = parse_candidate_steps(json.dumps({"steps": [
+        {"wait_for": {"target": "screen:X", "condition": "visible"}}]}))
+    assert p.valid, "契约层不该重写 schema 的屏/元素条件矩阵"
+
+
+def test_parse_candidate_steps_accepts_launch_and_terminate():
+    """`launch_app` / `terminate_app` 不在 10.4 的**恢复**白名单里，
+    但它们是合法**用例**动作（生成器另有一张表）。"""
+    from llm.parser import parse_candidate_steps
+
+    p = parse_candidate_steps(json.dumps({"steps": [
+        {"action": "launch_app"}, {"action": "terminate_app"}]}))
+    assert p.valid and [s["action"] for s in p.steps] == ["launch_app",
+                                                          "terminate_app"]

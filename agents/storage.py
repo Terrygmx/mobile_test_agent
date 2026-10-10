@@ -225,3 +225,150 @@ class SQLiteAgentStore:
                     for r in rows]
         finally:
             conn.close()
+
+    # --- test_candidates（迁移 002；Task 3.4 / P3-12） ---------------------------
+    #
+    # ⚠️ **写 SQL 全在本模块**（plan §2 注意事项 #5：agent.db 是可变状态库，
+    # 单写者 = agents/storage.py）。`candidates/test_case.py` 只提供模型与
+    # dict 互转，不碰 sqlite——那条边界有守卫（`test_repo_hygiene.py` 扫
+    # `_STORE_FILES` 的写语句区间）。
+
+    def save_candidate(self, candidate_id: str, *, testcase_yaml: str,
+                       generation_evidence: dict,
+                       generated_by: str | None = None,
+                       fingerprint: str | None = None,
+                       dry_run_status: str = "PENDING",
+                       review_status: str = "PENDING") -> dict:
+        """落一条候选（upsert：`candidate_id` 是主键）。
+
+        **幂等**：同 id 重存覆盖（与 `save_plan` 同款）——生成器重跑同一批 gap
+        会算出同 id 的候选，不该线性增长出重复行。
+
+        `created_at` 只在**首次插入**时取 `_now()`（`ON CONFLICT` 分支不更新它）
+        ——「这条候选什么时候第一次生成出来的」是审计事实，重存不该改写它。
+        """
+        with self._write_tx() as conn:
+            conn.execute(
+                "INSERT INTO test_candidates (candidate_id, testcase_yaml,"
+                " generated_by, generation_evidence_json, fingerprint,"
+                " dry_run_status, review_status, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(candidate_id) DO UPDATE SET"
+                " testcase_yaml=excluded.testcase_yaml,"
+                " generated_by=excluded.generated_by,"
+                " generation_evidence_json=excluded.generation_evidence_json,"
+                " fingerprint=excluded.fingerprint,"
+                " dry_run_status=excluded.dry_run_status",
+                (candidate_id, testcase_yaml, generated_by,
+                 json.dumps(generation_evidence, ensure_ascii=False),
+                 fingerprint, dry_run_status, review_status, _now()))
+        row = self.get_candidate(candidate_id)
+        assert row is not None       # 刚写完必在
+        return row
+
+    def get_candidate(self, candidate_id: str) -> dict | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM test_candidates WHERE candidate_id=?",
+                (candidate_id,)).fetchone()
+            return self._candidate_from_row(row) if row else None
+        finally:
+            conn.close()
+
+    def list_candidates(self, *, review_status: str | None = None
+                        ) -> list[dict]:
+        """候选列表（新在前）。`review_status=None` = 不过滤（全量）。
+
+        生成器的去重需要「**未决集**」（`review_status='PENDING'`）——已
+        ACCEPT/REJECT 的候选不该再挡住新候选（Task 3.5 的审核会消费它们）。
+        """
+        conn = self._connect()
+        try:
+            if review_status is None:
+                rows = conn.execute(
+                    "SELECT * FROM test_candidates ORDER BY created_at DESC,"
+                    " rowid DESC").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM test_candidates WHERE review_status=?"
+                    " ORDER BY created_at DESC, rowid DESC",
+                    (review_status,)).fetchall()
+            return [self._candidate_from_row(r) for r in rows]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _candidate_from_row(row: sqlite3.Row) -> dict:
+        return {"candidate_id": row["candidate_id"],
+                "testcase_yaml": row["testcase_yaml"],
+                "generated_by": row["generated_by"],
+                "generation_evidence": json.loads(
+                    row["generation_evidence_json"] or "{}"),
+                "fingerprint": row["fingerprint"],
+                "dry_run_status": row["dry_run_status"],
+                "review_status": row["review_status"],
+                "reviewer": row["reviewer"],
+                "reviewed_at": row["reviewed_at"],
+                "created_at": row["created_at"]}
+
+    # --- test_candidate_rejections（迁移 002；矩阵 #7/#8 的留痕） ----------------
+
+    def save_rejection(self, rejection_id: str, *, reason: str,
+                       candidate_id: str | None = None,
+                       fingerprint: str | None = None,
+                       duplicate_of: str | None = None,
+                       detail: dict | None = None) -> dict:
+        """落一条拒绝/SKIP 留痕。**append-only**（同 id 重放 → `IntegrityError`）。
+
+        为什么不是 upsert：留痕的语义是「生成器**试过**这些」。若某次生成里同一
+        个候选被拒两次，那是两件事（比如先 lint 挡下、修好后又撞指纹），合并成
+        一行会让审计看不全。`rejection_id` 由调用方生成（uuid），撞 id 是 bug，
+        fail-loud 比静默覆盖好。
+        """
+        with self._write_tx() as conn:
+            conn.execute(
+                "INSERT INTO test_candidate_rejections (rejection_id,"
+                " candidate_id, reason, fingerprint, duplicate_of,"
+                " detail_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (rejection_id, candidate_id, reason, fingerprint, duplicate_of,
+                 json.dumps(detail or {}, ensure_ascii=False), _now()))
+        row = self.get_rejection(rejection_id)
+        assert row is not None
+        return row
+
+    def get_rejection(self, rejection_id: str) -> dict | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM test_candidate_rejections WHERE rejection_id=?",
+                (rejection_id,)).fetchone()
+            return self._rejection_from_row(row) if row else None
+        finally:
+            conn.close()
+
+    def list_rejections(self, *, reason: str | None = None) -> list[dict]:
+        conn = self._connect()
+        try:
+            if reason is None:
+                rows = conn.execute(
+                    "SELECT * FROM test_candidate_rejections"
+                    " ORDER BY created_at DESC, rowid DESC").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM test_candidate_rejections WHERE reason=?"
+                    " ORDER BY created_at DESC, rowid DESC",
+                    (reason,)).fetchall()
+            return [self._rejection_from_row(r) for r in rows]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _rejection_from_row(row: sqlite3.Row) -> dict:
+        return {"rejection_id": row["rejection_id"],
+                "candidate_id": row["candidate_id"],
+                "reason": row["reason"],
+                "fingerprint": row["fingerprint"],
+                "duplicate_of": row["duplicate_of"],
+                "detail": json.loads(row["detail_json"] or "{}"),
+                "created_at": row["created_at"]}

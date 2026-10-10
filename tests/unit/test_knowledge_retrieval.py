@@ -348,3 +348,35 @@ def test_datasource_predicate_matches_whole_modules_not_prefixes():
     assert not _is_datasource("graph.impact")
     assert not _is_datasource("source.build_diff")
     assert not _is_datasource("experience.knowledge")
+
+
+def test_generator_package_does_not_touch_data_sources_directly():
+    """**F3 在 M3 侧的 import 级断言**（Task 3.4 / P3-12）。
+
+    与 `planner/**` 那条同款、同一个判据——`generator/validator.py` 与
+    `generator/generator.py` 都是 `KnowledgeSources` 的调用方（`graph_query`
+    取运行时图做语义校验），**不得**自己伸进 trace / agent 库。上一条的
+    docstring 早已预告这一格（「M3–M5 还有 generator / explorer / diagnosis
+    三个同类调用方要来」）——Task 3.4 是 M3 的那一格。
+
+    ⚠️ `generator/generator.py` **也不许 import `cli`**：Dry Run 的装配由
+    调用方注入（`execute` 参数），生成器不该知道 `cli.pipeline` 存在。
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2] / "generator"
+    files = [p for p in sorted(root.rglob("*.py")) if "__pycache__" not in p.parts]
+    assert len(files) >= 4, f"只扫到 {len(files)} 个 generator/*.py，扫描面疑似写错"
+    names = {p.name for p in files}
+    assert {"generator.py", "validator.py", "dry_run.py", "coverage.py"} <= names
+
+    forbidden = _FORBIDDEN_DATASOURCE_IMPORTS + ("cli",)
+    offenders = {}
+    for p in files:
+        bad = sorted({m for m in _all_imports(p)
+                      if any(m == f or m.startswith(f + ".") for f in forbidden)})
+        if bad:
+            offenders[p.name] = bad
+    assert not offenders, (
+        f"generator/** 必须只经 KnowledgeSources（且不 import cli——"
+        f"Dry Run 的装配由调用方注入）：{offenders}")

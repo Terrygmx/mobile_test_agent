@@ -2212,3 +2212,169 @@ trigger 被清成 `""`），即「同形第二次」未修。
 - **评审给的「一行修法」也要按同一条判据扫一遍同形**：报告把「元素 wait」这处修对了，
   但同一行里的否定等待仍是同形（报告建议「保持复位」）。核销时**按纪律扫全包，不按建议的
   最小 diff 抄**，并**用探针证明偏离是承重的**（探针 B：照抄建议版 → 1 red）。
+
+---
+
+## Task 3.4 完成记录（P3-12 生成管线 + test_candidates，2026-10-10）
+
+**M3 第四个任务**，也是 M3 里**唯一「写下去」**的一环。设计 §6.1 的主流程
+（Coverage Gap → LLM → Schema 校验 → 语义校验 → 指纹去重 → Dry Run →
+`test_candidates`）在本任务拼齐；矩阵 **#7–#10** 由此可验。
+
+没有它，`coverage_gap`（3.2）与 `test_fingerprint`（3.3）都是**零生产消费者**
+——`generator/__init__.py` 自己写着「只做算出来，不做写下去」。本任务补上前半段
+的「写下去」，落库仍走 `agents/storage.py`（单写者不破）。
+
+### 交付
+
+**Create**
+
+| 文件 | 行数 | 内容 |
+|---|---|---|
+| `agents/migrations/002_test_candidates.sql` | 78 | `test_candidates`（设计 §11 + 加固）+ `test_candidate_rejections`（决定 2） |
+| `candidates/test_case.py` | 175 | `TestCandidate` / `CandidateRejection` 行模型 + store 互转 + `dump_testcase_yaml` |
+| `generator/validator.py` | 206 | `validate_schema`（转调 `lint`，F5）/ `validate_semantic`（纯函数，F13） |
+| `generator/dry_run.py` | 116 | `run_candidate(...)` + `DryRunRefused`（闸门在函数内，矩阵 #9） |
+| `generator/generator.py` | 343 | `generate(...)` 编排 + `GenerationResult` |
+| `tests/unit/test_candidate_store.py` | 233 | **18** 例 |
+| `tests/unit/test_dry_run.py` | 149 | **21** 例 |
+| `tests/unit/test_generator_pipeline.py` | 538 | **28** 例 |
+| `tests/fault_injection/test_p3_matrix_m3.py` | 270 | **13** 例（矩阵 #7–#10） |
+
+**Modify**
+
+| 文件 | 改动 |
+|---|---|
+| `agents/storage.py` | +147：`save_candidate`（upsert）/ `get_candidate` / `list_candidates` / `save_rejection`（append-only）/ `get_rejection` / `list_rejections` + 两个 row 转换 |
+| `cli/pipeline.py` | +138：`DeviceStack` + `wire_device_stack(...)`（从 `cmd_run` 抽出，决定 3） |
+| `cli/main.py` | −117/+…：`cmd_run` 装配段改调 helper（行为等价） |
+| `llm/prompt.py` | +93：`build_generation_prompt` + `GENERATOR_ACTIONS` / `GENERATOR_CONDITIONS`（**从 schema 派生**） |
+| `llm/parser.py` | +164：`parse_candidate_steps` + `ParsedCandidateSteps` |
+| `environment/capabilities.py` | `_coerce` → 公开 `coerce_device_type`（同一实现改名，3 处调用点同步） |
+| `agents/tools.py` | `NOT_WIRED` 三项指向 M3 → **M4/M6**（决定 1） |
+| `tests/unit/test_llm_contract.py` | +155（47 → 69）：Generator 契约段（prompt 硬规则 / 词表同源 / 解析 happy + 非法 + 全有或全无 + `ignored_fields`） |
+| `tests/unit/test_knowledge_retrieval.py` | +32（18 → 19）：`generator/**` 的 AST import 守卫（F3 的 M3 格） |
+| `tests/unit/test_repo_hygiene.py` | `_SOURCE_DIRS` += `agents` / `candidates` / `generator` / `knowledge` / `planner`；`_MIN_WRITE_STATEMENTS` 18 → 21 |
+| `tests/unit/test_agent_store.py` | 首批表断言改为「5 张表存在、`discovery_events`/`bug_candidates` 不存在」 |
+
+### 决策记录
+
+1. **Dry Run 不经 `AgentToolkit`**（用户拍板）：M3 的 LLM 只产出**步骤序列**、
+   不做工具调用循环——`execute` 是**注入的 `Callable[[TestCase], TestcaseResult]`**，
+   工具层在生成期是死对象。因此 `run_testcase` / `run_candidate_test` /
+   `create_test_candidate` 三项**保持 `NOT_WIRED`**，但指向由「M3」改为
+   **「M4/M6（驱动设备的工具循环）」**：留着「等 M3」是**过时的承诺**，而
+   `tests/unit/test_agent_tools.py::test_unwired_tool_fails_loud_with_the_task`
+   会把错误消息里的任务号读给调用方——承诺过期就是错误信息过期。
+   不接线不产生 F7 守卫缺口：`test_p3_matrix_m1.py:165` 的守卫只对**已接线**的
+   `cmd_*` 生效（`AUTONOMOUS_COMMANDS` 里的 `"generate"` 在 M1 已登记，接线在 3.5）。
+2. **迁移 002 建两张表**（用户拍板）：设计 §11 的 `test_candidates` 只表达
+   「**入库的候选**」，装不下矩阵 #7/#8 的「**被拒/SKIP 的也要可查**」。给
+   `test_candidates` 加 `review_status='SKIPPED'` 会把**生成器的判据**混进 F6 的
+   **人工**审核状态机（`PENDING → ACCEPT/REJECT`），3.5 的审核列表就得额外过滤。
+   > ⚠️ **命名偏离**：AskUserQuestion 的选项标签写作 `test_candidate_skips`，
+   > 落地叫 `test_candidate_rejections`——它同时装 SKIP（`DUPLICATE`）与 REJECT
+   > （`SCHEMA_INVALID` / `SEMANTIC_REJECTED`），叫 skips 是名实不符。列集不变。
+3. **抽 `wire_device_stack` 且 `cmd_run` 改调它**（用户拍板）：设备装配只许有
+   **一处实现**，否则 Dry Run（3.5 的 `mta generate`）与 `mta run` 必然漂移。
+   本次是**逐段搬运**（fake-driver 桩类、真机四件套、`PipelineDeps` /
+   `_step_runner` / `_lifecycle` / `_run_id` / `postcondition_checker` 回填），
+   顺序与语义零改动；P1/P2 全量回归是这一步的硬闸门（见「实测」）。
+4. **词表从 schema 派生，不手抄**：`GENERATOR_ACTIONS` =
+   `get_args(ActionStep.action)`，`GENERATOR_CONDITIONS` =
+   `get_args(WaitSpec.condition) ∪ get_args(AssertionSpec.condition)`。
+   初版**手抄**，漏了 `active`（它只在 `WaitSpec` 里，不在 `AssertionSpec`）
+   ——正是「手抄必然漂移」的实证。手抄漂移的方向是「模型按 prompt 编的动作
+   过不了 schema」或「schema 收紧后 prompt 还在放行」，两种都要到很远的地方才炸。
+   `tests/unit/test_llm_contract.py::test_generation_prompt_action_and_condition_vocab_match_schema`
+   钉住同源关系。
+5. **契约层只挡「模型编的词」，精确约束归 P1 schema**（F5）：`wait_for
+   screen:X condition=visible` 被契约层**放行**（`visible` 是合法的
+   `WaitSpec.condition`，对**元素**成立），由 `validate_schema` 的 lint 拒掉。
+   在契约层重写一遍「屏/元素条件矩阵」就是第二份 schema 校验器。有一条正面
+   测试（`test_contract_layer_defers_precise_rules_to_p1_schema`）把这个**刻意
+   的分层**登记下来，免得日后有人当 bug 修。
+6. **`result.broken` 在收尾处重读 `budget.broken`**：熔断可能发生在**最后一次**
+   迭代的 `record_failure()` 里——那时循环已到末尾，`if not try_acquire()` 那一支
+   再也轮不到，`result.broken` 会停在 `False` 而预算其实已熔断。「熔断了但报告说
+   没熔断」正是本仓最防的那类「看起来正常」。
+
+### 📌 口径登记 1：语义校验只拒「与**已知观测**矛盾」
+
+**未知 Screen / 新元素一律标记 `unknown` 放行，交给 Dry Run 验证。**
+
+`validate_semantic(tc, *, graph)` 的判据（三条，按序）：
+
+| 情形 | 判定 | 理由 |
+|---|---|---|
+| 候选**声明不出转移**（到达点 < 2） | `SEMANTIC_UNKNOWN` | 「声明的转移全部有观测支持」在**空集上恒真**——判 `consistent` 是空话，会让审计以为「语义校验过了」 |
+| 图对同一 `(from, trigger)` **零观测** | `SEMANTIC_UNKNOWN` | 新路径/新元素，正是我们要生成的用例；判「矛盾」会误杀 |
+| 图**有观测**、且**没有一条**落在声明的 `to_screen` | `SEMANTIC_CONTRADICTED` | 结构性矛盾 |
+
+理由：① Source Graph 的转移**恒为空**（`graph/builder.py` 模块 docstring：
+metadata 无导航声明），拿它当判据会恒返回「无矛盾」——形式合法、语义等于没有；
+② Runtime Graph 是**过去运行的采样**，不是真值。故语义校验只挡结构性错误，
+真伪由 Dry Run 定（设计 6.1 的次序本就是这个意思）。
+
+**推论（一并登记）**：这条判据是「与**已知观测**矛盾」，不是「与真值矛盾」——
+**误拒是可能的**，但落在留痕表里（`reason` + `detail.observed`），人工看得见，不静默。
+`from/trigger/to` 的推导**复用 `generator/coverage.py::_arrivals`**（覆盖推导只有
+一份定义）。
+
+### 📌 口径登记 2：`duplicate_of` 是 Task 3.3 那笔代价的兑付
+
+Task 3.3 拍板 `precondition` **不进指纹**，代价是真语料**已有 2 对同指纹**用例
+（`reset_logout_001` vs `login_001`、`search_001` vs `search_filter_001`）。
+`docs/handover.md` §9 把「SKIP 留痕要带 `duplicate_of`」列为 3.4 开工前置 #1。
+本任务兑付：矩阵 #8 的三条测试分别钉住「撞**已有用例**写它的 id」、
+「撞**未决候选**写 `cand_*` id」、「**同语义不同命名**仍 SKIP」。
+`_existing_fingerprints` 用 `setdefault`（同指纹多例保留第一条）——「留哪条」
+只影响 `duplicate_of` 写哪个 id，**不影响是否 SKIP**。
+
+### 📌 口径登记 3：留痕表的三个 `reason` 是「候选被拒」，不含契约层非法
+
+`test_candidate_rejections.reason ∈ {SCHEMA_INVALID, SEMANTIC_REJECTED, DUPLICATE}`
+——三者都是「**有一个候选**被拒」。而 `parse_candidate_steps` 判非法时**压根没有
+候选**（步骤都解析不出来），它走 `notes` + `budget.record_failure()`，**不写留痕表**。
+可见性由矩阵 #10 的 `budget.broken` + notes 承担。把「没有候选」也塞进
+`candidate_id` 可空的留痕表会让「被拒的候选数」与「拒因分布」对不上账。
+
+### 实测
+
+- 全量 `pytest tests`（macOS）：**1794 passed / 0 failed**（exit 0）。
+  HEAD（`c766caf`）基线 **1691 passed**（在 `git worktree` 里独立复跑确认）
+  → 本任务 **+103**：新增文件 18 + 21 + 28 + 13 = **80**，既有文件
+  `test_llm_contract.py` +22（47 → 69）、`test_knowledge_retrieval.py` +1（18 → 19）。
+- `test_repo_hygiene.py`（写语句全部落在 `with self._write_tx()` 区间内）+
+  `test_knowledge_retrieval.py`（`generator/**` 的 AST import 守卫）+
+  `test_agent_store.py` → **37 passed**。
+- **A/B 探针 6 组，全部真红**（每次改完还原 → 清 `__pycache__` → 核对 `md5 -q`
+  与 `git diff --stat` 为空）：
+  | 探针 | 变异 | 结果 |
+  |---|---|---|
+  | A | 去重命中恒置 `hit = None`（矩阵 #8） | **6 failed**（`test_p3_matrix_m3.py` ×3 + `test_generator_pipeline.py` ×3） |
+  | B | `SEMANTIC_CONTRADICTED` → `CONSISTENT` | **1 failed**（`test_contradiction_with_known_observation_is_rejected`） |
+  | B2 | 「到达点 < 2 → `UNKNOWN`」早退 → `CONSISTENT` | **1 failed**（`test_single_arrival_candidate_is_unknown_not_consistent`） |
+  | C1 | Dry Run 的 `env_kind` 闸门 → `if False` | **7 failed**（`test_dry_run.py` ×4 + `test_p3_matrix_m3.py` ×3） |
+  | C2 | Dry Run 的 `device_type` 闸门 → `if False` | **4 failed**（`test_dry_run.py` ×3 + `test_p3_matrix_m3.py` ×1） |
+
+  探针 B2 是**本任务自查发现的真 bug**（见「教训」）。
+
+### 教训（已并入 MEMORY §5）
+
+- **「全部 X 都满足」在空集上恒真——判据必须显式处理空集**：初版
+  `validate_semantic` 对「只声明 1 个到达点」的候选返回 `consistent`（因为
+  `declared` 是空集，循环体一次都没跑，末尾无条件 `return CONSISTENT`）。
+  那是**最坏的一类空转**：形式上「语义校验通过了」，实际什么都没校验，而审计
+  会把 `consistent` 读成「有证据支持」。修法是**把空集当一等情形显式返回
+  `UNKNOWN` + 说明**，并配一条专属测试（`test_single_arrival_candidate_is_unknown_not_consistent`）
+  与探针 B2。与 MEMORY §5 已有的「`getattr` 静默兜底」「`if not v` 放过空串」
+  同族：**判据的覆盖面比声称宽**。
+- **手抄的词表必然漂移，且漂移方向不可预测**：`GENERATOR_CONDITIONS` 初版手抄，
+  漏掉只在 `WaitSpec` 里的 `active`。改为 `get_args(...)` 从 schema 派生后，
+  「prompt 说的」与「schema 认的」在构造上不可能不一致。**凡是「同一份事实的
+  第二处字面量」，都该问一句「能不能从第一处算出来」。**
+- **抽出 helper 时，`NameError` 只会暴露你**忘了改的**引用**，不会暴露语义漂移**：
+  `executed_steps=lifecycle.steps_recorded` 在搬运后炸了（好抓），而
+  `pipeline.deps.repo` 那条是**静默错的**（`SessionPipeline` 在装配前没有
+  `deps` 属性）——靠读代码发现，不是靠测试。搬运类的重构，回归绿只是**下限**。

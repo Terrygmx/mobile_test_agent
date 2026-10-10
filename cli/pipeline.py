@@ -106,6 +106,144 @@ class _WdaRerunRequested(Exception):
         self.attempt = attempt
 
 
+@dataclass
+class DeviceStack:
+    """一次 run 的设备侧装配产物（Task 3.4 抽出，见 `wire_device_stack`）。
+
+    `device_session` 在 fake-driver 模式下是内联桩（无 `.driver`）——收尾方
+    必须用 `close()`，不要直接摸 `ds.driver`。
+    """
+
+    runner: "StepRunner"
+    lifecycle: "Lifecycle"
+    device_session: object
+    executor: object
+
+    def close(self) -> None:
+        """会话收尾（真机才真有 driver；失败不影响结果判定）。"""
+        driver = getattr(self.device_session, "driver", None)
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:  # noqa: BLE001 — 收尾失败不改结论
+                pass
+
+
+def wire_device_stack(pipeline: "SessionPipeline", *, env_kind, run_id: str,
+                      udid: str | None, bundle_id: str | None,
+                      repo=None, appium_url: str | None = None,
+                      fake_driver: bool = False) -> DeviceStack:
+    """把设备侧组件装配进 `pipeline`（**唯一实现**；Task 3.4 / P3-12 抽出）。
+
+    这段逻辑原先内联在 `cli/main.py::cmd_run`（真机四件套 + `PipelineDeps` /
+    `_step_runner` / `_lifecycle` / `_run_id` / `postcondition_checker` 回填）。
+    Task 3.4 的 Dry Run 需要**同一套**装配——各写一份必然漂移（本仓的教训：
+    「已修过的模式会被复制」），故抽到这里，`cmd_run` 改调本函数。
+
+    **顺序与语义与抽出前逐字相同**（P1/P2 全量回归是这次重构的验收标准）。
+    只把 `args.*` 解成值对象——`udid` 为空时由调用方解析（`cmd_run` 用
+    `build_identity.resolve_booted_udid`，Dry Run 由 CLI 传入）。
+
+    ⚠️ **`pipeline.store` 必须已设**（`cmd_run` 在调用前赋值）：`PipelineDeps`
+    的 `store` 与 `Lifecycle(store=...)` 都从它取。
+
+    `repo` 是 `PipelineDeps.repo` 的来源（真机 deps 要用它做 5.5 的定位解析）。
+    **显式入参而不是从 `pipeline` 上摸**：`SessionPipeline` 只存 `store` /
+    `deps` / `secrets` / `app_id` / `app_build`——repo 从来不是它的字段，
+    从 `pipeline.deps.repo` 兜底会让「调用方忘了传」与「真的没有 repo」
+    长得一样（且 `pipeline.deps` 在装配前恒为 `None`）。
+
+    真机路径缺 `bundle_id` → `ValueError`（调用方转成 exit 3 / 前置错误）。
+    """
+    from executor.guard import Guard
+    from runner.lifecycle import Lifecycle
+    from runner.runner import StepRunner
+
+    if fake_driver:
+        class _StubEx:
+            def find(self, strategies):
+                # Executor 契约：返回单个元素；多匹配抛 AmbiguousElement
+                return _StubElement()
+
+            def perform(self, action, element, value=None):
+                pass
+
+            def swipe(self, direction):
+                pass
+
+        class _StubElement:
+            """wait/assertion 引擎对元素的最小契约：可见、可用。"""
+
+            def is_displayed(self):
+                return True
+
+            def is_enabled(self):
+                return True
+
+            @property
+            def text(self):
+                return ""
+
+            def get_attribute(self, name):
+                return ""
+
+        class _StubDS:
+            def ensure_alive(self):
+                pass
+
+        ex = _StubEx()
+        runner = StepRunner(ex, _StubDS(), Guard(env_kind), run_id=run_id)
+    else:
+        # Task 2.7 接线（M4 Gate 前置）：真机 Appium 会话组件装配。
+        # caps 由 simctl 解析（M2/F5 时代是脚本内硬编码）；Guard 用
+        # --env-kind（P2-2 接线，默认 sandbox——production 拦截语义
+        # 见矩阵 #22 与 --allow-production）；DeviceSession 不挂
+        # TraceStore 做 recorder（record_infra 契约不匹配——infra 落库
+        # 由 pipeline 负责，JSONL 留作 debug 副本）。装配失败 = 前置配置
+        # 错误 → exit 3（fail-loud）。
+        from environment.manager import EnvironmentManager
+        from executor.executor import Executor
+        from session.app_session import AppSession
+        from session.device_session import DeviceSession, resolve_local_caps
+
+        if not bundle_id:
+            raise ValueError("真机路径需要 --bundle-id")
+        url = appium_url or os.environ.get("APPIUM_URL",
+                                           "http://127.0.0.1:4723")
+        ds = DeviceSession(url, resolve_local_caps(udid, bundle_id))
+        ds.connect()
+        app = AppSession(ds, bundle_id)
+        env = EnvironmentManager(app)
+        ex = Executor(ds)
+        runner = StepRunner(ex, ds, Guard(env_kind), run_id=run_id)
+
+    store = pipeline.store
+    if fake_driver:
+        pipeline.deps = PipelineDeps(env=None)  # app 级动作走 pipeline 内建桩
+    else:
+        # 真机 deps（M2 Gate 同链路）：EnvironmentManager 真做
+        # precondition.reset / cleanup（R16-4）。
+        pipeline.deps = PipelineDeps(env=env, repo=repo, app=app,
+                                     device_session=ds, executor=ex,
+                                     store=store)
+    pipeline._step_runner = runner
+    # 9.3-4：LLM 候选的 Guard 复检与动作步同一实例（10.1：Guard 不受 LLM
+    # 输出影响——同一策略对象才保证这一点）
+    if pipeline.recovery is not None:
+        pipeline.recovery.guard = runner.guard
+    lifecycle = Lifecycle(store=store)
+    pipeline._lifecycle = lifecycle
+    pipeline._run_id = run_id
+    if not fake_driver:
+        # H7 闭环：非幂等动作的 postcondition 真实执行（checker 复用
+        # WaitEngine 条件矩阵，M2 Gate 同款）。
+        runner.postcondition_checker = make_postcondition_checker(
+            pipeline, runner)
+    return DeviceStack(runner=runner, lifecycle=lifecycle,
+                       device_session=ds if not fake_driver else None,
+                       executor=ex)
+
+
 class SessionPipeline:
     """把 TestCase 变成新管线的真实执行。"""
 

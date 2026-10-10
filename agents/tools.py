@@ -156,10 +156,13 @@ NOT_WIRED: dict[str, str] = {
     "get_logs": "M5（Failure Diagnosis 的输入层）",
     "get_network_summary": "M5（Failure Diagnosis 的输入层）",
     "get_crash_info": "M5（Failure Diagnosis 的输入层）",
-    # Dry Run 入口：等 M3 的 test_candidates + Dry Run（设计 §6）
-    "run_testcase": "M3（Dry Run 入口）",
-    "run_candidate_test": "M3（Dry Run 入口）",
-    "create_test_candidate": "M3（test_candidates 表，迁移 002）",
+    # Dry Run 入口：**不在 M3**——M3（Task 3.4）只让 LLM 产出步骤序列、走
+    # `generator/dry_run.py` 的注入式 `execute`，不做工具调用循环（`AgentToolkit`
+    # 在生成期是死对象）。真正需要工具层的是「会驱动设备的命令」：M4 的
+    # explorer 与 M6 的 diagnosis 循环（`docs/handover.md` §8 第 4 行同款判断）。
+    "run_testcase": "M4/M6（驱动设备的工具循环，非 M3 的注入式 Dry Run）",
+    "run_candidate_test": "M4/M6（驱动设备的工具循环，非 M3 的注入式 Dry Run）",
+    "create_test_candidate": "M4/M6（候选落库已在 Task 3.4 由 agents/storage 直写）",
     "create_bug_candidate": "M5（bug_candidates 表，迁移 004）",
     "create_discovery_event": "M4（discovery_events 表，迁移 003）",
 }

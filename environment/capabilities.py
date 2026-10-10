@@ -16,7 +16,7 @@ from session.app_session import UnsupportedResetError
 
 
 class DeviceType(str, enum.Enum):
-    """11.1 设备端别。YAML/CLI 传裸字符串时经 _coerce 归一。"""
+    """11.1 设备端别。YAML/CLI 传裸字符串时经 `coerce_device_type` 归一。"""
 
     SIMULATOR = "simulator"
     REAL_DEVICE = "real_device"
@@ -34,7 +34,7 @@ RESET_CAPABILITIES: dict[str, set[DeviceType]] = {
 }
 
 
-def _coerce(device: DeviceType | str) -> DeviceType:
+def coerce_device_type(device: DeviceType | str) -> DeviceType:
     """归一设备描述。R13-5：容忍拼写差异（大小写/空格/下划线），但**拒绝**
     未知值并抛错——之前静默归一为 REAL_DEVICE，`real-device` 这种 typo 会
     被当「真机」继续跑，错误延后到别处爆。
@@ -60,7 +60,7 @@ class CapabilityResolver:
     @staticmethod
     def is_supported(strategy: str, device: DeviceType | str) -> bool:
         devices = RESET_CAPABILITIES.get(strategy)
-        return devices is not None and _coerce(device) in devices
+        return devices is not None and coerce_device_type(device) in devices
 
     @staticmethod
     def resolve(strategy: str, device: DeviceType | str) -> None:
@@ -71,7 +71,7 @@ class CapabilityResolver:
         """
         if CapabilityResolver.is_supported(strategy, device):
             return
-        dev = _coerce(device)
+        dev = coerce_device_type(device)
         supported = sorted(s for s, devs in RESET_CAPABILITIES.items() if dev in devs)
         raise UnsupportedResetError(
             f"unsupported reset strategy {strategy!r} on {dev.value}: "
