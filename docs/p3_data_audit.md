@@ -3072,3 +3072,138 @@ docstring 提及一起删才红。功能侧有 CLI 级钉子兜底（删调用 �
 
 顺手改掉 MEMORY §5.C 的一处**自身漂移**：小节标题写「守卫空转的**八种**形态」，
 而正文形态已到 ⑪——那个计数本身就是一处漂移，现改为「形态清单」并注明不写死个数。
+
+---
+
+## Task 3.5 评审修订记录（round 2 / final，2026-10-10）
+
+**复核报告**：`review/review_p3_task35_final_2026-10-10.md` —— 结论 **有条件通过**：
+14 条修订中 **9 条真核销、5 条部分**；修订**引入 2 条新缺陷（2×P1）**、**暴露 2 条既有
+缺陷（P2）**、另有 7 条 P3。复核者自跑 **34 组探针**，副本 `git status` 零改动。
+
+**数字对账**：三个核心声称全部复现一致——全量 **1857 passed**（父提交副本实跑 **1844**
+→ +13 ✅）、M3 Gate **exit 0**（G1–G8 全 PASS，G8 复跑 1857）、探针表 10 条中 9 条
+数字一致。唯一不符：**R4 描述不严谨**（审计写「`end_run` 移到 finally = 1 failed」，
+实测「移到 finally」是**等价变异 0 red**，「彻底删掉」才 1 red）——已在本段更正。
+
+### 修订 1（P1-A，本轮引入）：`app_id` 的解析在 `try` 之外 → traceback 换路径复活
+
+`cli/main.py`：`app_id = args.bundle_id or _trace_app_id(args.db)` 写在 `try` 之前。
+P1-1 把「前置错误不再 traceback」修在 `graph_query` 那一侧，而 `_trace_app_id`
+**自己就** `connect` + 查询——目录 / 非 sqlite 文件 / 多范围库三种坏输入全由它抛。
+实测：同样三种输入**给了** `--bundle-id` 是 exit 3，**不给**就是 traceback rc=1。
+即 P1-1 的声称只在一半输入上成立，而 `--fake-driver` + 本地库正是最常用的本地路径。
+
+- **修**：`app_id = ...` 挪进 `try`；`except` 由 `sqlite3.DatabaseError` 换成
+  **父类 `sqlite3.Error`**（P3-4 的同一条判据：「文件不是 sqlite 库」抛的是父类本身）。
+- **钉子**：`test_bad_db_without_bundle_id_is_a_preflight_error_not_a_traceback`
+  ——三种坏 `--db` × 不给 `--bundle-id`，逐形态断言 `rc == 3` + 无 traceback +
+  候选零落库。**探针**（把 `app_id` 挪回 `try` 外）→ 1 red。
+
+### 修订 2（P1-B，本轮引入）：promote commit 不带 pathspec → 连带提交/撤销别人的在途工作
+
+`candidates/review.py`：`git add rel` 之后 `git commit -m ...` **不带路径**。
+不带路径的 `git commit` 提交的是**整个暂存区**。我自己复现：别人
+`git add others_work.py`（未提交）→ promote commit 的 `show --name-only`
+**含 `others_work.py`**；DB 记账失败回滚时 `git revert` 又**把它一起删掉**
+（文件消失、`git status` 干净——连「有东西被删了」都不留痕）。不可逆地动第三方
+在途工作且无任何提示。讽刺的是同一个函数里 `target.relative_to(repo_root)`
+那道 fail-loud 已经说明作者知道「只该动自己的文件」，只是没在 commit 上贯彻。
+
+- **修**：`commit` 带 `-- rel`。撤销侧随之收窄（commit 里只有自己的文件）。
+- **钉子**：`test_promote_commit_does_not_sweep_in_other_peoples_staged_work`
+  （断言 `show --name-only` **恰等于**自己那一个路径）。**探针**（去掉 `-- rel`）→ 1 red。
+
+### 修订 3（P2-C，本轮暴露）：`git revert` 在脏暂存区下被拒 → 建议本身执行不了
+
+实测四种前置：工作区干净 / 未暂存的无关修改 → revert 成功；**暂存区有别人的新文件** /
+**暂存了对既有文件的修改** → revert **直接被拒**
+（`error: your local changes would be overwritten by revert`）。而「改到一半顺手审一个
+候选」正是最常见状态。被拒本身不弄坏任何东西，却把仓库留在**最坏形态**（commit 已落 +
+库还 PENDING），且原错误消息让人「先 `git revert` 再重试」——**那条建议自己就执行不了**。
+
+- **修**：`_undo_promote(repo_root, rel, sha)`——首选 `git revert`（只追加历史，
+  与打印给用户的「撤销 = git revert <sha>」同一手法）；被拒则退到**只作用于自己
+  路径**的逆提交（`git rm -- rel` + `git commit -- rel`），P1-B 那条判据在撤销侧
+  再贯彻一次；两条都断才报「需人工处理」，且人工步骤改为 `git rm` + 提交
+  （**真能执行**的那条）。
+- **钉子**：`test_rollback_survives_a_dirty_staging_area`（暂存区非空 → 撤销成功、
+  别人的文件原样留着、历史是**追加**的 3 个 commit 而非 reset 改写）+
+  `test_revert_failure_is_reported_with_the_commit_sha`（**两条**撤销路都断才报人工，
+  且消息必须含 `git rm`）。**探针**（退路直接 `return False`）→ 1 red。
+
+### 修订 4（P2-D，本轮暴露）：AST 守卫对 4 种规避形态仍空转
+
+`_dead_branches` 只判 `test` 是字面量且为假的 `if`/`while`。复核实测 4 种形态
+**0 red**：① 真调用搬进本函数内的嵌套函数（无人调）；② `if _GATE_DISABLED:`
+（test 不是常量，恒假检测完全看不见）；③ 搬进不可达的 `except Exception:`；
+④ 包进 `lambda`（无调用方）。其中 ②③ 当时有 `cmd_plan` 的功能测试兜住（2 red），
+①④ 没有。
+
+- **修**：判据收紧为「调用必须处于**无条件执行**的位置」——从调用节点上溯到函数体，
+  每一层都必须是白名单里的「到了就一定求值」节点（裸 `Expr` / 赋值右值 / `return`
+  / 调用实参…）。白名单**闭口**：新语法形态默认算条件位，守卫默认从严。
+  它是恒假判据的**超集**（`if False:` 同样过不了），且一并覆盖 ①–④。
+  原 `_dead_branches` / `_in_dead_branch` 删除（留着就是死代码）。
+  现有五个自主命令全部满足（实测 plan / generate 的祖先链都只有 `Expr`）。
+- **钉子**：同一条 `test_every_wired_autonomous_command_passes_the_gate`。
+  **探针**：上述 ①–④ + `if False:` / `while 0:` / 删真调用共 7 种形态，**逐一 1 red**。
+
+### 修订 5（P2-E，既有，本轮未修）：`from_store_dict` 的 `or "PENDING"` 静默兜底
+
+`candidates/test_case.py`：`review_status=row.get("review_status") or "PENDING"`。
+库里 `review_status=''` 会被静默读成 `PENDING`——而 `decide_candidate` 的门槛正是
+`review_status != "PENDING"` 就拒绝，**兜一次等于开了一条重新决策的旁路**，绕过
+领域层的全部校验（note 必填 / 不可二次决策）。与 P2-2「`review_status` 的唯一写路径」
+严格性不对称：写侧不许有旁路，读侧也不许有默认值。
+
+- **修**：字段收进词表——`review_status: Literal[*REVIEW_STATUSES]`（同一份
+  `REVIEW_STATUSES`，不手抄第二份——3.4「同一事实的第二处字面量必然漂移」的教训），
+  `from_store_dict` 改 `row["review_status"]`。**双闸**：空串/词表外的值 →
+  `ValidationError`（构造时就炸）；缺键 → `KeyError`（该列 DDL 是
+  `NOT NULL DEFAULT 'PENDING'`，正常行必然有值——缺了只可能是别处写坏了）。
+  ⚠️ `dry_run_status` **刻意仍用** `or "PENDING"`：它不是审核状态、没有第二道门槛
+  依赖它，兜成 PENDING 只是「还没跑过 Dry Run」这个中性语义。**两列宽严不同是刻意的**，
+  已在 docstring 写明，不是漏改。
+  （第一版只改成 `row["review_status"]` 是**不够的**：空串不是缺键，`KeyError`
+  根本不抛，空串照样静默穿进模型——钉子跑了才发现，判据必须真的验证「空串会炸」。）
+- **钉子**：`test_an_empty_review_status_is_not_silently_read_as_pending`
+  （空串 + 缺键都 `KeyError`；同时钉住 `dry_run_status` 的宽松仍在）。
+
+### 修订 6–12（P3 级）
+
+| # | 发现 | 处置 |
+|---|---|---|
+| P3-F | `cmd_candidate` 的 5 处新 `except sqlite3.Error` 里只有 `list` 一分支有钉子，其余四处「改成任意别的值都不红」 | 补 4 条：store 构造（accept/reject 参数化）、`--export-patch` 撞坏库、accept/reject 候选不存在 |
+| P3-G | `g6_reject_requires_note` 的 docstring 写「且**不留任何决策痕迹**」，但 `check()` 只断言 `returncode == 2 and "--note" in body`——**「不留痕迹」完全没有实现** | 真验：`review_status` 仍 PENDING 且 `reviewer`/`reviewed_at`/`review_note` 全空。**gate 的说明文字与判据之间没有自动一致性检查，同一句谎可以再撒一次** |
+| P3-H | `LIKE 'gen_%'` 的 `_` 是 LIKE **通配符**，`genx_abc` 也匹配（0 red）——钉子比它声明的宽一格 | 改在 Python 侧 `startswith("gen_")`（两处） |
+| P3-I | `phase0/verify_p3_m3.py::mta_candidate` 全仓零调用方（G5a/G6 都是裸 `sh(...)`） | 改为走 `mta_candidate(...)`（去重 + 消死代码） |
+| P3-J | G1 的 F7 拒绝对 `generate` 是 **exit 1**（`SystemExit(str)`），G2 staging 是 **exit 3**；而 `cmd_generate` 注释自称「退出码契约只有 0/3」 | **不改代码**（`cmd_plan` 同款、非本轮引入）。登记为口径：自主命令的**环境闸**走 `SystemExit`（exit 1），**业务前置**走 exit 3——Gate 输出把两者都印出来，读者不要以为是同一个契约 |
+
+### 复核者自陈未验证（显性登记）
+
+① 真机路径未跑（无设备）：`--bundle-id` 必填分支、真机装配、`udid` 解析均无端到端验证；
+② P2-3 的 4 种规避只在 `cmd_plan` 侧验证了功能兜底，`cmd_generate` 侧的 sandbox 兜底
+是推断未逐形态实测；③ P2-1 触发概率未量化；④ 并发 accept / accept 期间别人正在
+`git commit` 的冲突形态未测；⑤ 未复跑首轮 35 组探针全表（只跑与本 14 条相关的 34 组）；
+⑥ `sqlite3.Error` 家族只验了 `OperationalError`/`DatabaseError`；
+⑦ 迁移对既有行的回填只在新建库路径验证；⑧ `git revert` 在脏工作区的行为是
+git 2.54 实测，其他版本可能不同。
+
+### 教训（已并入 MEMORY §5）
+
+- **修一条真缺陷时，要问「这条修法覆盖它声称的**全部输入**吗」**：P1-1 在
+  `graph_query` 那一侧修好了「不再 traceback」，而 `app_id` 的解析自己也会抛——
+  同一条契约在另一半输入上仍然是 traceback。**判据的位置要比声明的位置更靠前**：
+  凡「前置错误 → exit 3」的声称，要把**所有**能抛的调用都圈进同一个 `try`。
+- **不可逆副作用的**作用域**要显式收窄，不能靠"我只 add 了一个文件"**：`git commit`
+  不带 pathspec 提交的是整个暂存区。同理 `git revert` 撤的是整个 commit。
+  **外部副作用的半径必须写进命令本身**（`-- rel`），而不是指望前后文的意图。
+- **错误消息里给的步骤，必须自己先执行一遍**：「先 `git revert` 再重试」在触发它的
+  那个场景（脏暂存区）下 git 自己就拒绝执行。**给不出可执行步骤的失败消息，
+  等于把最坏形态留给用户**。
+- **守卫判据从"有这个东西"收紧到"它在无条件位置"**：`ast.walk` 找得到任何位置的
+  调用，包括压根不会跑的。白名单要**闭口**（新形态默认算条件位），否则将来出现新的
+  延迟/条件求值写法时守卫默认放行。
+- **读侧不许有默认值**：写侧"唯一路径"收口了，读侧一个 `or "PENDING"` 就能把
+  「已决」洗成「未决」，从而绕过全部领域校验。**同一列两侧的宽严必须对称**。

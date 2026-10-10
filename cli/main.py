@@ -1230,16 +1230,23 @@ def cmd_generate(args: argparse.Namespace) -> int:
     #    --bundle-id」把它变成前置失败。而 `graph_query` 对**未初始化**的库
     #    会 fail-loud（`no such table: runs`）——那是给「库被指错」的诊断，
     #    不是给「还没跑过」的；两者在这里靠**只读探测**分开（前者照旧 exit 3）。
+    # ⚠️ `app_id` 的解析**必须在 try 之内**（review_p3_task35 round 2 P1-A）：
+    # `_trace_app_id` 自己就 `sqlite3.connect` + 查询，目录/非 sqlite 文件/多范围库
+    # 三种坏输入都由**它**抛（`OperationalError` / `DatabaseError` / `ValueError`）。
+    # 写在 try 之外时，同样三种输入给了 `--bundle-id` 是 exit 3、不给就是 traceback
+    # rc=1——P1-1「前置错误不再 traceback」只在一半输入上成立。
+    # 捕 `sqlite3.Error`（父类）而不是 `DatabaseError`（子类）：P3-4 的同一判据，
+    # 「文件不是 sqlite 库」抛的是父类本身。
     import sqlite3
 
     from graph.builder import build_runtime_graph
 
-    app_id = args.bundle_id or _trace_app_id(args.db)
     try:
+        app_id = args.bundle_id or _trace_app_id(args.db)
         graph = (knowledge.graph_query(app_id) if _trace_has_runs(args.db)
                  else build_runtime_graph([], app_id=app_id,
                                           app_build=app_build))
-    except (ValueError, sqlite3.DatabaseError) as e:
+    except (ValueError, sqlite3.Error) as e:
         # `graph_query` / `read_trace_steps` 的 fail-loud 是**正确**的
         # （不跨 app 混图、两个 build 不混进一张图）；非法的是「调用方拿一个
         # 没核对过的 app_id 来查」或「库根本读不了」。前置错误 → exit 3。

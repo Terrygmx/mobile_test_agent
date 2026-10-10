@@ -130,6 +130,36 @@ def _accept(store, repo_root, repository, cid, **over):
 # --- 1. 状态机（F6 与 P2 对齐） -----------------------------------------------
 
 
+def _git_env(root: Path) -> dict:
+    return {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+            "PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(root.parent)}
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=root, check=True, capture_output=True,
+                   env=_git_env(root))
+
+
+def _committed_files(root: Path, sha: str) -> list[str]:
+    r = subprocess.run(["git", "show", "--name-only", "--format=", sha],
+                       cwd=root, check=True, capture_output=True, text=True,
+                       env=_git_env(root))
+    return [l for l in r.stdout.splitlines() if l.strip()]
+
+
+def _porcelain(root: Path) -> str:
+    r = subprocess.run(["git", "status", "--porcelain"], cwd=root, check=True,
+                       capture_output=True, text=True, env=_git_env(root))
+    return r.stdout
+
+
+def _log(root: Path) -> str:
+    r = subprocess.run(["git", "log", "--format=%s"], cwd=root, check=True,
+                       capture_output=True, text=True, env=_git_env(root))
+    return r.stdout
+
+
 def test_review_statuses_match_p2(store):
     """F6：候选审核的状态词表与 P2 `recovery_reviews` **逐值相等**。
 
@@ -382,9 +412,66 @@ def test_write_failure_after_commit_reverts_it_and_keeps_pending(
     assert row["review_status"] == "ACCEPT" and sha
 
 
+def test_promote_commit_does_not_sweep_in_other_peoples_staged_work(
+        store, repo_root, repository, monkeypatch):
+    """promote commit 只提交**自己那一个文件**（review_p3_task35 round 2 P1-B）。
+
+    `git commit` 不带 pathspec 时提交的是**整个暂存区**：别人 `git add` 的在途
+    工作被连带提交，而本模块打印的只有「promote: candidate …」——用户无从得知
+    自己的文件被捎走了。反向更重：DB 记账失败时的 `git revert` 会**把别人的
+    改动一起撤掉**（实测：文件被提交、revert 后文件消失且 `git status` 干净，
+    连「有东西被删了」都不留痕）。故 `commit` 必须带 `-- rel`。
+
+    探针（把 `-- rel` 去掉）→ 本测试红：`show --name-only` 含 `others_work.py`。
+    """
+    cid = _seed(store)
+    # 别人的在途工作：已 add、未提交
+    (repo_root / "others_work.py").write_text("OTHERS IN-FLIGHT WORK\n")
+    _git(repo_root, "add", "others_work.py")
+
+    _row, sha = _accept(store, repo_root, repository, cid)
+    names = _committed_files(repo_root, sha)
+    assert names == ["suites/smoke/cand_search_001.yaml"], names
+    # 别人的文件仍停在暂存区（没被捎走、也没被 commit 清掉）
+    assert (repo_root / "others_work.py").exists()
+    assert "others_work.py" in _porcelain(repo_root)
+
+
+def test_rollback_survives_a_dirty_staging_area(
+        store, repo_root, repository, monkeypatch):
+    """暂存区有别人的在途工作时，撤销必须**照样成功**（round 2 P1-B/P2-C）。
+
+    `git revert` 在这种情形下被 git 直接拒绝（实测：连「暂存了一个无关既有
+    文件的修改」都触发 `your local changes would be overwritten`）。早先没有
+    退路 → 仓库停在最坏形态（commit 已落 + 库 PENDING），而错误消息让人
+    `git revert`——**那条建议自己就执行不了**。现在退路是只作用于自己路径的
+    逆提交：既撤销成功，也绝不动别人的在途工作。
+
+    探针（把 `_undo_promote` 的退路删掉）→ 本测试红。
+    """
+    cid = _seed(store)
+    (repo_root / "others_work.py").write_text("OTHERS IN-FLIGHT WORK\n")
+    _git(repo_root, "add", "others_work.py")     # 暂存区非空 → revert 必被拒
+
+    monkeypatch.setattr(store, "decide_candidate",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            sqlite3.OperationalError("database is locked")))
+    with pytest.raises(RuntimeError) as e:
+        _accept(store, repo_root, repository, cid)
+    msg = str(e.value)
+    assert "已撤销" in msg and "逆提交" in msg, msg
+    # 自己的落盘被撤掉了 → 重试即续传
+    assert not (repo_root / "suites" / "smoke" / "cand_search_001.yaml").exists()
+    # 别人的在途工作**原样留着**（内容不变、且仍暂存着）
+    assert (repo_root / "others_work.py").read_text() == "OTHERS IN-FLIGHT WORK\n"
+    assert "others_work.py" in _porcelain(repo_root)
+    # 且历史是**追加**的（不是 reset 改写）：init + promote + 逆提交
+    assert len(_log(repo_root).splitlines()) == 3, _log(repo_root)
+
+
 def test_revert_failure_is_reported_with_the_commit_sha(
         store, repo_root, repository, monkeypatch):
-    """连 `git revert` 都失败时：异常必须**带上 sha**（人工接手的第一手信息）。
+    """连撤销都失败时：异常必须**带上 sha**（人工接手的第一手信息）。
 
     静默吞掉会让「库 PENDING + 文件已提交」这个最坏形态失去线索。
     """
@@ -396,16 +483,20 @@ def test_revert_failure_is_reported_with_the_commit_sha(
     import candidates.review as mod
     from source.vcs import run_git as real_run_git
 
-    def flaky_git(root, *args):
-        if args and args[0] == "revert":
-            raise RuntimeError("revert 撞上冲突")
+    def broken_git(root, *args):
+        # **两条撤销路都断**（`revert` 与退路的 `rm`）才该走到「需人工处理」
+        if args and args[0] in ("revert", "rm"):
+            raise RuntimeError("git 坏了")
         return real_run_git(root, *args)
 
-    monkeypatch.setattr(mod, "run_git", flaky_git)
+    monkeypatch.setattr(mod, "run_git", broken_git)
     with pytest.raises(RuntimeError) as e:
         _accept(store, repo_root, repository, cid)
     msg = str(e.value)
-    assert "已提交" in msg and "revert" in msg and "人工处理" in msg, msg
+    assert "已提交" in msg and "人工处理" in msg, msg
+    # 人工步骤必须是**真能执行**的（round 2 P2-C：原文案让人 `git revert`，
+    # 而在触发这条分支的脏暂存区下 git revert 本身就执行不了）
+    assert "git rm" in msg, msg
     # 如实报告：库仍 PENDING，文件仍在（撤销失败 = 最坏形态，线索齐全）
     assert store.get_candidate(cid)["review_status"] == "PENDING"
 

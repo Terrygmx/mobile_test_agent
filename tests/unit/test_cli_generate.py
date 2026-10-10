@@ -258,6 +258,48 @@ def test_generate_without_bundle_id_takes_it_from_the_trace(proj, stub_llm, caps
     assert len(SQLiteAgentStore(proj["agent_db"]).list_candidates()) == 1
 
 
+def test_bad_db_without_bundle_id_is_a_preflight_error_not_a_traceback(
+        proj, stub_llm, capsys):
+    """不给 `--bundle-id` + 坏 `--db` → exit 3（round 2 P1-A）。
+
+    P1-1 把「不再 traceback」修在 `graph_query` 那一侧，但 `app_id` 的解析
+    （`args.bundle_id or _trace_app_id(args.db)`）自己就 `connect` + 查询——
+    写在 `try` 之外时，同样三种坏输入**给了** `--bundle-id` 是 exit 3、
+    **不给**就是 traceback rc=1。即「不再 traceback」只在一半输入上成立，
+    而 `--fake-driver` + 本地库正是最常用的本地路径。
+
+    三种形态：目录（`OperationalError`）/ 非 sqlite 文件（`DatabaseError`）/
+    多范围库（`ValueError`）。
+    """
+    multi = proj["tmp"] / "multi_scope.db"
+    import sqlite3 as _s
+    conn = _s.connect(multi)
+    conn.executescript(
+        "CREATE TABLE runs (run_id TEXT, app_bundle_id TEXT, app_build TEXT);"
+        "INSERT INTO runs VALUES ('r1','com.a','1');"
+        "INSERT INTO runs VALUES ('r2','com.b','1');")
+    conn.commit()
+    conn.close()
+    not_a_db = proj["tmp"] / "not_a_db.txt"
+    not_a_db.write_text("这不是 sqlite 库\n")
+
+    for label, bad in [("目录", proj["tmp"] / "a_directory"),
+                       ("非 sqlite 文件", not_a_db),
+                       ("多范围库", multi)]:
+        if label == "目录":
+            bad.mkdir(exist_ok=True)
+        argv = [a for a in _argv(proj) if a not in ("--bundle-id", "com.demo")]
+        argv[argv.index("--db") + 1] = str(bad)
+        capsys.readouterr()
+        rc = main(argv)
+        out = capsys.readouterr().out
+        assert rc == 3, f"{label}：期望 exit 3，实得 {rc}\n{out}"
+        assert "Traceback" not in out, f"{label}：仍打 traceback\n{out}"
+        assert out.startswith("PREFLIGHT ERROR:"), f"{label}：{out}"
+        # 前置失败 ⇒ 什么都没写（候选零落库）
+        assert SQLiteAgentStore(proj["agent_db"]).list_candidates() == [], label
+
+
 def test_generate_with_a_wrong_bundle_id_is_a_preflight_error(proj, stub_llm,
                                                               capsys):
     """与 trace 不符的 `--bundle-id` → 前置错误 exit 3（不是 traceback）。"""
@@ -548,8 +590,11 @@ def test_generate_failure_ends_the_run_row_as_aborted(proj, stub_llm, capsys,
     from tracer.storage import TraceStore
 
     conn = TraceStore(str(proj["trace_db"])).conn
-    rows = conn.execute("SELECT status, end_time FROM runs WHERE"
-                        " run_id LIKE 'gen_%'").fetchall()
+    # ⚠️ 判 `run_id` 前缀必须在 **Python 侧**比，不能用 `LIKE 'gen_%'`
+    # （round 2 P3-H）：`_` 在 LIKE 里是**单字符通配符**，`genx_abc` 也匹配——
+    # 钉子比它声明的「`gen_*` 的 run 行」宽一格，而宽出来的那一格没有语义。
+    rows = [r for r in conn.execute("SELECT status, end_time, run_id FROM runs")
+            if r["run_id"].startswith("gen_")]
     assert rows, "应留下一条 gen_* 的 run 行"
     assert all(r["status"] == "ABORTED" and r["end_time"] for r in rows), \
         [dict(r) for r in rows]
@@ -569,6 +614,59 @@ def test_generator_run_ids_are_recorded(proj, stub_llm, capsys):
     from tracer.storage import TraceStore
 
     conn = TraceStore(str(proj["trace_db"])).conn
-    n = conn.execute("SELECT COUNT(*) FROM runs WHERE run_id LIKE 'gen_%'"
-                     ).fetchone()[0]
+    # 同 P3-H：前缀在 Python 侧比（`LIKE 'gen_%'` 的 `_` 是通配符）
+    n = sum(1 for r in conn.execute("SELECT run_id FROM runs")
+            if r["run_id"].startswith("gen_"))
     assert n == 1, f"generate 应在图源库里留下自己的 run 行，实得 {n}"
+
+
+# --- P3-F：五处 `sqlite3.Error` 必须**处处有钉子** ---------------------------
+#
+# round 2 复核发现：`cmd_candidate` 里新加的 5 处 `except sqlite3.Error` 中只有
+# `list` 一分支有钉子（`test_candidate_list_on_an_unreadable_db_is_exit_3`），
+# 另外四处「改成任意别的值都不红」——即那四处是**没有钉子保护的同一句声称**。
+# 这里给 store 构造 / export / accept / reject 四处各补一条。
+
+
+@pytest.mark.parametrize("verb", ["accept", "reject"])
+def test_candidate_store_that_cannot_be_opened_is_exit_3(proj, capsys, verb):
+    """store 构造失败（`--db` 指向目录）→ exit 3，不是 traceback。
+
+    `SQLiteAgentStore(args.db)` 自己就会 `connect`——目录会抛
+    `OperationalError`，而它**不是** `RuntimeError`，早先的 except 接不住。
+    """
+    a_dir = proj["tmp"] / "not_a_db_dir"
+    a_dir.mkdir()
+    argv = ["candidate", "review", verb, "cand_x", "--db", str(a_dir),
+            "--note", "理由"]
+    assert main(argv) == 3
+    out = capsys.readouterr().out
+    assert out.startswith("CANDIDATE ERROR:") and "Traceback" not in out, out
+
+
+def test_candidate_export_patch_on_an_unreadable_db_is_exit_3(proj, capsys):
+    """`--export-patch` 撞上读不了的库 → exit 3（export 那处 except 的钉子）。"""
+    a_dir = proj["tmp"] / "not_a_db_dir2"
+    a_dir.mkdir()
+    assert main(["candidate", "review", "accept", "cand_x", "--export-patch",
+                 "--db", str(a_dir)]) == 3
+    out = capsys.readouterr().out
+    assert out.startswith("CANDIDATE ERROR:") and "Traceback" not in out, out
+
+
+def test_candidate_accept_of_a_missing_candidate_is_exit_3(proj, capsys):
+    """accept 的 except 钉子：候选不存在 → 域错误 exit 3（不靠 traceback）。"""
+    assert main(["candidate", "review", "accept", "no_such_candidate",
+                 "--db", str(proj["agent_db"]),
+                 "--suites-root", str(proj["suites_root"]),
+                 "--repo-root", str(proj["git"])]) == 3
+    out = capsys.readouterr().out
+    assert out.startswith("CANDIDATE ERROR:") and "不存在" in out, out
+
+
+def test_candidate_reject_of_a_missing_candidate_is_exit_3(proj, capsys):
+    """reject 的 except 钉子：同上（reject 那一处曾 0 red）。"""
+    assert main(["candidate", "review", "reject", "no_such_candidate",
+                 "--db", str(proj["agent_db"]), "--note", "不要"]) == 3
+    out = capsys.readouterr().out
+    assert out.startswith("CANDIDATE ERROR:") and "不存在" in out, out

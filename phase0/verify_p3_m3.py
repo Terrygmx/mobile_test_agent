@@ -325,10 +325,9 @@ def g4_duplicate_is_traced(g: dict, llm_url: str, plan_id: str) -> bool:
 
 
 def g5_accept_lands_and_enters_p1(g: dict, cid: str) -> bool:
-    r = sh(PY, "-m", "cli.main", "candidate", "review", "accept", cid,
-           "--db", str(g["agent_db"]), "--suites-root", str(g["suites_root"]),
-           "--generated", str(g["gen"]), "--repo-root", str(g["proj"]),
-           "--reviewer", "gate")
+    r = mta_candidate(g, "accept", cid, "--suites-root",
+                      str(g["suites_root"]), "--generated", str(g["gen"]),
+                      "--repo-root", str(g["proj"]), "--reviewer", "gate")
     body = r.stdout + r.stderr
     target = g["suites_root"] / "smoke" / f"{cid}.yaml"
     log = _git(g["proj"], "log", "--oneline").stdout
@@ -357,13 +356,30 @@ def g5_accept_lands_and_enters_p1(g: dict, cid: str) -> bool:
 
 
 def g6_reject_requires_note(g: dict) -> bool:
-    """REJECT 无 `--note` → argparse 报错（exit 2），且不留任何决策痕迹。"""
-    r = sh(PY, "-m", "cli.main", "candidate", "review", "reject", "whatever",
-           "--db", str(g["agent_db"]))
+    """REJECT 无 `--note` → argparse 报错（exit 2），且**不留任何决策痕迹**。
+
+    ⚠️ 「不留痕迹」原先只写在 docstring 里、`check()` 没实现（round 2 P3-G）：
+    gate 的说明文字与它的判据之间没有自动一致性检查，同一句谎可以再撒一次。
+
+    ⚠️ 判据必须是**前后快照对比**，不能是「所有行都还是 PENDING」——本 check 在
+    G5a（accept）**之后**跑，那时库里已经有 ACCEPT 行了。「这次失败的 reject
+    没改任何东西」的正确形态是：整张候选表的决策四列逐行不变。
+    """
+    from agents.storage import SQLiteAgentStore
+
+    def snapshot() -> list[tuple]:
+        return [(r["candidate_id"], r["review_status"], r["reviewer"],
+                 r["reviewed_at"], r["review_note"])
+                for r in SQLiteAgentStore(g["agent_db"]).list_candidates()]
+
+    before = snapshot()
+    r = mta_candidate(g, "reject", "whatever")
+    after = snapshot()
     body = r.stdout + r.stderr
     return check("G6_reject_requires_note",
-                 r.returncode == 2 and "--note" in body,
-                 f"exit={r.returncode} 报错点名 --note={'--note' in body}")
+                 r.returncode == 2 and "--note" in body and before == after,
+                 f"exit={r.returncode} 报错点名 --note={'--note' in body} "
+                 f"决策四列未动={before == after}（{len(after)} 行）")
 
 
 def g7_decided_candidate_not_overwritten(g: dict, cid: str, llm_url: str,

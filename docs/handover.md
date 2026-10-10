@@ -195,14 +195,12 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
 
 ## 9. 当前状态快照（**2026-10-10**，以实测为准）
 
-- **分支 / HEAD**：`P3-1010` / `4e23928`（`docs(p3): 逐条核对 14 处「教训（已并入 MEMORY §5）」`）
-- **全量基线**：**1857 passed / 0 failed**
-- **最新 tag**：`checkpoint-p3-m2`；**M3 尚未打 tag**（`checkpoint-p3-m3` 未打）——
-  ⚠️ **3.5 的实现与修订均已提交，但 M3 收口判据是 tag，不是提交**。只读 `git log`
-  会把 `2c6fb73`/`0e760fe` 误读成「M3 已收口」。
+- **分支 / HEAD**：`P3-1010` / **`checkpoint-p3-m3`**（M3 已收口；tag 不可动）
+- **全量基线**：**1866 passed / 0 failed**
+- **最新 tag**：`checkpoint-p3-m3`（**P3 M3 收口**）
 - **Gate 状态**：M1 ✅（`checkpoint-p3-m1`）· M2 ✅（`phase0/verify_p3_m2.py` exit 0，8/8 PASS）
   · **M3 ✅**（`phase0/verify_p3_m3.py` exit 0，**11/11 PASS**，`out/p3_m3_gate/summary.json`
-  verdict=PASS；G8 内含全量 1857 passed）
+  verdict=PASS；G8 内含全量 1866 passed）
 - **已完成**：P0 / P1 / P2 全部；P3 的 **M1、M2、M3 全部**（3.1–3.5）
   - 3.1 Candidate 字段（`72106e1`，评审两轮已清）
   - 3.2 Coverage Gap（`43555e9` + 修订 `0ede83e`）——本体收口，**round 2 核销 P2-1'
@@ -234,8 +232,16 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
       不再算。
     - **AE（已决候选不被覆写）双层**：`save_candidate` 对已决行 fail-loud（belt）+
       `generate` 预过滤已决 gap（suspenders）。两层**各自独立可探针**。
-- **下一步**：**打 tag `checkpoint-p3-m3` 收口 M3**（gate 已 11/11 PASS，只差 tag +
-  round 2 复核收尾），然后进 **M4（Discovery Event 接入 F6 同一入口）**。
+    - **round 2 复核**（`review/review_p3_task35_final_2026-10-10.md`）**有条件通过**：
+      14 条中 9 条真核销、5 条部分；**修订引入 2×P1**（`_trace_app_id` 在 try 之外
+      → traceback 换路径复活；promote commit 不带 pathspec → 连带提交/撤销别人的
+      在途工作）+ 暴露 2×P2（脏暂存区下 `git revert` 被拒、AST 守卫 4 种规避形态
+      空转）+ 7 条 P3。**全部已修订**（见 `docs/p3_data_audit.md` round 2 段）：
+      撤销改为 `_undo_promote`（revert 被拒 → 只作用于自己路径的逆提交）、
+      AST 守卫收紧为「无条件执行位置」、`review_status` 读侧收进
+      `Literal[*REVIEW_STATUSES]`。修订后：全量 **1866 passed / 0 failed** +
+      Gate **exit 0**（11/11）。
+- **下一步**：**M4（Discovery Event 接入 F6 同一入口）**。
   ⚠️ **M4 开工前置**：
   1. **翻案通道仍未做**（3.5 拍板不做）：被 SKIP 的候选无库行可 ACCEPT；真语料 2 对
      同指纹（`reset_logout_001` vs `login_001` 语义不同那对是危险的一对）——**M4+

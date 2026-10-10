@@ -285,6 +285,41 @@ def test_row_models_roundtrip(store):
     assert r.reason == "DUPLICATE" and r.duplicate_of == "x"
 
 
+def test_an_empty_review_status_is_not_silently_read_as_pending(store):
+    """`review_status` 读侧不许有默认值（round 2 P2-E）。
+
+    `row.get("review_status") or "PENDING"` 会把库里的空串兜成 `PENDING`，
+    而 `decide_candidate` 的门槛正是 `review_status != "PENDING"` 就拒绝——
+    兜一次等于**开了一条重新决策的旁路**，绕过 note 必填 / 不可二次决策。
+    这与 P2-2「`review_status` 的唯一写路径」是同一条纪律的读出侧。
+
+    双闸：空串/词表外的值 → `ValidationError`（字段收进
+    `Literal[*REVIEW_STATUSES]`）；缺键 → `KeyError`。
+
+    `dry_run_status` 刻意**仍**用 `or "PENDING"`（它不是审核状态，没有第二道
+    门槛依赖它）——两列宽严不同是刻意的，不是漏改。
+    """
+    from pydantic import ValidationError
+
+    row = store.save_candidate("cand_empty", **_candidate())
+    row["review_status"] = ""
+    with pytest.raises(ValidationError):
+        TestCandidate.from_store_dict(row)
+    row["review_status"] = "MAYBE"          # 词表外的值同样不许过
+    with pytest.raises(ValidationError):
+        TestCandidate.from_store_dict(row)
+    # 缺键 fail-loud（该列在 DDL 里 NOT NULL DEFAULT 'PENDING'，
+    # 正常行必然有值——缺了只可能是别处写坏了）
+    row2 = store.save_candidate("cand_missing", **_candidate())
+    del row2["review_status"]
+    with pytest.raises(KeyError):
+        TestCandidate.from_store_dict(row2)
+    # 而 dry_run_status 为空仍读成 PENDING（刻意保留的宽松）
+    ok = store.save_candidate("cand_dry", **_candidate())
+    ok["dry_run_status"] = ""
+    assert TestCandidate.from_store_dict(ok).dry_run_status == "PENDING"
+
+
 def test_row_models_reject_unknown_fields():
     """`extra="forbid"`（与 `agents/models.py` / `planner/models.py` 同款）。"""
     from pydantic import ValidationError

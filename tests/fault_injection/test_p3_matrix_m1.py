@@ -12,6 +12,8 @@
 """
 from __future__ import annotations
 
+import ast
+
 import pytest
 
 from agents.policy_config import PolicyConfig, load_policy
@@ -177,7 +179,6 @@ def test_every_wired_autonomous_command_passes_the_gate():
        `env_kind=_resolve_env_kind(args)`（与 `mta run` 同款的唯一解析点）。
        另外 `command=` 的字面量必须与函数名一致（否则拒绝消息会指名错的命令）。
     """
-    import ast
     from pathlib import Path
 
     from cli.main import AUTONOMOUS_COMMANDS
@@ -213,18 +214,27 @@ def test_every_wired_autonomous_command_passes_the_gate():
                     assert kw.value.value == name, (
                         f"`{node.name}` 的 command={kw.value.value!r} 与函数名"
                         f" {name!r} 不一致（拒绝消息会指名错的命令）")
-        # 调用节点自己也不能是死代码：`if False:` 包着仍算「有调用」。
-        # （`_gate_calls` 走的是 `ast.walk`，死分支里的调用同样会被找到——
-        # 故这里额外要求该调用**不在**一个恒假的 `if` 体里。）
-        assert not _in_dead_branch(node, calls), (
-            f"`{node.name}` 的 _check_autonomous_env 调用在恒假分支里"
-            f"（`if False:` 之类）——守卫并未真跑，F7 是空转的")
+        # ⚠️ 调用还必须**无条件执行**（round 2 P2-D）。「有调用」不够：
+        # `ast.walk` 找得到**任何位置**的调用，包括压根不会跑的。实测四种
+        # 架空形态（都能让守卫变成"不做事"）：
+        #   ① 真调用搬进本函数内的嵌套函数（无人调）  → FunctionDef 祖先
+        #   ② `if _GATE_DISABLED:` 包着                → If 祖先（test 不是常量，
+        #      连恒假检测都绕过了）
+        #   ③ 搬进不可达的 `except Exception:`          → ExceptHandler 祖先
+        #   ④ 包进 `lambda`（无调用方）                 → Lambda 祖先
+        # 其中 ②③ 当时有 `cmd_plan` 的功能测试兜住（2 red），①④ 没有。
+        # 故判据收紧为：从调用节点一路上溯到函数体，**每一层都必须是无条件
+        # 求值位置**（裸表达式 / 赋值右值 / return 值）。真正的闸门就该是
+        # 函数的第一件事——这个要求对现有五个自主命令全部成立（实测 plan /
+        # generate 的祖先链都只有 `Expr`）。
+        bad = _conditional_ancestors(node, calls)
+        assert not bad, (
+            f"`{node.name}` 的 _check_autonomous_env 调用不在无条件执行的位置"
+            f"（被 {bad} 包着）——F7 闸门可能永不运行，是空转的")
 
 
 def _gate_calls(fn_node):
     """该函数体里所有 `_check_autonomous_env(...)` 调用节点。"""
-    import ast
-
     out = []
     for call in ast.walk(fn_node):
         if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
@@ -233,34 +243,36 @@ def _gate_calls(fn_node):
     return out
 
 
-def _dead_branches(fn_node) -> set[int]:
-    """该函数体里所有「恒假分支」节点的 `id()`（`if False:` / `if 0:` / `while False:`）。
+# 调用节点上溯到函数体的路上，**允许**出现的节点：都是「到了就一定求值」的位置。
+# 白名单是**闭口**的——新语法形态默认算条件位，将来出现新的「延迟/条件求值」
+# 写法时守卫默认从严，而不是默认放行。
+_UNCONDITIONAL = (ast.Expr, ast.Assign, ast.AnnAssign, ast.AugAssign,
+                  ast.Return, ast.keyword, ast.Call, ast.Attribute, ast.Starred)
 
-    守卫的另一半（review_p3_task35 P2-3）：把真调用包进 `if False:` 之后
-    `ast.walk` 照样找得到调用节点——「有调用」成立而守卫空转。判据只看
-    `test` 是字面量且为假的最简形态：常量折叠（`if 1 - 1:`）不在这里的射程，
-    它要挡住的是「探针式」的架空，不是对抗混淆（那也不该由测试来挡）。
+
+def _conditional_ancestors(fn_node, calls) -> set[str]:
+    """这些调用里，有谁的祖先链上出现了「不一定执行」的节点。
+
+    返回出现的节点类型名集合（空集 = 全部无条件）。ast 没有父指针，故先自建
+    一张父子表，再从每个调用节点上溯到 `fn_node`。
+
+    取代了早先的「恒假分支」判据（round 2 P2-D）：后者只认 `test` 是字面量且
+    为假的 `if`/`while`，于是 `if _GATE_DISABLED:` 这种**test 不是常量**的形态
+    完全看不见。无条件位置判据是它的超集——`if False:` 同样过不了——且一并
+    覆盖嵌套未调用函数 / 不可达 `except` / `lambda` 三种旁路。
     """
-    import ast
-
-    dead: set[int] = set()
+    parents: dict = {}
     for node in ast.walk(fn_node):
-        if not isinstance(node, (ast.If, ast.While)):
-            continue
-        test = node.test
-        # `False` / `0` / `""` 在 py3 里都是 `ast.Constant`（`False` 不是
-        # `ast.Name`）——只判常量那一种最简形态。
-        falsy = isinstance(test, ast.Constant) and not test.value
-        if falsy:
-            for child in ast.walk(node):
-                dead.add(id(child))
-    return dead
-
-
-def _in_dead_branch(fn_node, calls) -> bool:
-    """这些调用里是否有落在恒假分支内的。"""
-    dead = _dead_branches(fn_node)
-    return any(id(c) in dead for c in calls)
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    found: set[str] = set()
+    for call in calls:
+        cur = parents.get(call)
+        while cur is not None and cur is not fn_node:
+            if not isinstance(cur, _UNCONDITIONAL):
+                found.add(type(cur).__name__)
+            cur = parents.get(cur)
+    return found
 
 
 def test_env_kind_resolution_is_shared_with_run():

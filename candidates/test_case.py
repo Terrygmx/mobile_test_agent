@@ -27,7 +27,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -76,7 +76,12 @@ class TestCandidate(_Strict):
     # 却不知道**为什么**失败。与 `generation_evidence`（**溯源**：这条候选从
     # 哪来）分开存，两件事不该混在一个 JSON 里。
     dry_run_detail: dict = Field(default_factory=dict)
-    review_status: str = "PENDING"
+    # ⚠️ 收进词表而非裸 `str`（round 2 P2-E）：裸 `str` 让库里的空串静默通过
+    # `from_store_dict`，而 `decide_candidate` 的门槛正是 `!= "PENDING"` 就拒绝
+    # ——空串会被当成「已决的某种未知状态」，兜一次等于开了一条重新决策的
+    # 旁路。用 `Literal[*REVIEW_STATUSES]`（同一份词表，不手抄第二份——3.4 的
+    # 教训）：缺键/空值/任何词表外的值都在构造时就炸。
+    review_status: Literal[*REVIEW_STATUSES] = "PENDING"
     # 迁移 004（Task 3.5）：人工审核的理由留痕（REJECT 必填——F6 与 P2
     # `recovery_reviews` 的 note 字段对齐）。NULL = 未决或无理由。
     review_note: str | None = None
@@ -123,6 +128,20 @@ class TestCandidate(_Strict):
         **多余的键被忽略**（`created_at` 之外的 DB 列）、**缺字段仍然 fail-loud**
         （与 `TestPlan.from_store_dict` 同款：`extra="forbid"` 保护的是「输入」，
         不是「读出」）。
+
+        ⚠️ `review_status` 用 `row["review_status"]` 而**不是** `row.get(...)` 或
+        `row.get(...) or "PENDING"`（round 2 P2-E）：`or "PENDING"` 会把库里的
+        空串兜成 `PENDING`，而 `decide_candidate` 的门槛正是
+        `review_status != "PENDING"` 就拒绝——兜一次等于**开了一条重新决策的
+        旁路**，绕过 note 必填 / 不可二次决策。这与 P2-2「`review_status` 的
+        唯一写路径」是同一条纪律的读出侧：写侧不许有旁路，读侧也不许有默认值。
+        双闸：**缺键** → `KeyError`（该列 DDL 是 `NOT NULL DEFAULT 'PENDING'`，
+        正常行必然有值——缺了只可能是别处写坏了）；**空串/词表外的值** →
+        `ValidationError`（字段收进 `Literal[*REVIEW_STATUSES]`）。
+
+        `dry_run_status` 仍用 `or "PENDING"`：它不是审核状态，兜成 PENDING
+        的后果只是「这条候选还没跑过 Dry Run」这个中性语义（没有第二道门槛
+        依赖它）。**两列的宽严不同是刻意的**，不是漏改。
         """
         return cls(candidate_id=row["candidate_id"],
                    testcase_yaml=row["testcase_yaml"],
@@ -131,7 +150,7 @@ class TestCandidate(_Strict):
                    fingerprint=row.get("fingerprint"),
                    dry_run_status=row.get("dry_run_status") or "PENDING",
                    dry_run_detail=row.get("dry_run_detail") or {},
-                   review_status=row.get("review_status") or "PENDING",
+                   review_status=row["review_status"],
                    review_note=row.get("review_note"),
                    reviewer=row.get("reviewer"),
                    reviewed_at=row.get("reviewed_at"),

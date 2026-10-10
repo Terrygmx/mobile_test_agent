@@ -26,9 +26,11 @@ Discovery Event 与 M5 的 Bug Candidate 复用同一入口（`kind` 判别，�
 
 ⚠️ **两个卡死窗口都要关掉**（review_p3_task35 P2-1）：上面的顺序关掉了
 「改了状态但没落盘」；反方向的「**已落盘但没记账**」同样会卡死（重试被
-「目标文件已存在」挡住），故 `commit` 之后的写库失败会**自动 `git revert`**
-那个 commit——只追加历史、不改写，与打印给用户的「撤销 = git revert <sha>」
-同一手法。两条路径都保持「候选 PENDING + 工作区干净 → 重试即续传」。
+「目标文件已存在」挡住），故 `commit` 之后的写库失败会**真回滚**——只追加
+历史、不改写，与打印给用户的「撤销 = git revert <sha>」同一手法。两条路径都保持
+「候选 PENDING + 工作区干净 → 重试即续传」。⚠️ 撤销本身有两条路（round 2 P2-C）：
+`git revert` 在**脏暂存区**下会被 git 拒绝，故退路是只作用于自己路径的逆提交
+（见 `_undo_promote`）——**两条路都不会碰别人的在途工作**。
 
 ## 依赖方向
 
@@ -136,11 +138,20 @@ def decide_candidate(store, kind: str, candidate_id: str, decision: str,
     try:
         target.write_text(dump_testcase_yaml(tc), encoding="utf-8")
         run_git(repo_root, "add", rel)
+        # ⚠️ `commit` 必须带 **pathspec**（`-- rel`，review_p3_task35 round 2 P1-B）：
+        # 不带路径的 `git commit` 提交的是**整个暂存区**——别人 `git add` 的在途
+        # 工作会被连带提交，而本模块的报错文案只说「promote: candidate …」，
+        # 用户无从得知自己的文件被捎走了。反向更重：DB 记账失败时的 `git revert`
+        # 会**把别人的改动一起撤掉**（实测 `others_work.py` 被提交、revert 后文件
+        # 消失且 `git status` 干净——连「有东西被删了」都不留痕）。
+        # 上面的 `target.relative_to(repo_root)` 那道 fail-loud 早已说明作者知道
+        # 「只该动自己的文件」，只是没在 commit 上贯彻。
         run_git(repo_root, "commit", "-m",
                 f"promote: candidate {tc.id}（suite={tc.suite}，"
                 f"reviewer={reviewer}）\n\n"
                 f"origin: LLM 生成候选经人工审核 ACCEPT（P3-13 / F6）；"
-                f"撤销 = git revert <sha>")
+                f"撤销 = git revert <sha>",
+                "--", rel)
     except Exception as e:  # noqa: BLE001 — git 失败（GitError）与 IO 失败同一处置
         target.unlink(missing_ok=True)
         raise RuntimeError(
@@ -155,22 +166,53 @@ def decide_candidate(store, kind: str, candidate_id: str, decision: str,
         # ⚠️ **commit 与记账之间没有事务**（review_p3_task35 P2-1）：外部的
         # commit 已经落定，而库还是 PENDING——此时若什么都不做，重试会被
         # 「目标文件已存在」永久挡死（**反向的**同一个卡死窗口，正是本模块
-        # 选这个顺序时想避开的那个）。故用 `git revert` **真回滚**：只追加
-        # commit、不改写历史，与打印给用户的「撤销 = git revert <sha>」同一手法。
-        try:
-            run_git(repo_root, "revert", "--no-edit", sha)
-        except Exception as revert_exc:  # noqa: BLE001 — 连撤销都失败，如实报
+        # 选这个顺序时想避开的那个）。故**真回滚**：只追加、不改写历史，
+        # 与打印给用户的「撤销 = git revert <sha>」同一手法。
+        undone, how = _undo_promote(repo_root, rel, sha)
+        if not undone:
             raise RuntimeError(
-                f"落盘已提交 {sha}，但库状态更新失败（{e}）；自动撤销也失败"
-                f"（{revert_exc}）——候选仍为 PENDING，需人工处理：先 `git "
-                f"revert {sha}`，再重试 accept") from e
+                f"落盘已提交 {sha}，但库状态更新失败（{e}）；撤销也失败"
+                f"——候选仍为 PENDING，需人工处理：先 `git rm {rel}` 并提交"
+                f"（或 `git stash` 后 `git revert {sha}`），再重试 accept") from e
         raise RuntimeError(
-            f"落盘已提交 {sha}，但库状态更新失败（{e}）——已自动 `git revert`"
-            f" 撤销该 commit（历史里留痕，工作区干净），候选仍为 PENDING，"
-            f"修复后重试 accept 即续传") from e
+            f"落盘已提交 {sha}，但库状态更新失败（{e}）——已撤销（{how}），"
+            f"候选仍为 PENDING，修复后重试 accept 即续传") from e
     decided = store.get_candidate(candidate_id)
     assert decided is not None
     return decided, sha
+
+
+def _undo_promote(repo_root: str | Path, rel: str, sha: str) -> tuple[bool, str]:
+    """撤销刚做的 promote commit。返回 `(成功?, 手法说明)`。
+
+    首选 `git revert --no-edit <sha>`：**只追加**历史、不改写，与打印给用户的
+    「撤销 = git revert <sha>」同一手法。
+
+    ⚠️ **但 `git revert` 在暂存区有任何东西时直接拒绝**（round 2 P2-C 实测）：
+    `error: your local changes would be overwritten by revert`——连「暂存了一个
+    **无关既有文件**的修改」都触发，而「改到一半顺手审一个候选」正是最常见状态。
+    拒绝本身不弄坏任何东西，却会把仓库留在**最坏形态**（commit 已落 + 库还
+    PENDING），且原先那句「先 `git revert` 再重试」的建议**自己也执行不了**。
+
+    退路是**只作用于自己那个路径**的逆提交：`git rm -- rel` + `git commit -- rel`。
+    它同样只追加历史，且与 promote commit 一样带 pathspec——P1-B 那条判据在
+    撤销侧再贯彻一次：**绝不会碰别人的在途工作**。
+    """
+    try:
+        run_git(repo_root, "revert", "--no-edit", sha)
+        return True, f"git revert {sha[:8]}（只追加历史，工作区干净）"
+    except Exception:  # noqa: BLE001 — 脏暂存区被拒是常态，走退路
+        pass
+    try:
+        run_git(repo_root, "rm", "--quiet", "--", rel)
+        run_git(repo_root, "commit", "-m",
+                f"revert: 撤销 candidate 落盘 {sha[:8]}\n\n"
+                f"库状态更新失败，故只按路径撤销本次落盘；不影响其他在途改动",
+                "--", rel)
+        return True, (f"revert 被脏暂存区拒绝，已改用只作用于 {rel} 的逆提交"
+                      f"（只追加历史，未碰其他在途改动）")
+    except Exception:  # noqa: BLE001 — 两条路都断，交由调用方如实报
+        return False, ""
 
 
 def _validated_testcase(row: dict, *, repository, secrets,
