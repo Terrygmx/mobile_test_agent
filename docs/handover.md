@@ -195,9 +195,9 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
 
 ## 9. 当前状态快照（**2026-10-10**，以实测为准）
 
-- **分支 / HEAD**：`P3-1010` / `feff5ec`（`feat(p3): generation pipeline + test candidates store (P3-12)`）
-  + 本次评审修订（commit 见 `git log`）
-- **全量基线**：**1807 passed / 0 failed**
+- **分支 / HEAD**：`P3-1010` / `b1e2b48`（`fix(p3): review_p3_task34 修订——真机装配 P0 + 语义短路 fail-open`）
+  + round 2 修订（commit 见 `git log`）
+- **全量基线**：**1809 passed / 0 failed**
 - **最新 tag**：`checkpoint-p3-m2`（P3 M2 收口）；**M3 尚未收口**
 - **Gate 状态**：M1 ✅（`checkpoint-p3-m1`）· M2 ✅（`phase0/verify_p3_m2.py` exit 0，8/8 PASS，
   `out/p3_m2_gate/summary.json` verdict=PASS）· **M3 Gate 未写**（收口时才出）
@@ -212,15 +212,21 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
   - 3.4 生成管线（`feff5ec`）：迁移 002（`test_candidates` + `test_candidate_rejections`）
     + `candidates/test_case.py` + `generator/{validator,dry_run,generator}.py`
     + `llm/{prompt,parser}.py` 的生成面 + `cli/pipeline.py::wire_device_stack` 抽取。
-    review（`review/review_p3_task34_2026-10-10.md`）**不通过（1×P0 + 2×P1 + 4×P2 + 4×P3）**，
-    **全部已修订**（`docs/p3_data_audit.md` 的「Task 3.4 评审修订记录」）：P0-1
-    `cli/pipeline.py` 漏 `import os`（真机路径 100% 死，**守卫空转**）+ 语义校验短路
-    fail-open + `ignored_fields` 零消费 + 指纹闸门缺失 + `dry_run_detail` 不落库 +
-    装配失败泄漏会话 + 嵌套 spec 不过滤 + 4×P3
+    review round 1（`review/review_p3_task34_2026-10-10.md`）**不通过
+    （1×P0 + 2×P1 + 4×P2 + 4×P3）**，**全部已修订**：P0-1 `cli/pipeline.py` 漏
+    `import os`（真机路径 100% 死，**守卫空转**）+ 语义校验短路 fail-open +
+    `ignored_fields` 零消费 + 指纹闸门缺失 + `dry_run_detail` 不落库 + 装配失败
+    泄漏会话 + 嵌套 spec 不过滤 + 4×P3。**round 2 复核**
+    （`review/review_p3_task34_final_2026-10-10.md`）**有条件通过**：11 条中 10 条
+    真核销，发现 round 1 的 `recovery.guard` 那条**并未真核销**（同族缺陷，已补
+    真钉子）+ 迁移 002 原地编辑（已抽 `003_dry_run_detail.sql`）——**均已修订**
 - **下一步**：**Task 3.5（P3-13）CLI 接线 + 统一审核 + 落盘**（`mta generate` /
   F6 首个消费者 / promoter）。⚠️ **开工前置（必须逐条清）**：
-  1. **`wire_device_stack` 直接单测已是前置**（Task 3.4 修订时补了 3 条）——3.5 的
-     `mta generate` 会把它当公共入口，P0-1 / P2-3 都会被继承；
+  1. **`wire_device_stack` 直接单测已是前置**（Task 3.4 修订时补了 4 条，含
+     `recovery.guard` 回填）——3.5 的 `mta generate` 会把它当公共入口，
+     P0-1 / P2-3 / `recovery.guard` 都会被继承；
+  1b. **迁移只许向后追加**：`agents/migrations/003_dry_run_detail.sql` 是 3.4 修订
+     加的列（走新脚本，不改已落盘的 002）——3.5 若再加列，**照此办理**；
   2. **已 ACCEPT/REJECT 的候选 id 不该被生成器覆写**（review_p3_task34 探针 AE 实测：
      upsert 会改写已人工批准的 `testcase_yaml`，`review_status` 却仍是 `ACCEPT` →
      落盘文件与库内容**分叉**）；

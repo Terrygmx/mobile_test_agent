@@ -141,9 +141,15 @@ def wire_device_stack(pipeline: "SessionPipeline", *, env_kind, run_id: str,
     Task 3.4 的 Dry Run 需要**同一套**装配——各写一份必然漂移（本仓的教训：
     「已修过的模式会被复制」），故抽到这里，`cmd_run` 改调本函数。
 
-    **顺序与语义与抽出前逐字相同**（P1/P2 全量回归是这次重构的验收标准）。
+    **成功路径与抽出前逐字相同**（P1/P2 全量回归是这次重构的验收标准）。
     只把 `args.*` 解成值对象——`udid` 为空时由调用方解析（`cmd_run` 用
     `build_identity.resolve_booted_udid`，Dry Run 由 CLI 传入）。
+
+    ⚠️ **一处有意的语义变化**（review_p3_task34 round 2 的 P3-new 更正确——
+    原写「顺序与语义**逐字相同**」宽于实现）：`connect()` **之后**的装配失败
+    现在会 `driver.quit()` 收尾再重抛（见下方 try/except），抽出前是直接抛出、
+    把已建立的 Appium 会话留给进程退出——那是泄漏。**成功路径的行为未变**，
+    只有失败路径多了一次清理。
 
     ⚠️ **`pipeline.store` 必须已设**（`cmd_run` 在调用前赋值）：`PipelineDeps`
     的 `store` 与 `Lifecycle(store=...)` 都从它取。

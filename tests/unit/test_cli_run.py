@@ -466,7 +466,22 @@ def test_r16_2_no_fake_driver_exits_3_not_fail(tmp_path, capsys, monkeypatch):
                  "--db", str(db)])  # 无 --fake-driver
     out = capsys.readouterr().out
     assert code == 3, f"未装配必须 exit 3，got {code}"
-    assert "设备会话建立失败" in out or "build identity" in out
+    # ⚠️ **每个分支都点名自己的精确原因**（review_p3_task34 round 2 修订）：
+    # 原写 `"设备会话建立失败" in out or "build identity" in out` 是**误绿源**
+    # ——`cmd_run` 把任何装配异常都套上「设备会话建立失败：」前缀打印，所以
+    # 一个 `NameError`（P0-1）也能满足第一个析取项。探针实测：往真机分支注入
+    # `NameError`，这条断言**仍然绿**。
+    # 现在每个析取项各自指向**具体原因**，且前缀是 `PREFLIGHT ERROR:`（真实的
+    # 前置失败形态）。本机无 `xcrun simctl`（未配 DEVELOPER_DIR）→ 走 Build
+    # Identity 读取失败那一支；有设备的环境走「无设备会话」那一支。
+    # 一个无关的 `NameError` 三个都不满足 → 不再能蒙混过关。
+    assert out.startswith("PREFLIGHT ERROR:"), \
+        f"必须是前置错误（不是伪装成运行结果）：{out!r}"
+    assert ("build identity 读取失败" in out
+            or "BUILD_METADATA_MISMATCH" in out
+            or "真机路径需要 --bundle-id" in out
+            or "unit-test: 无设备会话" in out), \
+        f"exit 3 的原因必须点名（不能是任意异常）：{out!r}"
     # trace.db 里不得出现假 FAIL 终态
     if db.exists():
         import sqlite3
@@ -1163,3 +1178,60 @@ def test_wire_device_stack_requires_bundle_id_on_the_real_path(monkeypatch,
         cp.wire_device_stack(pipeline, env_kind=EnvKind.SANDBOX, run_id="r1",
                              udid="U", bundle_id=None, repo=None,
                              fake_driver=False)
+
+
+def test_wire_device_stack_shares_the_guard_with_recovery(monkeypatch,
+                                                          tmp_path):
+    """P2-new（round 2）：`recovery.guard` 回填**必须被真的钉住**。
+
+    第一轮修订补的三条真机装配测试都构造 `SessionPipeline(suites_root=...)`
+    而**没设 `recovery`**（默认 `None`）→ `if pipeline.recovery is not None:`
+    那一支**从未被进入**。评审探针实测：把它改成 `if False:` 全量 **1807 全绿
+    / 0 red**——即第一轮审计里「`repo=None` 与 `recovery.guard` 两条不再是零
+    覆盖」这句**对 `recovery.guard` 是过度声称**（同类缺陷的第二次：声称已覆盖
+    而实际没有）。
+
+    为什么这条不是可有可无的装饰：`RecoveryEngine._make_guard_check` 在
+    `self.guard is None` 时**直接 return None**（`agent/recovery.py:391`），
+    于是 10.1 的 Guard 复检**在真机上静默关闭**——LLM 候选的风险门控没了，
+    而没有任何东西会报错。生产可达：`cli/main.py:661` 无条件构造
+    `RecoveryEngine(...)`（不传 guard），随后 `wire_device_stack` 才回填。
+    """
+    import session.device_session as ds_mod
+    import cli.pipeline as cp
+    from agent.recovery import RecoveryEngine
+    from executor.guard import EnvKind
+
+    class _FakeDriver:
+        def quit(self):
+            pass
+
+        def implicitly_wait(self, seconds):
+            pass
+
+    class _FakeDS:
+        def __init__(self, url, caps):
+            self.driver = None
+
+        def connect(self):
+            self.driver = _FakeDriver()
+            return self.driver
+
+    monkeypatch.setattr(ds_mod, "DeviceSession", _FakeDS)
+    monkeypatch.setattr(ds_mod, "resolve_local_caps",
+                        lambda udid, bundle_id: {"udid": udid})
+
+    pipeline = SessionPipeline(suites_root=tmp_path)
+    pipeline.store = None
+    # ⚠️ **必须真的设一个 recovery**——否则测的还是那条没被进入的分支
+    # （这正是第一轮修订踩的坑）。
+    engine = RecoveryEngine()
+    assert engine.guard is None, "前提：构造时没有 guard（10.1 复检的起点）"
+    pipeline.recovery = engine
+
+    stack = cp.wire_device_stack(pipeline, env_kind=EnvKind.SANDBOX,
+                                 run_id="r1", udid="U", bundle_id="com.x",
+                                 repo=None, fake_driver=False)
+    assert pipeline.recovery.guard is stack.runner.guard, (
+        "9.3-4 / 10.1：recovery 的 Guard 复检必须与动作步**同一实例**"
+        "（否则 LLM 候选的风险门控在真机上静默关闭）")

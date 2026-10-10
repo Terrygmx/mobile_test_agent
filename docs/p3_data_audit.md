@@ -2405,7 +2405,14 @@ Task 3.3 拍板 `precondition` **不进指纹**，代价是真语料**已有 2 �
   探针实测：**去掉 `import os` → 2 failed**（此前该形态 0 覆盖）。
 - 这条同时核销 **P3-3**（真机分支零覆盖：评审的三条变异 `repo=None` / 删
   `postcondition_checker` / 删 `recovery.guard` 回填全部 0 red）。补测后
-  `repo=None` 与 `recovery.guard` 两条**不再是零覆盖**。
+  `repo=None` 与 `postcondition_checker` 两条**不再是零覆盖**。
+  > ⚠️ **更正（round 2 实测证伪）**：本条原文写「`repo=None` 与
+  > `recovery.guard` 两条不再是零覆盖」——**对 `recovery.guard` 是错的**。
+  > 新补的三条测试都构造 `SessionPipeline(...)` 而**没设 `recovery`**（默认
+  > `None`），`if pipeline.recovery is not None:` 那一支**从未被进入**；把该行
+  > 改成 `if False:` 全量 **1809 全绿 / 0 red**。这正是 P0-1 的**同族缺陷**
+  > （声称已覆盖而实际没有），在修订里又犯了一次——**round 2 已补真钉子**
+  > （见下方「Task 3.4 评审修订记录（round 2）」的修订 12）。
 
 > **教训（已并入 MEMORY §5）**：**「唯一覆盖某分支的测试」若在该分支第一行之前
 > 就退出，它守的是空气。** 断言写 `A or B` 的文案匹配尤其危险——它把「另一种
@@ -2567,3 +2574,121 @@ Python 侧闸门保证」，评审实测**当时并不存在**（`fingerprint=No
    「一次性可迭代」这条测试**永远碰不到**被测行为，而它**照样绿**。
    **写「守卫某实现选择」的测试前，先用 mutant 确认它真能区分两种实现**（与
    Task 3.3 的教训同一条，这次栽在「helper 顺手规范化了输入」上）。
+
+---
+
+## Task 3.4 评审修订记录（round 2 / final，2026-10-10）
+
+**复核报告**：`review/review_p3_task34_final_2026-10-10.md` —— 结论 **有条件通过**：
+11 条中 **10 条经独立探针真核销**，1 条（P3-3 的 `recovery.guard`）**并未真正核销**
+且审计记录**过度声称**；另发现 2 条新缺陷（1×P2 + 2×P3）。**全部已修订。**
+
+### 修订 9（P2-new，本轮最重要）：`recovery.guard` 回填仍是零覆盖 + 审计过度声称
+
+round 1 修订补的三条真机装配测试都构造 `SessionPipeline(suites_root=...)` 而
+**没设 `recovery`**（默认 `None`）→ `if pipeline.recovery is not None:` 那一支
+**从未被进入**。复核者探针实测：把该行改成 `if False:` → **全量 1809 全绿 / 0 red**。
+即 round 1 审计里「`repo=None` 与 `recovery.guard` 两条不再是零覆盖」这句**对
+`recovery.guard` 是错的**——这是 P0-1 的**同族缺陷**（声称已覆盖而实际没有），
+**在修订里又犯了一次**。
+
+为什么不是可有可无的装饰：`RecoveryEngine._make_guard_check` 在 `self.guard is
+None` 时**直接 return None**（`agent/recovery.py:391`）→ **10.1 的 Guard 复检在
+真机上静默关闭**（LLM 候选的风险门控没了），而没有任何东西会报错。生产可达：
+`cli/main.py` 无条件构造 `RecoveryEngine(...)`（不传 guard），随后
+`wire_device_stack` 才回填。
+
+- 修：补 `test_wire_device_stack_shares_the_guard_with_recovery`——**真的设一个
+  `RecoveryEngine()`**（并先断言 `engine.guard is None` 作为前提），装配后断言
+  `pipeline.recovery.guard is stack.runner.guard`（**同一实例**，10.1 的要求）。
+- 探针：**`if False:` → 2 failed**（该测试 + 迁移幂等测试的版本串），此前 0 red。
+
+> **教训（已并入 MEMORY §5）**：**「补了测试」不等于「覆盖了分支」——测试的
+> 前置条件本身就是覆盖的一部分。** 新测试若没构造出进入该分支所需的**状态**
+> （这里是 `pipeline.recovery`），它测的是另一条路。**唯一可靠的判定是探针**：
+> 把分支改成恒假，看它红不红。这与 P0-1 的教训是**同一条**——本轮在修订里
+> 复现了它，说明「写测试」这个动作本身也需要被探针验证。
+
+### 修订 10（P3-new）：迁移 002 被原地编辑 → 升级路径炸
+
+round 1 修订把 `dry_run_detail_json` 直接加进**已落盘**的 002（`feff5ec`），而非
+新开脚本。复核者实测：用旧版 002 建库 → 当前 store 打开 → 读 `IndexError` /
+写 `OperationalError`（库不可用）。理由：迁移执行器按「已应用序号」跳过脚本，
+原地加列对**已按旧版建过库**的人**完全不生效**（002 已记「跑过」）。
+
+**本仓先例是反的**：`graph/migrations/002_graph_diff_sources.sql` 头部明写
+「这是**需求后到**，所以走 graph 自己的迁移链加列，**不改 001**」；执行器
+docstring 也写着「只向后追加」。
+
+- 修：抽出 `agents/migrations/003_dry_run_detail.sql`（`ALTER TABLE ... ADD COLUMN`），
+  002 还原为 `feff5ec` 的形态（只更正头部注释里那条曾经过时的说法）。
+- 补 `test_002_alone_leaves_the_db_readable`：手工按「只跑 002」建库（**DDL 逐字
+  取自 `feff5ec`**，不是读当前脚本——否则夹具会跟着实现漂移），断言当前 store
+  能打开并读写。
+- 探针：**复现 round 1 的错误做法（列塞回 002 + 删 003）→ 2 failed**
+  （`table test_candidates has no column named dry_run_detail_json`）。
+- `test_002_migration_is_idempotent` 改名 `test_migrations_are_idempotent`，
+  版本串断言 `002_test_candidates` → `003_dry_run_detail`（**从链尾派生**，
+  加脚本忘改常量也不会撒谎——这正是它该有的行为）。
+- **定级说明**：round 2 定 P3（`agents/migrations/002` 从未进 `main`，
+  `P3-1010` 未 push、无 remote；主仓也无真实 `out/agent.db`，已实测），故**没有
+  已发布的库会踩到**。但**做法本身**违反本仓明文先例，故照先例改。
+
+### 修订 11（P3-new）：`wire_device_stack` docstring 宽于实现
+
+原文写「**顺序与语义与抽出前逐字相同**」，而修订 6（P2-3）**有意**新增了失败
+路径的 `driver.quit()` 收尾——语义已变。→ 改为「**成功路径**与抽出前逐字相同」
+并显式登记那处有意的变化。
+
+### 修订 12（复核者「未验证 1」）：`test_r16_2` 的 `A or B` 断言仍是误绿源
+
+复核者实测：往真机分支注入 `NameError`，`test_r16_2` **仍然绿**（该断言
+`"设备会话建立失败" in out or "build identity" in out` 的第一项被任何装配异常
+满足）。复核者判定「加固足够（新测试已变红）但该断言宜改精确」。
+
+- 修：断言改为 `out.startswith("PREFLIGHT ERROR:")` + 四个**各自点名具体原因**
+  的析取项（build identity 读取失败 / BUILD_METADATA_MISMATCH / 缺 bundle-id /
+  本测试注入的 `unit-test: 无设备会话`）。
+- **验证**：直接对「装配期 `NameError`」的文案做判据对照 —— 旧断言 `True`
+  （误绿），新断言 `False`（堵住）。
+- ⚠️ **诚实登记一处未验证**：本机无 `xcrun simctl`（未配 `DEVELOPER_DIR`），
+  该测试实际在 **Build Identity 门**就退出，**走不到**装配期 `NameError`；故
+  「注入 `NameError` → 红」这条探针在本机**复现不了**（0 red）。新断言的判别力
+  用上面的**文案对照**证明，未在真实执行路径上端到端验。
+
+### 数字对账（复核者独立复跑，全部一致）
+
+| 声称 | 实测 | |
+|---|---|---|
+| round 1 后 1807 passed | 1807 | ✅ |
+| 修订前 1794 / 父基线 1691 | 1794 / 1691（worktree `--collect-only`） | ✅ |
+| 增量 +13 | `test_cli_run` +3 / `test_generator_pipeline` +8 / `test_candidate_store` +2 | ✅ |
+| 探针 P0-1 2 failed | 2 | ✅ |
+| 探针 P2-4 1 failed | **2** | ⚠️ round 1 审计少记 1（方向无害） |
+| 「`recovery.guard` 不再是零覆盖」 | **仍 0 red** | ❌ → 本轮的修订 9 |
+
+### 修订后实测
+
+- 全量 `pytest tests` → **1809 passed / 0 failed**（exit 0）。round 1 后 1807
+  → **+2**（`recovery.guard` 1 + 迁移升级路径 1；`test_002_migration_is_idempotent`
+  改名不增数）。
+- **本轮 A/B 探针 3 组，全部真红**（还原 → 清 `__pycache__` → 核对 `md5`）：
+
+  | 探针 | 变异 | 结果 |
+  |---|---|---|
+  | 修订 9 | `if pipeline.recovery is not None:` → `if False:` | **2 failed**（此前 0 red） |
+  | 修订 10 | 复现 round 1 做法（列塞回 002 + 删 003） | **2 failed** |
+  | 修订 10' | 列塞回 002 但**保留** 003（半修） | **1 failed**（`duplicate column name`） |
+
+### 教训（已并入 MEMORY §5）
+
+- **「补了测试」不等于「覆盖了分支」——测试的前置状态是覆盖的一部分**：新测试
+  没构造出进入该分支所需的状态（`pipeline.recovery`），测的就是另一条路。本轮
+  在**修订自己**身上复现了 P0-1 的同族缺陷：**判覆盖的唯一可靠手段是探针**
+  （把分支改成恒假，看红不红），不是「我写了测试」。
+- **冻结历史形态的夹具不能用「读当前脚本」实现**：`test_002_alone_leaves_the_db_readable`
+  若读当前 002 建库，将来有人再把列塞回 002，夹具会跟着「变对」→ 测不出升级
+  路径炸掉。**夹具的 DDL 必须逐字取自历史提交**（`git show <sha>:path`）。
+- **迁移脚本一旦落盘就只许向后追加**：执行器按「已应用序号」跳过，原地改对
+  已建过库的人**完全不生效**——而失效形态是「读 IndexError / 写
+  OperationalError」，即库不可用。本仓先例已明写（`graph/migrations/002` 头部）。

@@ -1,0 +1,31 @@
+-- 003_dry_run_detail.sql — `test_candidates` 补 Dry Run 的执行结论
+-- （Task 3.4 评审修订 P2-2；review_p3_task34 round 2 的 P3-new 改走新脚本）
+--
+-- ## 为什么需要
+--
+-- `DryRunResult.detail` 装 `failure_type` / `attempt` / `cleanup_status`。
+-- 只落一个 `dry_run_status='FAIL'` 恰好是本仓最防的「看起来正常」——人工审核
+-- 看到 FAIL 却不知道**为什么**失败，等于把一次设备执行的结论丢掉一半。
+--
+-- 它不进 `generation_evidence_json`：那是**溯源**（这条候选从哪来），而这是
+-- **执行结论**（跑成什么样）。两件事分开存，查询与渲染都更干净。
+--
+-- ## 为什么是 003 而不是改 002（review_p3_task34 round 2 P3-new）
+--
+-- 002 在 `feff5ec` 已经**提交并落过盘**。迁移脚本一旦落盘就**只许向后追加**：
+-- 执行器（`experience/schema_migrations.py::migrate`）按「已应用序号」跳过
+-- 脚本，原地往 002 里加列对**已按旧版建过库**的人**完全不生效**——他们的
+-- `schema_migrations` 里 002 已记「跑过」，新列永远不会出现，而
+-- `_candidate_from_row` 会去取 `dry_run_detail_json` → 读 `IndexError`、
+-- 写 `OperationalError`（库直接不可用）。
+--
+-- 本仓的既定做法就是这个：`graph/migrations/002_graph_diff_sources.sql` 头部
+-- 明写「这是**需求后到**，所以走 graph 自己的迁移链加列，**不改 001**」。
+-- 002 的头部注释里对这条有个曾经过时的说法，已一并更正。
+--
+-- `NOT NULL DEFAULT '{}'`：`ALTER TABLE ADD COLUMN` 带非空默认值对**既有行**
+-- 安全（SQLite 用它回填），且空对象正是「没跑过 Dry Run」的正确表示——
+-- 不是「跑失败了」。
+
+ALTER TABLE test_candidates
+    ADD COLUMN dry_run_detail_json TEXT NOT NULL DEFAULT '{}';

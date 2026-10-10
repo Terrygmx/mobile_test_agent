@@ -18,7 +18,7 @@ import sqlite3
 import pytest
 import yaml
 
-from agents.storage import SQLiteAgentStore
+from agents.storage import AGENT_MIGRATIONS_DIR, SQLiteAgentStore
 from candidates.test_case import (DRY_RUN_STATUSES, REJECTION_REASONS,
                                   REVIEW_STATUSES, CandidateRejection,
                                   TestCandidate, dump_testcase_yaml)
@@ -91,12 +91,74 @@ def test_rejection_check_vocab_matches_python(store):
     assert _check_values(ddl, "reason") == set(REJECTION_REASONS)
 
 
-def test_002_migration_is_idempotent(tmp_path):
+def test_migrations_are_idempotent(tmp_path):
     db = tmp_path / "agent.db"
     SQLiteAgentStore(db)
     SQLiteAgentStore(db)            # 重放：二次不炸
     from agents.storage import AGENT_SCHEMA_VERSION
-    assert AGENT_SCHEMA_VERSION == "002_test_candidates"
+    # 版本串从**链尾派生**（`latest_version`），故加 003 后这里跟着变——
+    # 这正是它该有的行为（加脚本忘改常量也不会撒谎）。
+    assert AGENT_SCHEMA_VERSION == "003_dry_run_detail"
+
+
+def test_002_alone_leaves_the_db_readable(tmp_path):
+    """**P3-new 的钉子**：只跑 002（`feff5ec` 落盘的形态）建的库，必须能被
+    当前 store 打开。
+
+    第一轮修订把 `dry_run_detail_json` 直接加进**已落盘**的 002 → 对「按旧版
+    建过库」的人，002 已在 `schema_migrations` 里记「跑过」，新列永远不会出现，
+    而 `_candidate_from_row` 会去取它 → 读 `IndexError` / 写 `OperationalError`
+    （库直接不可用）。修法是走 003（只向后追加，`graph/migrations/002` 的先例）。
+
+    ⚠️ **DDL 逐字取自 `feff5ec` 的 002**（`git show feff5ec:...`），**不是**
+    读当前的 002——若将来有人又把列塞回 002，读当前脚本会让本测试跟着「变对」
+    （它建的库就带上那一列了），从而**测不出**升级路径炸掉。这正是「守卫跟着
+    实现漂移」的形态：夹具必须**冻结历史形态**。
+    """
+    db = tmp_path / "agent.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript(
+            "CREATE TABLE IF NOT EXISTS schema_migrations ("
+            " version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+        # feff5ec 的 002：**没有** dry_run_detail_json
+        conn.executescript("""
+CREATE TABLE IF NOT EXISTS test_candidates (
+    candidate_id TEXT PRIMARY KEY,
+    testcase_yaml TEXT NOT NULL,
+    generated_by TEXT,
+    generation_evidence_json TEXT NOT NULL DEFAULT '{}',
+    fingerprint TEXT,
+    dry_run_status TEXT NOT NULL DEFAULT 'PENDING'
+        CHECK (dry_run_status IN ('PENDING', 'PASS', 'FAIL')),
+    review_status TEXT NOT NULL DEFAULT 'PENDING'
+        CHECK (review_status IN ('PENDING', 'ACCEPT', 'REJECT')),
+    reviewer TEXT,
+    reviewed_at TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS test_candidate_rejections (
+    rejection_id TEXT PRIMARY KEY,
+    candidate_id TEXT,
+    reason TEXT NOT NULL
+        CHECK (reason IN ('SCHEMA_INVALID', 'SEMANTIC_REJECTED', 'DUPLICATE')),
+    fingerprint TEXT,
+    duplicate_of TEXT,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+""")
+        conn.execute("INSERT INTO schema_migrations (version, applied_at)"
+                     " VALUES ('002_test_candidates','t')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    # 当前 store 打开 → 自动补跑 003 → 读写都通
+    store = SQLiteAgentStore(db)
+    row = store.save_candidate("cand_1", **_candidate())
+    assert row["dry_run_detail"] == {}, "003 补的列必须存在且默认空"
+    assert store.get_candidate("cand_1")["candidate_id"] == "cand_1"
 
 
 @pytest.mark.parametrize("column,value", [
