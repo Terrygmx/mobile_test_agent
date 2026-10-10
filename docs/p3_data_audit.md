@@ -2048,3 +2048,89 @@ SKIP」）。
 
 - macOS 上补跑全量 `pytest tests`（应 1685 passed），确认 6 条 POSIX-only 测试全绿
   （见 `docs/windows_dev_notes.md` §2）。
+  **已核销（2026-10-10，macOS）**：`pytest tests` → **1685 passed / 0 failed**（exit 0），
+  6 条 POSIX-only 测试在 macOS 上全绿。
+
+---
+
+## Task 3.2 评审修订记录（round 2 / `review_p3_task32_final` 核销，2026-10-10）
+
+> **时序说明**：这份收口评审（`review/review_p3_task32_final_2026-10-09.md`，审查对象
+> `0ede83e`）产出在 Task 3.3 提交（`1ede89f`）**之前**，核销落在其后——故本段排在
+> Task 3.3 记录之后（任务级分组 + 时间序的取舍，登记于此）。
+
+**核销对象**：该报告的 **1×P2（P2-1'）** + 三条「小观察」（报告明示不单独立项）。
+
+### 修订 1（P2-1'）：`pending` 只被「到达点」消费
+
+**缺陷**：`0ede83e` 为排除否定等待，把 `pending = None` 从「屏到达」那一支挪到了 `wait`
+分支之外——**元素 wait** 于是也清 `pending`。而元素 wait 正是 `_arrivals` docstring 写的
+「跳过中间的 wait/assertion」那类步骤 → 下一个到达点的 trigger 塌成 `""`，与图上任何转移
+都匹配不上（`_trigger_of` 不产空串）→ 用例**真覆盖过**的转移被**误报成 gap**（错误落在
+「多报」那侧，Task 3.4 会据此生成无用候选）。
+
+复现（评审给的命令；修订前 `[('BView','')]`，修订后 `[('BView','tap:AView.go')]`）：
+
+```python
+tc = P({"schema_version": "0.2", "id": "n", "name": "n", "steps": [
+    {"action": "tap", "target": "AView.go"},
+    {"wait_for": {"target": "element:AView.spinner", "condition": "exists", "timeout": 5}},
+    {"wait_for": {"target": "screen:BView", "condition": "active", "timeout": 5}}]})
+_arrivals(tc)   # → [('BView', 'tap:AView.go')]
+```
+
+**修法**：复位移进「真的记了一次到达」那一支（`generator/coverage.py:197-210`）：
+
+```python
+if (getattr(tgt, "type", None) == "screen"
+        and wait.condition not in NEGATIVE_WAIT_CONDITIONS):
+    out.append((tgt.id, pending or ""))
+    pending = None          # ← 只有到达点消费 pending
+continue
+```
+
+**⚠️ 偏离登记（与评审建议的一行修法不同，且**有测试钉住**这个不同）**：报告建议
+「复位挪回 `screen`-if 内、**否定等待也复位**」。本仓按 MEMORY §5.A「**同一个形状出现
+第二次时，修完被点的那一处要顺手扫全包**」收敛到**唯一口径**——`pending` = 「最近一个
+**尚未被到达点消费**的动作」，**只有到达点消费它**；否定屏 wait 不是到达点，故同样
+**不消费**。否则 `到达 A → 动作 → 断言不在 B → 到达 C` 会产出同一种假 gap（A→C 的
+trigger 被清成 `""`），即「同形第二次」未修。
+
+| 形态 | 元素 wait 后的 trigger | 否定屏 wait 后的 trigger | `test_coverage_gap.py` |
+|---|---|---|---|
+| HEAD（`0ede83e`） | 塌成 `""` ❌ | 塌成 `""` ❌ | 37 passed（**两处都零覆盖**） |
+| 报告建议版 | 保留 ✅ | 塌成 `""` ❌ | **1 failed**（否定那条） |
+| 本次落地 | 保留 ✅ | 保留 ✅ | **40 passed** |
+
+**新增 3 例**：`test_element_wait_between_action_and_arrival_keeps_trigger`（评审点名要补
+的那条）、`test_element_wait_does_not_produce_a_false_gap`（钉**症状**：图上那条转移真被
+跑到 → gap 必须为空，而不只是 trigger 形状对）、
+`test_negative_screen_wait_does_not_consume_the_pending_action`（同形第二次）。
+
+### 三条「小观察」的处置（报告明示不单独立项）
+
+1. `NEGATIVE_WAIT_CONDITIONS` 注释里 `disabled` 属**前瞻性防御**而非当前需要——**留着**
+   （与报告同判）。
+2. `_arrivals` 的 8 处 `getattr` 是「三种 step 形态并存的联合类型」所必需，**不算漏网**；
+   报告要求 **Task 3.4 引入新 step 形态时复查一次** → 已登记为 Task 3.4 的开工前置。
+3. `_step_trigger` 的 `target_id` 类型闸门在当前唯一调用路径上恒不触发（`TargetRef.id` 是
+   `str`）——**防御性分支 + 有专测**的健康形态，**保留**。
+
+### 修订后实测
+
+- 全量 pytest **1688 passed**（1685 + 3；清 `__pycache__` 后复跑同值）。
+- 3 组 A/B 探针（每次改完还原 → 清 `__pycache__` → 核对 `md5 -q` = `88996206bb345ea259a2f53ef2750dcd`
+  与 `git diff --stat`）：**A** 还原 HEAD 行为（复位挪到 `screen`-if 之外）→ **3 failed**；
+  **B** 套用报告建议版（否定等待也复位）→ **1 failed**；**C** 撤掉 P2-1 的排除（否定等待
+  算到达）→ **2 failed**（P2-1 的修复仍被钉住）。
+- **真语料 20 用例 → 覆盖集 8 条，修订前后逐字相同**（`diff` 为空）：本轮影响的形态
+  （「非屏 wait 之后还有屏到达」）在真语料命中 **0** 处，与评审的扫描结论一致。
+
+### 教训（已并入 MEMORY §5）
+
+- **「复位 / 清理」语句的作用域必须等于它所描述的那件事的作用域**：`pending = None`
+  描述的是「一个动作被到达点消费了」，却被写成了「一次 wait 发生了」——**作用域写宽一格，
+  语义就反了**。与 `getattr` 默认值、`if not v` 放过空串同族：都是**判据的作用域比声称宽**。
+- **评审给的「一行修法」也要按同一条判据扫一遍同形**：报告把「元素 wait」这处修对了，
+  但同一行里的否定等待仍是同形（报告建议「保持复位」）。核销时**按纪律扫全包，不按建议的
+  最小 diff 抄**，并**用探针证明偏离是承重的**（探针 B：照抄建议版 → 1 red）。

@@ -483,3 +483,66 @@ def test_non_graph_object_is_rejected_not_silently_empty():
 
     with pytest.raises(AttributeError):
         coverage_gap(_NoTransitions(), [])
+
+
+# --- 评审修订 round 2（review_p3_task32_final P2-1'）--------------------------
+#
+# P2-1'：`pending` 的复位必须落在「**真的记了一次到达**」那一支内。放到 `if`
+# 之外，**元素 wait** 也会清掉它——而元素 wait 正是 `_arrivals` docstring 里
+# 「跳过中间的 wait」的那类步骤 → 下一个到达点的 trigger 塌成 `""` → 与图上任何
+# 转移都匹配不上（`_trigger_of` 不产空串）→ 用例**真覆盖过**的转移被误报成 gap
+# （「多报」那一侧；Task 3.4 会据此生成无用候选）。
+# 同一个形状的第二次（否定屏 wait 也复位）一并按同一口径收敛。
+
+_ELEM_WAIT = {"wait_for": {"target": "element:AView.spinner",
+                           "condition": "exists", "timeout": 5}}
+
+
+def test_element_wait_between_action_and_arrival_keeps_trigger():
+    """「到达 A → 动作 → **元素 wait** → 到达 B」：B 的 trigger 仍是那个动作。
+
+    这条正是 review 探针 B（只把 `pending = None` 挪回外层 `if`）**37 passed
+    零红**所缺的钉子。
+    """
+    tc = _case("elem_wait", [
+        _screen_wait("AView"),
+        {"action": "tap", "target": "AView.go"},
+        _ELEM_WAIT,
+        _screen_wait("BView"),
+    ])
+    assert covered_transitions([tc]) == {("AView", "BView", "tap:AView.go")}
+
+
+def test_element_wait_does_not_produce_a_false_gap():
+    """同上的**症状**钉子：图上那条转移确实被跑到 → gap 必须为空。
+
+    只钉 trigger 形状还不够——这条把「用例真覆盖过」与「图上真有」接起来，
+    直接断言**不出现假 gap**。
+    """
+    g = RuntimeGraph(
+        app_id=APP, app_build="b", source_of=RUNTIME,
+        transitions=(ScreenTransition("AView", "BView", "tap:AView.go",
+                                      source_of=RUNTIME, count=3),))
+    tc = _case("elem_wait", [
+        _screen_wait("AView"),
+        {"action": "tap", "target": "AView.go"},
+        _ELEM_WAIT,
+        _screen_wait("BView"),
+    ])
+    assert coverage_gap(g, [tc]) == []
+
+
+def test_negative_screen_wait_does_not_consume_the_pending_action():
+    """否定屏 wait **不是到达点 → 也不消费**上一个动作（同形第二次，一并收敛）。
+
+    `到达 A → 动作 → 断言不在 B → 到达 C`：C 的 trigger 仍是那个动作。
+    若否定等待也复位，`A→C` 会被误报成假 gap——与 P2-1' 是同一个形状。
+    """
+    tc = _case("neg_wait", [
+        _screen_wait("AView"),
+        {"action": "tap", "target": "AView.go"},
+        {"wait_for": {"target": "screen:BView", "condition": "not_exists",
+                      "timeout": 3}},
+        _screen_wait("CView"),
+    ])
+    assert covered_transitions([tc]) == {("AView", "CView", "tap:AView.go")}

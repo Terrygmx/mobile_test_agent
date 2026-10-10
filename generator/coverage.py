@@ -171,6 +171,9 @@ def _arrivals(tc) -> list[tuple[str, str]]:
       - `postcondition screen:X`（动作后的目标状态，同样是「到过 X」的声明）。
 
     `trigger` = 到达点之前**最近的一个动作**（跳过中间的 wait/assertion）。
+    口径精确化为「最近一个**尚未被到达点消费**的动作」：`pending` 只在真的记了
+    一次到达时复位——不是到达点的 wait（元素 wait / 否定屏 wait）既不产出到达，
+    也不消费上一个动作（review_p3_task32_final P2-1'）。
     """
     out: list[tuple[str, str]] = []
     pending: str | None = None
@@ -197,7 +200,18 @@ def _arrivals(tc) -> list[tuple[str, str]]:
             if (getattr(tgt, "type", None) == "screen"
                     and wait.condition not in NEGATIVE_WAIT_CONDITIONS):
                 out.append((tgt.id, pending or ""))
-            pending = None
+                # ⚠️ **`pending` 只被「到达点」消费**（review_p3_task32_final
+                # P2-1'）：复位必须落在「真的记了一次到达」这一支内。放到 `if`
+                # 之外会让**元素 wait** 也清掉它——而元素 wait 恰恰是 docstring
+                # 说的「跳过中间的 wait」，于是下一个到达点的 trigger 塌成 `""`，
+                # 与图上任何转移都匹配不上（`_trigger_of` 不产空串）→ 用例**真
+                # 覆盖过**的转移被误报成 gap（错误落在「多报」那一侧，Task 3.4
+                # 会据此生成无用候选）。
+                # 同理，**否定等待也不是到达点 → 它同样不消费 `pending`**：
+                # `到达 W → 动作 → 断言不在 X → 到达 Y` 里，把 W→Y 的触发动作
+                # 清成 `""` 会凭空造出同一种假 gap（父提交在此处是「所有屏 wait
+                # 都复位」，本行把口径收敛到「只有到达点复位」）。
+                pending = None
             continue    # wait 不是触发，不算「最近动作」
         # 3) 动作步骤 → 记下来当后续到达点的触发
         if action is not None:
