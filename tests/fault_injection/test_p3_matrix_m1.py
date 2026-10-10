@@ -194,11 +194,16 @@ def test_every_wired_autonomous_command_passes_the_gate():
         name = node.name.removeprefix("cmd_")
         if not (node.name.startswith("cmd_") and name in AUTONOMOUS_COMMANDS):
             continue
-        body = ast.get_source_segment(src, node) or ""
-        assert "_check_autonomous_env" in body, (
-            f"`mta {name}` 是自主命令，但 `{node.name}` 没调 "
-            f"_check_autonomous_env（F7 前置）")
-        for call in _gate_calls(node):
+        # ⚠️ **判据是「有真的调用节点」，不是「源码片段里出现过这个名字」**
+        # （review_p3_task35 P2-3）：`ast.get_source_segment` 把 docstring 与
+        # 注释也算在内，于是删掉真调用、只在 docstring 里留着名字 → 守卫仍绿
+        # （探针实测：删调用 0 red；包进 `if False:` 也 0 red）。真调用的判据
+        # 只能是调用节点本身。
+        calls = _gate_calls(node)
+        assert calls, (
+            f"`mta {name}` 是自主命令，但 `{node.name}` 里没有真的调用 "
+            f"_check_autonomous_env（F7 前置；docstring/注释里提到不算）")
+        for call in calls:
             for kw in call.keywords:
                 if kw.arg == "env_kind":
                     assert not isinstance(kw.value, ast.Constant), (
@@ -208,6 +213,12 @@ def test_every_wired_autonomous_command_passes_the_gate():
                     assert kw.value.value == name, (
                         f"`{node.name}` 的 command={kw.value.value!r} 与函数名"
                         f" {name!r} 不一致（拒绝消息会指名错的命令）")
+        # 调用节点自己也不能是死代码：`if False:` 包着仍算「有调用」。
+        # （`_gate_calls` 走的是 `ast.walk`，死分支里的调用同样会被找到——
+        # 故这里额外要求该调用**不在**一个恒假的 `if` 体里。）
+        assert not _in_dead_branch(node, calls), (
+            f"`{node.name}` 的 _check_autonomous_env 调用在恒假分支里"
+            f"（`if False:` 之类）——守卫并未真跑，F7 是空转的")
 
 
 def _gate_calls(fn_node):
@@ -220,6 +231,36 @@ def _gate_calls(fn_node):
                 and call.func.id == "_check_autonomous_env"):
             out.append(call)
     return out
+
+
+def _dead_branches(fn_node) -> set[int]:
+    """该函数体里所有「恒假分支」节点的 `id()`（`if False:` / `if 0:` / `while False:`）。
+
+    守卫的另一半（review_p3_task35 P2-3）：把真调用包进 `if False:` 之后
+    `ast.walk` 照样找得到调用节点——「有调用」成立而守卫空转。判据只看
+    `test` 是字面量且为假的最简形态：常量折叠（`if 1 - 1:`）不在这里的射程，
+    它要挡住的是「探针式」的架空，不是对抗混淆（那也不该由测试来挡）。
+    """
+    import ast
+
+    dead: set[int] = set()
+    for node in ast.walk(fn_node):
+        if not isinstance(node, (ast.If, ast.While)):
+            continue
+        test = node.test
+        # `False` / `0` / `""` 在 py3 里都是 `ast.Constant`（`False` 不是
+        # `ast.Name`）——只判常量那一种最简形态。
+        falsy = isinstance(test, ast.Constant) and not test.value
+        if falsy:
+            for child in ast.walk(node):
+                dead.add(id(child))
+    return dead
+
+
+def _in_dead_branch(fn_node, calls) -> bool:
+    """这些调用里是否有落在恒假分支内的。"""
+    dead = _dead_branches(fn_node)
+    return any(id(c) in dead for c in calls)
 
 
 def test_env_kind_resolution_is_shared_with_run():

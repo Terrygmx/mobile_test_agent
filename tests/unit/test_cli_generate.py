@@ -241,6 +241,57 @@ def test_non_sandbox_is_refused_before_anything_is_written(proj, capsys):
     assert SQLiteAgentStore(proj["agent_db"]).list_candidates() == []
 
 
+def test_generate_without_bundle_id_takes_it_from_the_trace(proj, stub_llm, capsys):
+    """P1-1：不给 `--bundle-id` 时从 trace 归一化的 app_id 取，**不再 traceback**。
+
+    早先 `app_id = args.bundle_id or ""` → trace 是 `com.demo` 时 `graph_query`
+    的 fail-loud `ValueError` 直接穿透（一段 traceback），而 `--fake-driver`
+    正是最常用的本地路径——工具契约要求前置错误以 exit 3 收场。
+    """
+    stub_llm(_CANDIDATE_STEPS)
+    argv = [a for a in _argv(proj) if a not in ("--bundle-id", "com.demo")]
+    assert "--bundle-id" not in argv, "夹具自检：本用例必须真的不给 bundle-id"
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+    assert "gaps=1（现场重算）" in out, out
+    assert "Traceback" not in out
+    assert len(SQLiteAgentStore(proj["agent_db"]).list_candidates()) == 1
+
+
+def test_generate_with_a_wrong_bundle_id_is_a_preflight_error(proj, stub_llm,
+                                                              capsys):
+    """与 trace 不符的 `--bundle-id` → 前置错误 exit 3（不是 traceback）。"""
+    stub_llm(_CANDIDATE_STEPS)
+    argv = ["WRONGAPP" if a == "com.demo" else a for a in _argv(proj)]
+    assert main(argv) == 3
+    out = capsys.readouterr().out
+    assert out.startswith("PREFLIGHT ERROR:") and "app_id" in out, out
+    assert SQLiteAgentStore(proj["agent_db"]).list_candidates() == []
+
+
+def test_empty_trace_is_not_an_error(proj, stub_llm, capsys):
+    """trace 为空（新 `--db`）→ 空图 → 零 gap → exit 0（矩阵 #6 语义）。
+
+    「没有历史观测」不等于「工具用错了」——不该因为没给 `--bundle-id` 把它
+    变成前置失败（P1-1 的修法不能把这条既有语义改坏）。`--db` 里没有 `runs`
+    表时 `graph_query` 会 fail-loud（那是给「库被指错」的诊断，不是给「还没
+    跑过」的）——两者由只读探测分开。
+
+    ⚠️ 本命令**自己**会往 `--db` 写它的 Dry Run run 行（口径登记：图源与
+    Dry Run 记录同库），故结束时该文件**应当**存在——在这里断言「没建文件」
+    是测错对象。
+    """
+    stub_llm(_CANDIDATE_STEPS)
+    fresh = proj["tmp"] / "empty_trace.db"
+    argv = list(_argv(proj))
+    argv[argv.index("--db") + 1] = str(fresh)
+    argv = [a for a in argv if a not in ("--bundle-id", "com.demo")]
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+    assert "gaps=0" in out and "Traceback" not in out, out
+    assert SQLiteAgentStore(proj["agent_db"]).list_candidates() == []
+
+
 def test_unknown_plan_is_a_preflight_error(proj, capsys):
     assert main(["generate", "--gap-from", "nope",
                  "--agent-db", str(proj["agent_db"]),
@@ -407,11 +458,117 @@ def test_candidate_list_rejections_shows_skip_trace(proj, stub_llm, capsys):
 
 
 def test_candidate_unknown_verb_returns_2(proj, capsys):
-    """未知审核动词 → exit 2（与 `cmd_review` 同款）。"""
-    assert main(["candidate", "review", "list",
-                 "--db", str(proj["agent_db"])]) == 0
-    capsys.readouterr()
-    # `list` 之外的非法动词由 argparse choices 挡（SystemExit）；这里测
-    # 「有 parser 但 handler 不认」的分支：`candidate` 下没有 review 之外的组
-    with pytest.raises(SystemExit):
+    """未知审核动词 → exit 2，但**由 argparse 挡**，不是 handler 的分支。
+
+    ⚠️ 早先 handler 里有两个「未知动词 → return 2」的分支，实测**不可达**
+    （子解析器 `required=True` 先抛 `SystemExit(2)`；探针把两处改成 `0` 得
+    0 red）。故本测试断言的是 SystemExit(2) 这一**真实**的拦截点
+    （review_p3_task35 P3-3）。
+    """
+    with pytest.raises(SystemExit) as e:
+        main(["candidate", "review", "nope", "--db", str(proj["agent_db"])])
+    assert e.value.code == 2
+    with pytest.raises(SystemExit) as e2:
         main(["candidate", "nope"])
+    assert e2.value.code == 2
+
+
+def test_candidate_reject_missing_candidate_is_exit_3(proj, capsys):
+    """P3-2：reject 的**错误映射**也要有 CLI 级钉子（先前零覆盖）。
+
+    accept 侧有「不可二次决策」钉住映射，reject 侧一条都没有——把
+    `return 3` 改成别的值曾经 0 red。这里用「候选不存在」这条最易达的错误面。
+    """
+    assert main(["candidate", "review", "reject", "nope", "--note", "理由",
+                 "--db", str(proj["agent_db"])]) == 3
+    assert "不存在" in capsys.readouterr().out
+
+
+def test_candidate_reject_of_a_decided_candidate_is_exit_3(proj, stub_llm,
+                                                           capsys):
+    """reject 面的第二条映射：已决候选（与 accept 侧同款断言）。"""
+    stub_llm(_CANDIDATE_STEPS)
+    assert main(_argv(proj)) == 0
+    capsys.readouterr()
+    store = SQLiteAgentStore(proj["agent_db"])
+    cid = store.list_candidates()[0]["candidate_id"]
+    store.decide_candidate(cid, review_status="ACCEPT", reviewer="op")
+    assert main(["candidate", "review", "reject", cid, "--note", "改主意",
+                 "--db", str(proj["agent_db"])]) == 3
+    assert "不可二次决策" in capsys.readouterr().out
+
+
+def test_candidate_list_on_an_unreadable_db_is_exit_3(proj, capsys):
+    """P3-4：`sqlite3.Error` **不是** `RuntimeError`——库读不了要 exit 3。
+
+    早先 `--db` 指向一个目录时裸 `OperationalError` 直接漏成 traceback。
+    """
+    a_dir = proj["tmp"] / "a_directory"
+    a_dir.mkdir()
+    assert main(["candidate", "review", "list", "--db", str(a_dir)]) == 3
+    out = capsys.readouterr().out
+    assert out.startswith("CANDIDATE ERROR:"), out
+
+
+def test_candidate_export_patch_with_broken_yaml_is_exit_3(proj, stub_llm,
+                                                           capsys):
+    """P3-5：`--export-patch` 遇坏 YAML 与 ACCEPT 路径同一处置（exit 3，不是 traceback）。"""
+    stub_llm(_CANDIDATE_STEPS)
+    assert main(_argv(proj)) == 0
+    capsys.readouterr()
+    store = SQLiteAgentStore(proj["agent_db"])
+    cid = store.list_candidates()[0]["candidate_id"]
+    with store._write_tx() as conn:            # 人工/外部把文本写坏
+        conn.execute("UPDATE test_candidates SET testcase_yaml=? WHERE"
+                     " candidate_id=?", ("{ not: yaml: [", cid))
+    assert main(["candidate", "review", "accept", cid, "--export-patch",
+                 "--db", str(proj["agent_db"]),
+                 "--suites-root", str(proj["suites_root"])]) == 3
+    out = capsys.readouterr().out
+    assert out.startswith("CANDIDATE ERROR:") and "解析失败" in out, out
+
+
+def test_generate_failure_ends_the_run_row_as_aborted(proj, stub_llm, capsys,
+                                                      monkeypatch):
+    """P3-8：生成器抛异常 → run 行必须收口为 ABORTED（不是留 `RUNNING`）。
+
+    早先 `end_run` 在 try/finally 的 finally **之外**——异常穿透时 trace 里
+    留下 `status='RUNNING'` / `end_time=NULL` 的持久化「跑了一半」痕迹。
+    """
+    import generator.generator as gen_mod
+
+    def boom(*a, **kw):
+        raise RuntimeError("生成器炸了")
+
+    monkeypatch.setattr(gen_mod, "generate", boom)
+    stub_llm(_CANDIDATE_STEPS)
+    assert main(_argv(proj)) == 3
+    out = capsys.readouterr().out
+    assert "生成失败" in out and "Traceback" not in out, out
+    from tracer.storage import TraceStore
+
+    conn = TraceStore(str(proj["trace_db"])).conn
+    rows = conn.execute("SELECT status, end_time FROM runs WHERE"
+                        " run_id LIKE 'gen_%'").fetchall()
+    assert rows, "应留下一条 gen_* 的 run 行"
+    assert all(r["status"] == "ABORTED" and r["end_time"] for r in rows), \
+        [dict(r) for r in rows]
+
+
+def test_generator_run_ids_are_recorded(proj, stub_llm, capsys):
+    """口径登记：Dry Run 的步骤**写进**作为图源的同一 trace 库（P3-7）。
+
+    图来自 `--db` 的 trace，而 `generate` 自己又往它写 Dry Run 的观测——
+    这条关系是**刻意的**（Dry Run 是真实执行，观测理应进 trace），但审计
+    必须显式登记它，否则「图源被自己改写」是个看不见的口径。本测试把现状
+    **钉住**（改成就地沉默才是回归）。
+    """
+    stub_llm(_CANDIDATE_STEPS)
+    assert main(_argv(proj)) == 0
+    capsys.readouterr()
+    from tracer.storage import TraceStore
+
+    conn = TraceStore(str(proj["trace_db"])).conn
+    n = conn.execute("SELECT COUNT(*) FROM runs WHERE run_id LIKE 'gen_%'"
+                     ).fetchone()[0]
+    assert n == 1, f"generate 应在图源库里留下自己的 run 行，实得 {n}"

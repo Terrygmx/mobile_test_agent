@@ -2863,3 +2863,187 @@ run 不带 `--bundle-id` 时 `runs.app_bundle_id` 是空串，与播种的 `com.
 - **`mta plan` 的改动范围写死 `HEAD~1..HEAD`**：单 commit 的自建仓库会
   `fatal: ambiguous argument 'HEAD~1..'` → exit 3。gate 工程必须给**两个** commit
   （M2 Gate 同款），而 metadata **写盘不提交**（提交了就多一个 commit，范围即漂）。
+
+---
+
+## Task 3.5 评审修订记录（round 1，2026-10-10）
+
+**评审报告**：`review/review_p3_task35_2026-10-10.md` —— 结论 **不通过**：
+**1×P1 + 4×P2 + 9×P3**。18 组变异探针 + 9 组只读观察，全部在 worktree 副本上
+做（评审结束主仓零改动）。**核心事实经独立复跑全部成立**（F6 状态机、AE 双层、
+迁移 004、M3 Gate exit 0 / 1844 passed 是复核者自己跑出来的数字），但
+「零覆盖 / 过度声称」这两类本仓经典缺陷**这次仍有命中**。
+
+### 修订 1（P1-1）：`--bundle-id` 缺省 → 未捕获 `ValueError`，工具契约破
+
+`app_id = args.bundle_id or ""` 遇上 trace 里真实存在的 `com.demo`，`graph_query`
+的 fail-loud `ValueError` **穿透成 traceback**（无 `generate: exit 3`）。这不是
+边缘：`--fake-driver` 是本地冒烟最常用的路径，而真实工程里 `mta run` 写的 trace
+**必有**非空 app_id；help 文本还写着「--fake-driver 时不需要」，等于平台自己
+承诺了一个不存在的用法。测试漏它是因为夹具 `_argv` **恒**带 `--bundle-id`。
+
+- 修：新增 `_trace_app_id(db)`（**只读**探测，库不存在直接返回空串，不
+  `connect`——那会建库文件）；`app_id = args.bundle_id or _trace_app_id(args.db)`。
+  与 trace 不符的 `--bundle-id` 同样由 `graph_query` 的 fail-loud 挡住，包成
+  `PREFLIGHT ERROR … exit 3`。help 改写为「trace 图的范围键；不给则从 trace 取」。
+- **修的过程中发现第二条**：trace 库**未初始化**（无 `runs` 表）时 `graph_query`
+  也 fail-loud（`no such table: runs`）——但那是给「库被指错」的诊断，不是给
+  「还没跑过」的。矩阵 #6 的语义是「没有历史观测 = 零 gap = exit 0」，故加
+  `_trace_has_runs()`（只读探测）把两者分开：**空 → 空图 exit 0**；**坏 → exit 3**。
+  这条是修 P1-1 时**派生**出来的，不在评审清单里。
+- 钉子 3 条：不给 bundle-id 走通主路径（无 traceback）；给错 id → exit 3；
+  空 trace → `gaps=0` + exit 0。
+
+### 修订 2（P2-1）：ACCEPT 的**反向**卡死窗口（commit 已落、记账失败）
+
+模块 docstring 花了一整段论证「照 promoter 的顺序是为了避免卡死」，却在反方向
+复制了同一种卡死：`run_git commit` 成功、`store.decide_candidate` 失败 → 文件已
+提交、库仍 PENDING、重试被「目标文件已存在」**永久挡死**（`修复后重试即续传`
+这句对这条路径不成立）。已有的「git 失败回滚」测试只覆盖异常在 try 内的那一半。
+
+- 修：commit 后的写库包 `try/except`，失败时 `git revert --no-edit <sha>`
+  **真回滚**（只追加历史、不改写，与打印给用户的「撤销 = git revert」同一手法）；
+  连 revert 都失败时异常**带上 sha**（最坏形态的第一手线索，不许静默）。
+  两条路径都保持「候选 PENDING + 工作区干净 → 重试即续传」。
+- 钉子 2 条：注入 DB 故障 → revert 生效 + 重试成功（续传语义真的成立）；
+  revert 也失败 → 异常含 sha 与「人工处理」。
+
+### 修订 3（P2-2）：「`review_status` 唯一写路径」是过度声称
+
+`save_candidate` 仍接受并写 `review_status`（`INSERT` 分支），能产出
+`ACCEPT` 但 `reviewer`/`reviewed_at` 全 `NULL` 的行（**看起来像已审核，实则
+无人审核**），且绕过 `decide_candidate` 的全部领域校验（note 必填 / 不可二次
+决策）。既有测试 `test_list_candidates_filters_pending_set` 就在用这条旁路。
+
+- 修：**删掉形参**（不是加断言——断言仍留一个可绕过的入口），`INSERT` 里写
+  死 `'PENDING'` 字面量。调用方再传 `review_status=` 会以 `TypeError` fail-loud。
+  测试改用 `decide_candidate` 造已决行。
+- 钉子 1 条：传 `review_status=` → `TypeError`；正常入库仍是 PENDING。
+
+### 修订 4（P2-3）：F7 的 AST 守卫**可被 docstring 满足**（守卫空转）
+
+判据是 `ast.get_source_segment(src, node)` 里含字符串 `_check_autonomous_env`
+——docstring 与注释都在该范围内，而 `cmd_generate` 的 docstring 恰好提到这个名字。
+实测：**删掉真调用（docstring 留着）→ 0 red；包进 `if False:` → 0 red**；只有连
+docstring 提及一起删才红。功能侧有 CLI 级钉子兜底（删调用 → 1 red），但守卫
+本身是**假绿**——这正是本仓反复出现的「守卫存在但永远轮不到」形态。
+
+- 修：判据改为「**至少一个真的调用节点**」（`_gate_calls(node)` 非空），并追加
+  `_dead_branches` / `_in_dead_branch`——真调用被包在恒假 `if` 里的同样算空转。
+- 钉子就是守卫自身：探针实测两种架空形态（删调用留 docstring / 包 `if False:`）
+  **都变红**（修前 0 red）。
+
+### 修订 5（P2-4）：`to_store_dict` 的 docstring + 测试注释共同撒谎
+
+两处都声称它是 `save_candidate(**...)` 的实参形状、且「Task 3.5 落盘要复用」。
+实测 `save_candidate(**tc.to_store_dict())` → `TypeError`（`review_note` /
+`reviewer` / `reviewed_at` 不在形参里），而 3.5 的 ACCEPT 落盘实际走
+`dump_testcase_yaml(tc)`，**从没**消费它。
+
+- 修：docstring 改为「行模型的**字段快照**」，并写明**为什么审核三列不在里面**
+  （不是缺漏，是刻意的单向门——修订 3 让 `save_candidate` 只写 PENDING）；
+  测试注释同改，并补一条**逆运算自洽**断言（行 → dict → 行，
+  `exclude={"created_at"}`——那列归 DB 拥有，是唯一刻意缺席的字段）。
+
+### 修订 6（P3-1）：从 promoter 抄来的「恢复分支」是**死代码**
+
+前置 `original is not None` 已经 fail-loud，控制流永远进不了那个 `else`。
+探针把该分支改成 `raise AssertionError` → **0 red**（铁证）。promoter 那边**是
+活的**（它没有前置 fail-loud）——照抄形态而不照抄前提，就得到一条永不执行的路径。
+
+- 修：删掉该分支（`original` 恒为 `None`），并把「回滚 = 删掉自己刚写的那一个」
+  的理由写在原地。探针 R8（把死分支加回去）**0 red**——正是「删对了」的证明。
+
+### 修订 7（P3-2 / P3-3 / P3-4 / P3-5）：CLI 的错误面与死分支
+
+- **P3-2** reject 的错误映射零覆盖（`return 3` → `7` 曾 0 red）：补 2 条
+  （候选不存在 / 已决候选）。
+- **P3-3** 两处 `return 2` **不可达**（子解析器 `required=True` 先抛
+  `SystemExit(2)`）：删掉，并把测试改测**真实拦截点** `SystemExit(2)`。
+- **P3-4** `sqlite3.Error` **不是** `RuntimeError`——`--db <目录>` 时裸
+  `OperationalError` 漏成 traceback：三处 except 纳入 `sqlite3.Error`，`list`
+  与 store 构造各自包成 `CANDIDATE ERROR` + exit 3。
+- **P3-5** `export_candidate_patch` 的裸 `yaml.safe_load` 与 ACCEPT 路径不一致
+  （坏 YAML → `ParserError` 穿透）：复用同一处置（包成 `CandidateReviewError`）。
+  钉子 1 条。
+
+### 修订 8（P3-6 / P3-7 / P3-8 / P3-9）：文档一致性、口径登记、run 行收口
+
+- **P3-6** gate 顶部 docstring 说 G6 是 exit 3，代码断言 2（argparse 的 required
+  → 2，**代码对、docstring 错**）：改 docstring 为 exit 2。
+- **P3-7** **口径登记**（新增，见下）：Dry Run 的观测写进**作为图源的同一 trace
+  库**——这是刻意的（Dry Run 是真实执行），但审计原先只登记了「`--db` 给
+  Lifecycle 用」，没登记「因此 candidate 的 Dry Run 会改写图源」。补钉子 1 条
+  （`generate` 在图源库里留下自己的 `gen_*` run 行）。
+- **P3-8** `end_run` 在 `try/finally` 的 finally **之外**，生成器抛异常时 trace
+  里留下 `status='RUNNING'` / `end_time=NULL` 的持久化「跑了一半」痕迹：移入
+  异常分支（ABORTED + exit 3），异常不再穿透成 traceback。钉子 1 条。
+- **P3-9** `test_candidate_review.py` 的注释「落盘内容 = 库里的文本」只在夹具
+  用规范 dump 时成立：改成「落盘 = `dump(parse(库文本))`，与库同源」，并补一条
+  **非规范库文本**（flow-style + 注释）→ 落盘被规范化重排但**语义等价**的钉子。
+
+### 📌 口径登记 5（新增）：Dry Run 的观测**进**图源库
+
+`mta generate` 的 `--db` 同时是 coverage 图的来源与 Dry Run 的 `TraceStore`
+落点。于是每一轮生成都会往图里补进刚跑过的候选观测。**刻意保留**（Dry Run 是
+真实执行，观测理应进 trace；P1 的 `mta run` 同款），**并显式登记**：它意味着
+「两次 generate 的 gap 可能不同」（前一轮的 Dry Run 覆盖掉了一部分 gap），
+本仓 gate 的 G3/G4/G7 实测两次 generate 的 gap 稳定，但那是**数据**结论不是
+**构造**保证。要改的话是「`--db` 拆成 `--db`（图源）+ `--gen-trace-db`（Dry Run
+记录）」的立项，不是静默改行为。
+
+**副作用一并登记**：`--db` 指向一个**尚不存在**的库时，本命令**会创建它**
+（Dry Run 要写 run 行）——与「空 trace → exit 0」并不矛盾。
+
+### 修订后实测
+
+- 全量 `pytest tests`（macOS）：**1857 passed / 0 failed**（exit 0；修订前 1844，
+  **+13**）。
+- **M3 Gate `phase0/verify_p3_m3.py` → exit 0**，G1–G8 全绿（G8 复跑 1857 passed）。
+- **A/B 探针 8 组**（本轮修订，全部自跑；还原后清 `__pycache__`、核对
+  `git diff` 无残留）：
+
+  | 探针 | 变异 | 结果 |
+  |---|---|---|
+  | R1 | commit 后失败的 `git revert` 去掉 | **2 failed** |
+  | R2 | `save_candidate` 加回 `review_status` 形参 | **1 failed** |
+  | R3 | `--bundle-id` 回到裸 `or ""` | **1 failed** |
+  | R4 | `end_run` 移出异常分支 | **1 failed** |
+  | R5 | reject 错误映射 `3→7` | **2 failed**（修前 0 red） |
+  | R6 | 恢复不可达的 `return 0` 分支 | **0 red**（预期：不可达分支无语义） |
+  | R7 | export 不包 YAML 解析错误 | **1 failed** |
+  | R8 | 恢复死分支（`original` 恢复） | **0 red**（预期：同上） |
+  | P2-3a | 删真调用、docstring 留名字 | **1 failed**（修前 0 red） |
+  | P2-3b | 真调用包进 `if False:` | **1 failed**（修前 0 red） |
+
+  R6 / R8 的 0 red 是**预期的**（把不可达/死代码加回去不改变任何可观测行为）
+  ——它们是「删对了」的证明，不是漏测。
+
+### 未修订（显性登记，非本次范围）
+
+- **`review_note` 未过 `redact`**（评审「未验证 9」）：P2 的
+  `tracer/storage.py::decide_review` 走 `redact(note)`，本处直存。实测
+  `redact()` 对**字符串**入参是恒等（它只递归 dict/list 的敏感键），故 P2 那处
+  本身也是空转——但两侧形态不一致仍是事实。**本轮不改**：改 `decide_candidate`
+  的 SQL 参数只是把一个空转换成另一个空转，真正要做的是给 redactor 加
+  「自由文本里的凭证模式」能力，那是独立立项（且属 P2 面的统一）。登记在此。
+- 评审其余「未验证」项（真机路径无设备、P2-1 触发概率未量化、M4/M5 的 `kind`
+  复用面、promoter E10 等价性只读比对）保持登记，均为环境/范围所限。
+
+### 教训（已并入 MEMORY §5）
+
+- **守卫的判据不能是「源码里出现过这个名字」**：`get_source_segment` 含
+  docstring 与注释，于是「删掉真调用、只在文档里提一句」就能让守卫空转。
+  判据要用**结构**（AST 调用节点），且要问一句「这条判据能不能被**不做事**的
+  改动满足」。同族的还有「恒假分支里的调用」——`ast.walk` 找得到，但它不跑。
+- **照抄形态而不照抄前提，就得到死代码**：`review.py` 的 `original` 恢复分支
+  抄自 `promoter.py:283-285`，但 promoter 那边**没有**前置 fail-loud，本处有。
+  前置一挡，恢复分支永不执行，而它读起来「很稳妥」。抽公共形态时，**前提**
+  和**形态**要一起搬。
+- **同一个卡死窗口有两个方向**：论证「顺序 A 避免了卡死」不等于「顺序 A 不会
+  卡死」——反方向的窗口（副作用成了、记账没成）要用**反向**的撤销手段（git
+  revert，而不是删文件）。凡「不可逆的外部副作用 + 可逆的本地状态」，两个
+  方向都得有出口。
+- **「唯一写路径」必须靠**删掉**旁路来成立，不是靠加断言**：断言留一个可绕过
+  的入口（而且它读起来像是守住了），删形参让误用以 `TypeError` 当场炸。凡
+  docstring 里出现「唯一/只/从不」，都该问「另一条路在哪、能不能删掉」。

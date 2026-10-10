@@ -87,7 +87,17 @@ class TestCandidate(_Strict):
     # --- 与 agent.db 的 `test_candidates` 表互转 --------------------------------
 
     def to_store_dict(self) -> dict[str, Any]:
-        """→ `SQLiteAgentStore.save_candidate(**...)` 的关键字实参形状。
+        """行模型的**字段快照**（与 `agents/storage.py` 的 `_candidate_from_row`
+        逐一对应；`from_store_dict` 是它的逆）。
+
+        ⚠️ **不是** `save_candidate(**...)` 的实参形状（review_p3_task35 P2-4）：
+        早先这里写着「→ save_candidate 的关键字实参形状」，实测
+        `save_candidate(**tc.to_store_dict())` 是 `TypeError`——审核三列
+        （`review_status` / `reviewer` / `reviewed_at`，以及迁移 004 的
+        `review_note`）**不在**它的形参里。那不是缺漏，是刻意的单向门：
+        `review_status` 的唯一写路径是 `decide_candidate`（P2-2），
+        `save_candidate` 只写 `'PENDING'`。Task 3.5 的 ACCEPT 落盘走的是
+        `dump_testcase_yaml(tc)`，**从没**消费本方法。
 
         `generation_evidence` 落 `model_dump(mode="json")`（JSON 可序列化）；
         `created_at` **不在这里**——它由 store 在写入时取 `_now()`（与

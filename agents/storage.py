@@ -238,8 +238,7 @@ class SQLiteAgentStore:
                        generated_by: str | None = None,
                        fingerprint: str | None = None,
                        dry_run_status: str = "PENDING",
-                       dry_run_detail: dict | None = None,
-                       review_status: str = "PENDING") -> dict:
+                       dry_run_detail: dict | None = None) -> dict:
         """落一条候选（upsert：`candidate_id` 是主键）。
 
         **幂等**：同 id 重存覆盖（与 `save_plan` 同款）——生成器重跑同一批 gap
@@ -261,7 +260,15 @@ class SQLiteAgentStore:
         同 gap 会改写已 ACCEPT 候选的 `testcase_yaml` 而 `review_status` 保持
         ACCEPT → 落盘文件与库内容分叉。已决行经生成器写路径 fail-loud（第 2 层
         ——generate 的预过滤——让这条闸门在日常路径上根本轮不到触发）。
-        `review_status` 的**唯一写路径**是 `decide_candidate`。
+
+        ⚠️ **`review_status` 不是本方法的形参**（review_p3_task35 P2-2）：
+        本方法**只写 `'PENDING'`**（字面量，见下方 INSERT）——`review_status`
+        的唯一写路径是 `decide_candidate`。早先版本接受 `review_status=` 形参，
+        于是「唯一写路径」是**过度声称**：这条旁路能产出 `ACCEPT` 但
+        `reviewer`/`reviewed_at` 全是 `NULL` 的行（看起来像已审核，实则无人审核），
+        而它绕过了 `decide_candidate` 的全部领域校验（note 必填 / 不可二次决策）。
+        **形参删掉而不是加断言**：断言仍留一个可被绕过的入口，而删掉之后调用方
+        `save_candidate(..., review_status=…)` 会以 `TypeError` fail-loud。
         """
         if not fingerprint:
             raise ValueError(
@@ -281,7 +288,7 @@ class SQLiteAgentStore:
                 " generated_by, generation_evidence_json, fingerprint,"
                 " dry_run_status, dry_run_detail_json, review_status,"
                 " created_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?)"
+                " VALUES (?,?,?,?,?,?,?,'PENDING',?)"
                 " ON CONFLICT(candidate_id) DO UPDATE SET"
                 " testcase_yaml=excluded.testcase_yaml,"
                 " generated_by=excluded.generated_by,"
@@ -293,7 +300,7 @@ class SQLiteAgentStore:
                  json.dumps(generation_evidence, ensure_ascii=False),
                  fingerprint, dry_run_status,
                  json.dumps(dry_run_detail or {}, ensure_ascii=False),
-                 review_status, _now()))
+                 _now()))
         row = self.get_candidate(candidate_id)
         assert row is not None       # 刚写完必在
         return row
@@ -350,7 +357,7 @@ class SQLiteAgentStore:
     def decide_candidate(self, candidate_id: str, *, review_status: str,
                          reviewer: str, note: str | None = None) -> None:
         """`review_status` 的**唯一写路径**（Task 3.5 / F6；`save_candidate`
-        的 upsert 从不更新它）。
+        只写 `'PENDING'`，连形参都不收——review_p3_task35 P2-2）。
 
         reviewer / `reviewed_at`（`_now()` 盖章，单一来源）/ `review_note`
         （迁移 004）一次落齐。PENDING→X 的状态机校验在领域层

@@ -24,6 +24,12 @@ Discovery Event 与 M5 的 Bug Candidate 复用同一入口（`kind` 判别，�
 故顺序照 `approve_proposal:215-298`：**全部校验 → 落盘（失败回滚）→ 改状态**。
 失败时候选保持 PENDING，修复 git 后重试即续传。
 
+⚠️ **两个卡死窗口都要关掉**（review_p3_task35 P2-1）：上面的顺序关掉了
+「改了状态但没落盘」；反方向的「**已落盘但没记账**」同样会卡死（重试被
+「目标文件已存在」挡住），故 `commit` 之后的写库失败会**自动 `git revert`**
+那个 commit——只追加历史、不改写，与打印给用户的「撤销 = git revert <sha>」
+同一手法。两条路径都保持「候选 PENDING + 工作区干净 → 重试即续传」。
+
 ## 依赖方向
 
 `candidates → agents`（单向，不 import `cli`）：`existing_case_ids` 由调用方
@@ -124,6 +130,9 @@ def decide_candidate(store, kind: str, candidate_id: str, decision: str,
     target.parent.mkdir(parents=True, exist_ok=True)
     # 写文件与 git commit 之间没有事务性（promoter:264-284 的同款处理）：git
     # 失败时回滚文件写——否则重试会被自己写了一半的文件挡死。候选保持 PENDING。
+    # ⚠️ 这里只会是**新建**文件（`original is not None` 已在上面前置抛掉），
+    # 故回滚 = 删掉自己刚写的那个（review_p3_task35 P3-1：早先抄 promoter 的
+    # 「已存在则恢复原内容」分支在前置一挡之下**永远轮不到**，是死代码）。
     try:
         target.write_text(dump_testcase_yaml(tc), encoding="utf-8")
         run_git(repo_root, "add", rel)
@@ -133,17 +142,32 @@ def decide_candidate(store, kind: str, candidate_id: str, decision: str,
                 f"origin: LLM 生成候选经人工审核 ACCEPT（P3-13 / F6）；"
                 f"撤销 = git revert <sha>")
     except Exception as e:  # noqa: BLE001 — git 失败（GitError）与 IO 失败同一处置
-        if original is None:
-            target.unlink(missing_ok=True)
-        else:
-            target.write_text(original, encoding="utf-8")
+        target.unlink(missing_ok=True)
         raise RuntimeError(
             f"落盘失败，{rel} 的写入已回滚（候选仍为 PENDING，"
             f"修复后重试 accept 即续传）：{e}") from e
     sha = run_git(repo_root, "rev-parse", "HEAD").strip()
 
-    store.decide_candidate(candidate_id, review_status="ACCEPT",
-                           reviewer=reviewer, note=note)
+    try:
+        store.decide_candidate(candidate_id, review_status="ACCEPT",
+                               reviewer=reviewer, note=note)
+    except Exception as e:  # noqa: BLE001 — commit 已落，记账失败必须真回滚
+        # ⚠️ **commit 与记账之间没有事务**（review_p3_task35 P2-1）：外部的
+        # commit 已经落定，而库还是 PENDING——此时若什么都不做，重试会被
+        # 「目标文件已存在」永久挡死（**反向的**同一个卡死窗口，正是本模块
+        # 选这个顺序时想避开的那个）。故用 `git revert` **真回滚**：只追加
+        # commit、不改写历史，与打印给用户的「撤销 = git revert <sha>」同一手法。
+        try:
+            run_git(repo_root, "revert", "--no-edit", sha)
+        except Exception as revert_exc:  # noqa: BLE001 — 连撤销都失败，如实报
+            raise RuntimeError(
+                f"落盘已提交 {sha}，但库状态更新失败（{e}）；自动撤销也失败"
+                f"（{revert_exc}）——候选仍为 PENDING，需人工处理：先 `git "
+                f"revert {sha}`，再重试 accept") from e
+        raise RuntimeError(
+            f"落盘已提交 {sha}，但库状态更新失败（{e}）——已自动 `git revert`"
+            f" 撤销该 commit（历史里留痕，工作区干净），候选仍为 PENDING，"
+            f"修复后重试 accept 即续传") from e
     decided = store.get_candidate(candidate_id)
     assert decided is not None
     return decided, sha
@@ -191,12 +215,21 @@ def export_candidate_patch(store, kind: str, candidate_id: str, *,
 
     返回「建议路径 + YAML 正文」——给「完全人工落盘」的团队习惯留一条路。
     **零写入**（不碰 git、不碰文件系统）。
+
+    坏 YAML 与 ACCEPT 路径**同一处置**（review_p3_task35 P3-5）：解析失败包成
+    `CandidateReviewError` 而不是把 `yaml.YAMLError` 漏给调用方——同一个
+    「候选的文本读不出来」在两条命令下不该一条 exit 3、一条 traceback。
     """
     _require_kind(kind)
     row = store.get_candidate(candidate_id)
     if row is None:
         raise CandidateReviewError(f"候选 {candidate_id} 不存在")
-    tc = parse_testcase_dict(yaml.safe_load(row["testcase_yaml"]))
+    try:
+        tc = parse_testcase_dict(yaml.safe_load(row["testcase_yaml"]))
+    except Exception as e:  # noqa: BLE001 — 与 `_validated_testcase` 同款
+        raise CandidateReviewError(
+            f"候选 {candidate_id} 的 testcase_yaml 解析失败"
+            f"（F5 的 P1 Schema）：{type(e).__name__}: {e}") from e
     target = Path(suites_root) / (tc.suite or "<suite>") / f"{tc.id}.yaml"
     return (f"# 建议落盘路径: {target.as_posix()}\n"
             f"# 应用: 写入该文件后 git add/commit（工具不代劳，H15）\n"

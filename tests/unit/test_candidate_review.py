@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -153,8 +154,43 @@ def test_accept_writes_file_commits_and_marks_the_row(store, repo_root,
     assert "cand_search_001" in log, "commit message 要点名候选 id"
     assert row["review_status"] == "ACCEPT" and row["reviewer"] == "op"
     assert row["reviewed_at"]
-    # 落盘内容 = 库里的文本（唯一实现，不漂移）
+    # 落盘内容与库**同源**：落盘 = `dump(parse(库文本))`。夹具的库文本本就是
+    # 规范 dump，故此处逐字节相等；**非规范文本**（flow-style / 带注释）会被
+    # 规范化重排——那条关系由下一条测试钉住（review_p3_task35 P3-9）。
     assert target.read_text() == store.get_candidate(cid)["testcase_yaml"]
+
+
+def test_landed_file_is_the_normalized_form_of_non_canonical_db_text(
+        store, repo_root, repository):
+    """库文本**非规范**（flow-style + 注释）时，落盘仍是**可被 P1 读回**的规范形态。
+
+    早先的注释把这层关系说成「落盘内容 = 库里的文本」（恒等）——只有在库文本
+    恰好是规范 dump 时成立。真实关系是「落盘 = dump(parse(库文本))」，故这里
+    故意塞一份非规范文本，断言落盘 ≠ 库文本、但**语义等价**（parse 回来逐字段
+    相同）。E10 的 git diff 可读性也依赖落盘走规范化（人工改过的库文本不会
+    把 diff 搅乱）。
+    """
+    cid = "cand_flow"
+    flow = ('schema_version: "0.2"\nid: cand_flow\nname: 搜索 # 人工备注\n'
+            'suite: smoke\nstatus: CANDIDATE\ngenerated_by: generator_agent\n'
+            'generation_evidence: {coverage_gap: [], bug_history: [], '
+            'source_refs: []}\n'
+            'steps: [{action: tap, target: SearchView.submit_button}, '
+            '{wait_for: {target: "screen:SearchView", condition: active, '
+            'timeout: 10}}]\n')
+    store.save_candidate(cid, testcase_yaml=flow,
+                         generation_evidence={"coverage_gap": [],
+                                              "bug_history": [],
+                                              "source_refs": []},
+                         fingerprint="fp_flow")
+    decide_candidate(store, "test", cid, "ACCEPT", "op",
+                     repo_root=repo_root, suites_root=repo_root / "suites",
+                     repository=repository, secrets=EnvSecretProvider())
+    landed = (repo_root / "suites" / "smoke" / f"{cid}.yaml").read_text()
+    assert landed != flow, "落盘走规范化重排（不是库文本的逐字节拷贝）"
+    assert parse_testcase_dict(yaml.safe_load(landed)).model_dump() == \
+        parse_testcase_dict(yaml.safe_load(flow)).model_dump(), \
+        "但语义必须等价（P1 读回同一份用例）"
 
 
 def test_landed_file_roundtrips_through_p1_schema(store, repo_root, repository):
@@ -316,6 +352,80 @@ def test_git_failure_rolls_back_the_file_and_keeps_pending(store, tmp_path,
                 / "cand_search_001.yaml").exists(), "失败必须回滚文件写"
     assert store.get_candidate(cid)["review_status"] == "PENDING", \
         "落盘失败不许改状态（否则永远卡死）"
+
+
+def test_write_failure_after_commit_reverts_it_and_keeps_pending(
+        store, repo_root, repository, monkeypatch):
+    """**反方向的卡死窗口**（review_p3_task35 P2-1）：commit 成功、写库失败。
+
+    早先这里没有处置——commit 已落、库还是 PENDING，重试被「目标文件已存在」
+    永久挡死（正是本模块选落盘顺序时想避开的那种卡死，只是方向相反）。现在
+    自动 `git revert` 那个 commit：历史留痕、工作区干净、候选仍 PENDING，
+    重试即续传。
+    """
+    cid = _seed(store)
+    real = store.decide_candidate
+
+    def boom(*a, **kw):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store, "decide_candidate", boom)
+    with pytest.raises(RuntimeError, match="git revert"):
+        _accept(store, repo_root, repository, cid)
+    monkeypatch.setattr(store, "decide_candidate", real)
+    # 候选没被记账（写库失败）→ 仍 PENDING
+    assert store.get_candidate(cid)["review_status"] == "PENDING"
+    # 工作区干净（落盘被撤销）→ 重试不会被「文件已存在」挡住
+    assert not (repo_root / "suites" / "smoke" / "cand_search_001.yaml").exists()
+    # 重试成功（续传语义成立）
+    row, sha = _accept(store, repo_root, repository, cid)
+    assert row["review_status"] == "ACCEPT" and sha
+
+
+def test_revert_failure_is_reported_with_the_commit_sha(
+        store, repo_root, repository, monkeypatch):
+    """连 `git revert` 都失败时：异常必须**带上 sha**（人工接手的第一手信息）。
+
+    静默吞掉会让「库 PENDING + 文件已提交」这个最坏形态失去线索。
+    """
+    cid = _seed(store)
+    monkeypatch.setattr(store, "decide_candidate",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            sqlite3.OperationalError("disk I/O error")))
+
+    import candidates.review as mod
+    from source.vcs import run_git as real_run_git
+
+    def flaky_git(root, *args):
+        if args and args[0] == "revert":
+            raise RuntimeError("revert 撞上冲突")
+        return real_run_git(root, *args)
+
+    monkeypatch.setattr(mod, "run_git", flaky_git)
+    with pytest.raises(RuntimeError) as e:
+        _accept(store, repo_root, repository, cid)
+    msg = str(e.value)
+    assert "已提交" in msg and "revert" in msg and "人工处理" in msg, msg
+    # 如实报告：库仍 PENDING，文件仍在（撤销失败 = 最坏形态，线索齐全）
+    assert store.get_candidate(cid)["review_status"] == "PENDING"
+
+
+def test_save_candidate_has_no_review_status_parameter(store):
+    """P2-2：`save_candidate` **不再收** `review_status` —— 「唯一写路径」名实相符。
+
+    早先它接受并写 `review_status`，于是能产出「ACCEPT 但 reviewer/reviewed_at
+    全 NULL」的行（看起来像已审核，实则无人审核），且绕过了 `decide_candidate`
+    的全部领域校验。删形参而不是加断言：断言仍留一个可绕过的入口，而删掉之后
+    调用方会以 `TypeError` fail-loud。
+    """
+    with pytest.raises(TypeError, match="review_status"):
+        store.save_candidate("cand_1", testcase_yaml="y",
+                             generation_evidence={}, fingerprint="fp",
+                             review_status="ACCEPT")
+    # 正常入库仍是 PENDING（字面量，不由调用方给）
+    assert store.save_candidate(
+        "cand_2", testcase_yaml="y", generation_evidence={},
+        fingerprint="fp")["review_status"] == "PENDING"
 
 
 # --- 4. H15 备选：export 零写入 -----------------------------------------------

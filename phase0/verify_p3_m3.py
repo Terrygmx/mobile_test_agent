@@ -18,7 +18,7 @@ M2 Gate 的 M4 事故（`rev-parse` 穿透到主仓库）在此显式防御：�
   G5  **ACCEPT 落盘**：`mta candidate review accept` → `suites/<suite>/<id>.yaml`
       + git commit + 库状态 ACCEPT；`mta lint` 对新文件通过；`mta run --case`
       能发现它（设计 6.1「不是新路径」）
-  G6  REJECT 无 note → exit 3（parser 级 required）
+  G6  REJECT 无 note → exit 2（argparse 的 required 挡在 handler 之前）
   G7  **AE（handover §9 前置 2）**：ACCEPT 后重跑 generate → 该候选的
       `testcase_yaml` **逐字节不变**（不被生成器覆写）
   G8  全量回归：`pytest tests` 全绿

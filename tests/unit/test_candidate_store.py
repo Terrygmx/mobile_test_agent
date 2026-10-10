@@ -211,10 +211,15 @@ def test_save_candidate_is_upsert_and_keeps_first_created_at(store):
 
 
 def test_list_candidates_filters_pending_set(store):
-    """生成器的去重需要**未决集**——已决的候选不该再挡住新候选。"""
+    """生成器的去重需要**未决集**——已决的候选不该再挡住新候选。
+
+    ⚠️ 已决行**只能**经 `decide_candidate` 造（review_p3_task35 P2-2）：
+    `save_candidate` 不再收 `review_status` 形参，走它造已决行会是 `TypeError`。
+    """
     store.save_candidate("cand_a", **_candidate())
-    store.save_candidate("cand_b", **{**_candidate(), "review_status": "ACCEPT"})
-    store.save_candidate("cand_c", **{**_candidate(), "review_status": "REJECT"})
+    for cid, status in (("cand_b", "ACCEPT"), ("cand_c", "REJECT")):
+        store.save_candidate(cid, **_candidate())
+        store.decide_candidate(cid, review_status=status, reviewer="op")
     pending = store.list_candidates(review_status="PENDING")
     assert [c["candidate_id"] for c in pending] == ["cand_a"]
     assert len(store.list_candidates()) == 3
@@ -260,14 +265,21 @@ def test_row_models_roundtrip(store):
                                                            **_candidate()))
     assert c.candidate_id == "cand_1"
     assert c.generation_evidence == GenerationEvidence(**_evidence())
-    # P3-2：`to_store_dict` 是 Task 3.5 落盘要复用的形状——**全键**断言，
-    # 不是只看一个键（少一个键 = store 收到 None 的静默缺字段）。
+    # 行模型的**字段快照**——**全键**断言，不是只看一个键（少一个键 = 下游
+    # 读到 None 的静默缺字段）。⚠️ 它**不是** `save_candidate(**...)` 的实参
+    # 形状（review_p3_task35 P2-4）：审核三列不在该方法的形参里，见
+    # `to_store_dict` 的 docstring；`from_store_dict` 是它的逆。
     assert set(c.to_store_dict()) == {
         "candidate_id", "testcase_yaml", "generated_by",
         "generation_evidence", "fingerprint", "dry_run_status",
         "dry_run_detail", "review_status", "review_note", "reviewer",
         "reviewed_at"}
     assert c.to_store_dict()["candidate_id"] == "cand_1"
+    # 逆运算的自洽：行 → dict → 行，除 `created_at`（唯一刻意缺席的字段，
+    # 归 DB 拥有）外逐字段相等——快照漏字段会在这里红。
+    back = TestCandidate.from_store_dict(c.to_store_dict())
+    assert back.model_dump(exclude={"created_at"}) == \
+        c.model_dump(exclude={"created_at"})
     r = CandidateRejection.from_store_dict(
         store.save_rejection("rej_1", reason="DUPLICATE", duplicate_of="x"))
     assert r.reason == "DUPLICATE" and r.duplicate_of == "x"

@@ -422,7 +422,8 @@ def build_parser() -> argparse.ArgumentParser:
     gen_p.add_argument("--requirement", metavar="TEXT", default="",
                        help="需求描述（进 prompt 的可信上下文）")
     gen_p.add_argument("--bundle-id", metavar="ID", default=None,
-                       help="真机路径的 App bundle id（--fake-driver 时不需要）")
+                       help="App bundle id（trace 图的范围键；不给则从 trace "
+                            "自身归一化的 app_id 取——与 trace 不一致会前置报错）")
     gen_p.add_argument("--udid", metavar="UDID", default=None)
     gen_p.add_argument("--fake-driver", action="store_true",
                        help="不连真机，组件注入最小桩（Dry Run 冒烟）")
@@ -588,6 +589,53 @@ def _metadata_path(args: argparse.Namespace) -> Path:
         return Path(explicit)
     return Path(getattr(args, "generated", None)
                 or "repository/generated/local") / "source_metadata.json"
+
+
+def _trace_app_id(trace_db: str | Path) -> str:
+    """trace 库自己归一化的 `(app_id, app_build)` 范围内的 **app_id**。
+
+    给 `mta generate` 的 `--bundle-id` 缺省兜底（review_p3_task35 P1-1）：
+    coverage 图的权威范围键是 trace 的 `runs.app_bundle_id`（12.1），故
+    「不给 `--bundle-id`」不等于「没有 app」——只是让工具自己去问那张图。
+    `read_trace_steps` 的判定（多范围 → `ValueError`、空库 → `""`）就是
+    这里要的语义：多范围时**不猜**（异常冒给调用方转前置错误），空库时返回
+    空串（调用方判空后报「无法确定 app_id」）。
+
+    ⚠️ **库文件不存在时直接返回空串，不 `connect`**：`sqlite3.connect` 对
+    不存在的路径会**建库文件**——一次「读」不该在磁盘上留下新文件（本仓的
+    最小副作用纪律，`_collect_metrics_if_any` 同款）。文件不存在与空库在
+    调用方眼里是同一件事：「trace 里没有 app_id」。
+    """
+    from graph.builder import read_trace_steps
+
+    if not Path(trace_db).exists():
+        return ""
+    _steps, app_id, _build = read_trace_steps(trace_db)
+    return app_id
+
+
+def _trace_has_runs(trace_db: str | Path) -> bool:
+    """trace 库里有没有**任何观测**（库不存在 / 表没建 / 零 run → `False`）。
+
+    只读探测：`mode=ro` 打开，**不创建**库文件（一次读不该在磁盘上留文件）。
+    「文件不是 sqlite 库」这类真错误**不在这里吞**——`sqlite3.DatabaseError`
+    冒给调用方转前置错误；它与「还没跑过」是两回事。
+    """
+    import sqlite3
+
+    p = Path(trace_db)
+    if not p.exists():
+        return False
+    conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    try:
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'"
+        ).fetchone()
+        if has_table is None:
+            return False
+        return conn.execute("SELECT 1 FROM runs LIMIT 1").fetchone() is not None
+    finally:
+        conn.close()
 
 
 def _resolve_app_build(args: argparse.Namespace) -> str:
@@ -1168,8 +1216,36 @@ def cmd_generate(args: argparse.Namespace) -> int:
     #    ⚠️ `graph_query` 的第一参是 **app_id**（= `runs.app_bundle_id`），
     #    不是 build：`P2KnowledgeSources.graph_query` 会 fail-loud 挡住跨 app
     #    混图。真机路径的 `--bundle-id` 与 trace 里的值必须一致（同 `mta run`）。
-    app_id = args.bundle_id or ""
-    graph = knowledge.graph_query(app_id)
+    #
+    #    ⚠️ **app_id 是前置，不是「缺省空串」**（review_p3_task35 P1-1）：
+    #    `--bundle-id` 的 help 早先写「--fake-driver 时不需要」，于是最常用的
+    #    本地路径（fake driver + 真工程 trace）会拿 `""` 去查 `com.demo` 的图
+    #    → `graph_query` 的 fail-loud `ValueError` **穿透成 traceback**（工具
+    #    契约要求前置错误 exit 3）。缺省时从 trace 自己归一化的 app_id 取——
+    #    那是「本次要查的那张图属于谁」的权威来源。
+    #
+    #    ⚠️ trace **为空**（或库文件还不存在）时 app_id 是 `""`，与 trace 的
+    #    `""` 相符 → 空图 → 零 gap → exit 0 + note。这**不是**错误：矩阵 #6
+    #    的语义就是「没有历史观测 = 没有可算的 gap」，不该因为「没给
+    #    --bundle-id」把它变成前置失败。而 `graph_query` 对**未初始化**的库
+    #    会 fail-loud（`no such table: runs`）——那是给「库被指错」的诊断，
+    #    不是给「还没跑过」的；两者在这里靠**只读探测**分开（前者照旧 exit 3）。
+    import sqlite3
+
+    from graph.builder import build_runtime_graph
+
+    app_id = args.bundle_id or _trace_app_id(args.db)
+    try:
+        graph = (knowledge.graph_query(app_id) if _trace_has_runs(args.db)
+                 else build_runtime_graph([], app_id=app_id,
+                                          app_build=app_build))
+    except (ValueError, sqlite3.DatabaseError) as e:
+        # `graph_query` / `read_trace_steps` 的 fail-loud 是**正确**的
+        # （不跨 app 混图、两个 build 不混进一张图）；非法的是「调用方拿一个
+        # 没核对过的 app_id 来查」或「库根本读不了」。前置错误 → exit 3。
+        print(f"PREFLIGHT ERROR: 建不了 coverage 图：{e}")
+        print("generate: exit 3")
+        return 3
     gaps = coverage_gap(graph, cases)
     print(f"generate: plan={args.gap_from}  build={app_build}  "
           f"gaps={len(gaps)}（现场重算）")
@@ -1230,9 +1306,18 @@ def cmd_generate(args: argparse.Namespace) -> int:
             llm=llm, budget=budget, execute=_execute,
             env_kind=env_kind, device_type=DeviceType.SIMULATOR,
             suite=args.suite, requirement=args.requirement)
+        trace_store.end_run(run_id, status="PASS", exit_code=0)
+    except Exception as e:  # noqa: BLE001 — 生成器炸了，run 行必须收口
+        # ⚠️ review_p3_task35 P3-8：`end_run` 早先在外层、异常穿透时**不执行**
+        # → trace 里留下 `status='RUNNING'` / `end_time=NULL` 的行（「跑了一半」
+        # 的持久化痕迹，与 `cmd_run` 的成对语义不一致）。生成器的异常一律
+        # ABORTED + 前置错误 exit 3（`generate` 的退出码契约只有 0/3）。
+        trace_store.end_run(run_id, status="ABORTED", exit_code=3)
+        print(f"PREFLIGHT ERROR: 生成失败：{type(e).__name__}: {e}")
+        print("generate: exit 3")
+        return 3
     finally:
         stack.close()
-    trace_store.end_run(run_id, status="PASS", exit_code=0)
 
     # 6. 输出
     for c in result.candidates:
@@ -1260,18 +1345,30 @@ def cmd_candidate(args: argparse.Namespace) -> int:
     from candidates.review import CandidateReviewError, decide_candidate, \
         export_candidate_patch
 
-    if getattr(args, "candidate_cmd", None) != "review":
-        print(f"CANDIDATE ERROR: 未知子命令 {args.candidate_cmd!r}")
-        return 2
-    cmd = getattr(args, "candidate_review_cmd", None)
+    # ⚠️ 两组 `if` 分支（`candidate_cmd != "review"` / `cmd not in (...)`）早先
+    # 在此处各有一个 `return 2` —— 实测**不可达**：两处子解析器都是
+    # `required=True`，非法动词由 argparse 以 `SystemExit(2)` 挡在 handler 之前
+    # （review_p3_task35 P3-3：探针把两处 `return 2` 改成 `0`，0 red）。删掉的
+    # 不是「防御」，是**假的可达性**：留着会让人以为 handler 自己守住了动词面。
+    cmd = args.candidate_review_cmd
+    import sqlite3
+
     from agents.storage import SQLiteAgentStore
-    store = SQLiteAgentStore(args.db)
 
     if cmd == "list":
         from testcase.schema import parse_testcase_dict
 
         status = None if args.status == "ALL" else args.status
-        rows = store.list_candidates(review_status=status)
+        try:
+            store = SQLiteAgentStore(args.db)
+            rows = store.list_candidates(review_status=status)
+            rejections = store.list_rejections() if args.rejections else []
+        except sqlite3.Error as e:
+            # ⚠️ `sqlite3.Error` **不是** `RuntimeError`：早先只接域错误的
+            # except 漏掉它，`--db` 指向一个目录时裸 `OperationalError` 直接
+            # 漏成 traceback（review_p3_task35 P3-4）。库读不了 = 前置配置错误。
+            print(f"CANDIDATE ERROR: 读不了候选库 {args.db}：{e}")
+            return 3
         for r in rows:
             tc = None
             try:
@@ -1283,19 +1380,20 @@ def cmd_candidate(args: argparse.Namespace) -> int:
             print(f"{r['candidate_id']} [{r['review_status']}] "
                   f"dry={r['dry_run_status']} fp={fp} suite={suite} "
                   f"— {r['created_at']}")
-        if args.rejections:
-            for rej in store.list_rejections():
-                dup = f" duplicate_of={rej['duplicate_of']}" \
-                    if rej["duplicate_of"] else ""
-                print(f"  rejection {rej['rejection_id']} "
-                      f"candidate={rej['candidate_id']} "
-                      f"reason={rej['reason']}{dup}")
+        for rej in rejections:
+            dup = f" duplicate_of={rej['duplicate_of']}" \
+                if rej["duplicate_of"] else ""
+            print(f"  rejection {rej['rejection_id']} "
+                  f"candidate={rej['candidate_id']} "
+                  f"reason={rej['reason']}{dup}")
         print(f"candidate review: {len(rows)} 条（status={args.status}）")
         return 0
 
-    if cmd not in ("accept", "reject"):
-        print(f"CANDIDATE ERROR: 未知审核动词 {cmd!r}")
-        return 2
+    try:
+        store = SQLiteAgentStore(args.db)
+    except sqlite3.Error as e:
+        print(f"CANDIDATE ERROR: 打不开候选库 {args.db}：{e}")
+        return 3
 
     import getpass
     reviewer = args.reviewer or getpass.getuser()
@@ -1305,7 +1403,7 @@ def cmd_candidate(args: argparse.Namespace) -> int:
         try:
             print(export_candidate_patch(store, args.kind, args.candidate_id,
                                          suites_root=args.suites_root))
-        except CandidateReviewError as e:
+        except (CandidateReviewError, sqlite3.Error) as e:
             print(f"CANDIDATE ERROR: {e}")
             return 3
         return 0
@@ -1329,7 +1427,7 @@ def cmd_candidate(args: argparse.Namespace) -> int:
                 args.note, repo_root=Path(args.repo_root),
                 suites_root=args.suites_root, existing_case_ids=existing,
                 repository=repository, secrets=EnvSecretProvider())
-        except (CandidateReviewError, RuntimeError) as e:
+        except (CandidateReviewError, RuntimeError, sqlite3.Error) as e:
             print(f"CANDIDATE ERROR: {e}")
             return 3
         print(f"candidate: {row['candidate_id']} ACCEPT（reviewer={reviewer}）")
@@ -1341,7 +1439,7 @@ def cmd_candidate(args: argparse.Namespace) -> int:
         row, _ = decide_candidate(
             store, args.kind, args.candidate_id, "REJECT", reviewer,
             args.note, repo_root=Path("."), repository=None, secrets=None)
-    except (CandidateReviewError, RuntimeError) as e:
+    except (CandidateReviewError, RuntimeError, sqlite3.Error) as e:
         print(f"CANDIDATE ERROR: {e}")
         return 3
     print(f"candidate: {row['candidate_id']} REJECT（note 已留痕）")
