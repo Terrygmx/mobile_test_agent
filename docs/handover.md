@@ -195,13 +195,15 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
 
 ## 9. 当前状态快照（**2026-10-10**，以实测为准）
 
-- **分支 / HEAD**：`P3-1010` / `b1e2b48`（`fix(p3): review_p3_task34 修订——真机装配 P0 + 语义短路 fail-open`）
-  + round 2 修订（commit 见 `git log`）
-- **全量基线**：**1809 passed / 0 failed**
-- **最新 tag**：`checkpoint-p3-m2`（P3 M2 收口）；**M3 尚未收口**
-- **Gate 状态**：M1 ✅（`checkpoint-p3-m1`）· M2 ✅（`phase0/verify_p3_m2.py` exit 0，8/8 PASS，
-  `out/p3_m2_gate/summary.json` verdict=PASS）· **M3 Gate 未写**（收口时才出）
-- **已完成**：P0 / P1 / P2 全部；P3 的 M1、M2 全部；**M3 的 3.1 / 3.2 / 3.3 / 3.4**
+- **分支 / HEAD**：`P3-1010` / `4e23928`（`docs(p3): 逐条核对 14 处「教训（已并入 MEMORY §5）」`）
+- **全量基线**：**1857 passed / 0 failed**
+- **最新 tag**：`checkpoint-p3-m2`；**M3 尚未打 tag**（`checkpoint-p3-m3` 未打）——
+  ⚠️ **3.5 的实现与修订均已提交，但 M3 收口判据是 tag，不是提交**。只读 `git log`
+  会把 `2c6fb73`/`0e760fe` 误读成「M3 已收口」。
+- **Gate 状态**：M1 ✅（`checkpoint-p3-m1`）· M2 ✅（`phase0/verify_p3_m2.py` exit 0，8/8 PASS）
+  · **M3 ✅**（`phase0/verify_p3_m3.py` exit 0，**11/11 PASS**，`out/p3_m3_gate/summary.json`
+  verdict=PASS；G8 内含全量 1857 passed）
+- **已完成**：P0 / P1 / P2 全部；P3 的 **M1、M2、M3 全部**（3.1–3.5）
   - 3.1 Candidate 字段（`72106e1`，评审两轮已清）
   - 3.2 Coverage Gap（`43555e9` + 修订 `0ede83e`）——本体收口，**round 2 核销 P2-1'
     （`31c0fdc`）**：`pending` 只被「到达点」消费（元素 wait / 否定屏 wait 都不消费它）
@@ -213,33 +215,34 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
     + `candidates/test_case.py` + `generator/{validator,dry_run,generator}.py`
     + `llm/{prompt,parser}.py` 的生成面 + `cli/pipeline.py::wire_device_stack` 抽取。
     review round 1（`review/review_p3_task34_2026-10-10.md`）**不通过
-    （1×P0 + 2×P1 + 4×P2 + 4×P3）**，**全部已修订**：P0-1 `cli/pipeline.py` 漏
-    `import os`（真机路径 100% 死，**守卫空转**）+ 语义校验短路 fail-open +
-    `ignored_fields` 零消费 + 指纹闸门缺失 + `dry_run_detail` 不落库 + 装配失败
-    泄漏会话 + 嵌套 spec 不过滤 + 4×P3。**round 2 复核**
+    （1×P0 + 2×P1 + 4×P2 + 4×P3）**，**全部已修订**；**round 2 复核**
     （`review/review_p3_task34_final_2026-10-10.md`）**有条件通过**：11 条中 10 条
     真核销，发现 round 1 的 `recovery.guard` 那条**并未真核销**（同族缺陷，已补
     真钉子）+ 迁移 002 原地编辑（已抽 `003_dry_run_detail.sql`）——**均已修订**
-- **下一步**：**Task 3.5（P3-13）CLI 接线 + 统一审核 + 落盘**（`mta generate` /
-  F6 首个消费者 / promoter）。⚠️ **开工前置（必须逐条清）**：
-  1. **`wire_device_stack` 直接单测已是前置**（Task 3.4 修订时补了 4 条，含
-     `recovery.guard` 回填）——3.5 的 `mta generate` 会把它当公共入口，
-     P0-1 / P2-3 / `recovery.guard` 都会被继承；
-  1b. **迁移只许向后追加**：`agents/migrations/003_dry_run_detail.sql` 是 3.4 修订
-     加的列（走新脚本，不改已落盘的 002）——3.5 若再加列，**照此办理**；
-  2. **已 ACCEPT/REJECT 的候选 id 不该被生成器覆写**（review_p3_task34 探针 AE 实测：
-     upsert 会改写已人工批准的 `testcase_yaml`，`review_status` 却仍是 `ACCEPT` →
-     落盘文件与库内容**分叉**）；
-  3. **SKIP 留痕的 `duplicate_of`** 已兑付（矩阵 #8 三条测试）；真语料仍有 2 对同指纹
-     ——`reset_logout_001`(reset=LOGOUT) vs `login_001`(reset=RELAUNCH)（危险的那对，
-     语义不同）与 `search_001` vs `search_filter_001`（真冗余）。**3.5 落盘时若 ACCEPT
-     了被 SKIP 的那条，需要人工翻案通道**；
-  4. `_arrivals` 的 8 处 `getattr` 默认值——引入**新 step 形态**时复查
-     （`generator/coverage.py`；评审 §四.2 登记）；
-  5. `_step_trigger` 的「trigger 全是动作步骤」是**实测**非构造保证——出现
-     `wait_for:` 前缀 trigger 即升级 P2；
-  6. `build_generation_prompt` 的示例用手写 JSON 片段，照抄含注释即非法 JSON
-     （review_p3_task34 探针 AF）——3.5 迭代 prompt 时加一句「示例中不要加注释」。
+  - **3.5 统一审核 + `mta generate`（P3-13，M3 收口任务）**
+    - 实现 `2c6fb73`：`agents/migrations/004_review_note.sql` + `candidates/review.py`
+      + `cli/main.py::cmd_generate`/`cmd_candidate` + `phase0/verify_p3_m3.py`。
+      **F6 首个消费者**——M4 Discovery Event / M5 Bug Candidate 复用同一入口
+      （`kind` 判别，现只接 `"test"`）。矩阵 **#7–#10** 至此全部可验。
+    - review round 1（`review/review_p3_task35_2026-10-10.md`）**不通过
+      （1×P1 + 4×P2 + 9×P3）**，**14 条全部已修订（`0e760fe`）**：① `--bundle-id`
+      缺省走 trace 归一化的 `app_id` 且不一致**前置**报错（P1，顺带分出「库未初始化」
+      与「空库」两种情形——前者 exit 3、后者零 gap exit 0）；② ACCEPT 的**两个**
+      卡死窗口都关掉（文件回滚 + `git revert` 反向回滚）；③ `save_candidate` 的
+      `review_status` **形参删除**（不是加断言——断言仍留可绕过的入口）；
+      ④ F7 的 AST 守卫改用**结构**判据（`ast.Call` + 死分支检测），docstring 里提名字
+      不再算。
+    - **AE（已决候选不被覆写）双层**：`save_candidate` 对已决行 fail-loud（belt）+
+      `generate` 预过滤已决 gap（suspenders）。两层**各自独立可探针**。
+- **下一步**：**打 tag `checkpoint-p3-m3` 收口 M3**（gate 已 11/11 PASS，只差 tag +
+  round 2 复核收尾），然后进 **M4（Discovery Event 接入 F6 同一入口）**。
+  ⚠️ **M4 开工前置**：
+  1. **翻案通道仍未做**（3.5 拍板不做）：被 SKIP 的候选无库行可 ACCEPT；真语料 2 对
+     同指纹（`reset_logout_001` vs `login_001` 语义不同那对是危险的一对）——**M4+
+     显性登记**；
+  2. `candidates/review.py` 的 `_SUPPORTED_KINDS = ("test",)` 就是 M4 的扩展点；
+  3. `review_status` 的**唯一写路径**是 `agents/storage.py::decide_candidate`
+     （`save_candidate` 连形参都不收）——M4 接入 Discovery 时照此办理。
 - **待拍板的三项**（沿用）：`screen_id` 过滤的数据源缺口（`docs/p3_data_audit.md` Task 2.2）、
   「坏引用用例」的处置口径（同文件 Task 2.3）、`priority_score` / Evidence Score 的
   权重校准所需数据量（`docs/phase3-plan.md` §2 open questions）
