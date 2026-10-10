@@ -127,7 +127,7 @@ rm -rf out/_ho_pt && env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 \
   CODEBUDDY_SAFE_DELETE_SANDBOX=0 .venv/bin/python -m pytest tests \
   -p no:cacheprovider --basetemp=./out/_ho_pt
 rm -rf out/_ho_pt
-# 期望：1688 passed
+# 期望：1691 passed
 ```
 
 ```bash
@@ -155,7 +155,7 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
 
 | 来源 | 说明 |
 |---|---|
-| `git log`（**144 提交**） | 提交信息写得很长：含**偏离登记**与**实测数字**。「为什么是这样」的第一手答案 |
+| `git log`（**146 提交**） | 提交信息写得很长：含**偏离登记**与**实测数字**。「为什么是这样」的第一手答案 |
 | `git tag`（**49 个**） | 里程碑权威：`checkpoint-p1-*`、`checkpoint-p2-m1..m5`、`checkpoint-p3-m1..m2`、`v0.1-p1-complete`、`v0.2-p2-complete`。当前分支 **`P3-1010`**（按日期命名，不是 `main`）。⚠️ **`checkpoint-p3-m3` 尚未打**（M3 收口时才打） |
 | `review/`（**57 份**） | 每任务两段 review（spec 合规 → 代码质量）+ 修订轮。命名 `review_pN_taskNN_YYYY-MM-DD.md`；`skipped_and_reasons_round2.md` 记「为什么跳过某检查」 |
 | `docs/*_data_audit.md` | 每任务一段「完成记录」+ 每轮评审一段「修订记录」——决策与偏离的流水（在 `docs/`，此处只作索引） |
@@ -185,7 +185,7 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
 
 | # | 说法 | 实测 |
 |---|---|---|
-| 1 | `SKILL.md` 自称 **P2**（引用 `docs/phase2-plan.md`、`925+ passed`、「延后项已全部清空」） | 现行应读 **`docs/phase3-plan.md`**；基线 **1688**；P3 的登记项在 `docs/p3_data_audit.md` |
+| 1 | `SKILL.md` 自称 **P2**（引用 `docs/phase2-plan.md`、`925+ passed`、「延后项已全部清空」） | 现行应读 **`docs/phase3-plan.md`**；基线 **1691**；P3 的登记项在 `docs/p3_data_audit.md` |
 | 2 | `docs/phase3-plan_by_claude.md` 看起来像计划 | 它是**底稿**。权威是 `phase3-design.md` + `phase3-plan.md` |
 | 3 | 两批记忆目录 | `.workbuddy/memory/`（旧，9 月）vs `.workbuddy-ai/memory/`（现行）。**只有后者会自动注入** |
 | 4 | 旧文档写「`AgentToolkit` 装配点归 Task 2.4」 | **已被实现证伪**：`mta plan` 离线、不碰 App，装配它是死对象。真正的装配点是**第一个会驱动设备的命令**（M6 自主闭环 / **M3 Dry Run**） |
@@ -195,8 +195,8 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
 
 ## 9. 当前状态快照（**2026-10-10**，以实测为准）
 
-- **分支 / HEAD**：`P3-1010` / `31c0fdc`（`fix(p3): review_p3_task32_final 修订——pending 只被到达点消费`）
-- **全量基线**：**1688 passed / 0 failed**（clean run ×4 复现同值）
+- **分支 / HEAD**：`P3-1010` / `8456e14`（`fix(p3): review_p3_task33 修订——wait 分支钉子 + precondition 口径登记`）
+- **全量基线**：**1691 passed / 0 failed**
 - **最新 tag**：`checkpoint-p3-m2`（P3 M2 收口）；**M3 尚未收口**
 - **Gate 状态**：M1 ✅（`checkpoint-p3-m1`）· M2 ✅（`phase0/verify_p3_m2.py` exit 0，8/8 PASS，
   `out/p3_m2_gate/summary.json` verdict=PASS）· **M3 Gate 未写**（收口时才出）
@@ -205,15 +205,16 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
   - 3.2 Coverage Gap（`43555e9` + 修订 `0ede83e`）——本体收口，**round 2 核销 P2-1'
     （`31c0fdc`）**：`pending` 只被「到达点」消费（元素 wait / 否定屏 wait 都不消费它）
   - 3.3 Test Fingerprint（`1ede89f`）：`source/hashing.py::stable_hash` 共享原语；
-    review 已出（`review/review_p3_task33_2026-10-10.md`，**通过 + 3×P3**），**修订未做**
+    review（`review/review_p3_task33_2026-10-10.md`）**通过 + 3×P3**，**3×P3 已修订
+    （`8456e14`）**：wait 分支补钉子 + `precondition` 不入指纹的口径登记（含一条
+    **故意钉住已知碰撞**的测试）
 - **下一步**：**Task 3.4（P3-12）生成管线**（迁移 002 + `generator/validator.py` +
   `dry_run.py` + `generator.py` + 矩阵 #7–#10）。⚠️ **开工前置（必须逐条清）**：
-  1. **Task 3.3 评审的 P3-1 / P3-3**（`review/review_p3_task33_2026-10-10.md`）——3.4 是
-     第一个真实消费者：P3-1 = `_screen_tokens` 的 **wait 分支 `w.condition` 零覆盖**；
-     P3-3 = 真语料**已有 2 对同指纹**（已复核）——`reset_logout_001`(reset=LOGOUT) vs
-     `login_001`(reset=RELAUNCH) **步骤逐字相同、仅 `precondition` 不同** → 去重会 SKIP
-     一条**语义不同**的真用例（这对是危险的那个）；另一对 `search_001` vs
-     `search_filter_001` 连 precondition 都相同，可能是语料里**真的冗余**。两条**接线后升级为 P2**；
+  1. **去重接线时**（3.4 是第一个真实消费者）：`precondition` **不进**指纹（已拍板）；
+     真语料已有 2 对同指纹——`reset_logout_001`(reset=LOGOUT) vs `login_001`(reset=RELAUNCH)
+     **步骤逐字相同、仅 `precondition` 不同** → 会 SKIP 掉一条语义不同的真用例（这对是危险的
+     那个）；`search_001` vs `search_filter_001` 连 precondition 都相同（语料里真的冗余）。
+     **SKIP 留痕必须带上「与哪条既有用例撞指纹」**，否则人工看不见被跳过的是哪一条；
   2. `_arrivals` 的 8 处 `getattr` 默认值——引入**新 step 形态**时复查
      （`generator/coverage.py`；评审 §四.2 登记）；
   3. `_step_trigger` 的「trigger 全是动作步骤」是**实测**非构造保证——出现
