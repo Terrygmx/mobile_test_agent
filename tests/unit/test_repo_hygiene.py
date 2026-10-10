@@ -140,7 +140,8 @@ _WRITE_SQL_PREFIXES = ("INSERT", "UPDATE", "DELETE", "REPLACE")
 # Task 3.4（迁移 002）新增 3 条写语句（save_candidate / save_rejection
 # + 各自的 upsert 形态），下界同步上调——不调会让守卫在新写语句绕过
 # `_write_tx` 时仍然绿（下界只防「零命中」，不防「漏算新增的」）。
-_MIN_WRITE_STATEMENTS = 21
+# Task 3.5 再加 1 条（`decide_candidate` 的 UPDATE），照此上调。
+_MIN_WRITE_STATEMENTS = 22
 
 
 def _write_tx_body_ranges(tree: ast.AST) -> list[tuple[int, int]]:

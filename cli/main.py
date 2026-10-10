@@ -404,6 +404,90 @@ def build_parser() -> argparse.ArgumentParser:
     _add_graph_scope(gph_show)
     gph_show.add_argument("--build", metavar="ID", default=None)
 
+    # --- mta generate（Task 3.5 / P3-13：自主命令，设计 6.1 / §12）---
+    # F7 前置在 `cmd_generate` 的第一行（M1 的 AST 守卫扫 `cmd_*` 的函数体）。
+    gen_p = sub.add_parser(
+        "generate",
+        help="按 plan 现场重算 coverage gap → LLM 生成候选 → 校验/去重/Dry Run "
+             "→ 落 test_candidates（自主命令，production 下不可用）")
+    gen_p.add_argument("--gap-from", metavar="PLAN_ID", required=True,
+                       help="plan id（`mta plan` 的产物）——**追溯锚点**；"
+                            "gap 一律现场重算（planner 目前不产 generated_gap 任务）")
+    gen_p.add_argument("--env-kind", default="sandbox",
+                       choices=["sandbox", "staging", "production"],
+                       help="运行环境（F7；generate 只在 sandbox 可跑）")
+    gen_p.add_argument("--suite", metavar="NAME",
+                       help="候选声明的目标套件（ACCEPT 落盘到 suites/<suite>/；"
+                            "审核期不许补，故生成时必须给）")
+    gen_p.add_argument("--requirement", metavar="TEXT", default="",
+                       help="需求描述（进 prompt 的可信上下文）")
+    gen_p.add_argument("--bundle-id", metavar="ID", default=None,
+                       help="真机路径的 App bundle id（--fake-driver 时不需要）")
+    gen_p.add_argument("--udid", metavar="UDID", default=None)
+    gen_p.add_argument("--fake-driver", action="store_true",
+                       help="不连真机，组件注入最小桩（Dry Run 冒烟）")
+    gen_p.add_argument("--generated", metavar="DIR",
+                       default="repository/generated/local")
+    gen_p.add_argument("--build", metavar="ID",
+                       help="build 作用域（默认取 metadata 顶层 build；"
+                            "它同时是 coverage 图与知识装配的 build 范围）")
+    gen_p.add_argument("--metadata", metavar="PATH", default=None)
+    gen_p.add_argument("--overrides", metavar="DIR",
+                       default="repository/overrides")
+    gen_p.add_argument("--suites-root", metavar="DIR", default="suites")
+    gen_p.add_argument("--db", metavar="PATH", default="out/trace.db",
+                       help="TraceStore SQLite 路径（coverage 图的来源，12.1）")
+    gen_p.add_argument("--agent-db", metavar="PATH", default=str(DEFAULT_AGENT_DB),
+                       help="agent.db（test_candidates；默认 out/agent.db）")
+    gen_p.add_argument("--exp-db", metavar="PATH",
+                       default=str(DEFAULT_EXPERIENCE_DB))
+    gen_p.add_argument("--repo-root", metavar="DIR", default=".")
+    gen_p.add_argument("--policy", metavar="PATH", default=None,
+                       help="policy.yaml 路径（不给则读默认；给了但不存在 → 报错）")
+    gen_p.add_argument("--no-llm", action="store_true",
+                       help="禁用 LLM（生成必须有 LLM，故等于「不生成」）")
+
+    # --- mta candidate（Task 3.5：统一候选审核，F6 首个消费者）---
+    # ⚠️ **不是**自主命令（不在 `AUTONOMOUS_COMMANDS`）：审核是人工命令，
+    # 不过 F7 的启动环境闸（与 `mta review` 同款）。
+    cand_p = sub.add_parser(
+        "candidate", help="候选资产审核（F6；list/accept/reject，动词与 "
+                          "`mta review` 对齐）")
+    cand_sub = cand_p.add_subparsers(dest="candidate_cmd", required=True)
+    cand_rev = cand_sub.add_parser("review", help="候选审核子命令")
+    cand_rev_sub = cand_rev.add_subparsers(dest="candidate_review_cmd",
+                                           required=True)
+    cr_list = cand_rev_sub.add_parser("list", help="列出候选（默认 PENDING）")
+    cr_list.add_argument("--status", default="PENDING",
+                         choices=["PENDING", "ACCEPT", "REJECT", "ALL"])
+    cr_list.add_argument("--rejections", action="store_true",
+                         help="附列生成期拒绝/SKIP 留痕（矩阵 #7/#8 的 CLI 面）")
+    cr_list.add_argument("--db", metavar="PATH", default=str(DEFAULT_AGENT_DB))
+    cr_list.add_argument("--suites-root", metavar="DIR", default="suites")
+    cr_acc = cand_rev_sub.add_parser(
+        "accept", help="接受候选 → 落盘 suites/<suite>/<id>.yaml + git commit")
+    cr_acc.add_argument("candidate_id")
+    cr_acc.add_argument("--kind", default="test", help="候选类型（本任务只接 test）")
+    cr_acc.add_argument("--note", metavar="TEXT", default=None)
+    cr_acc.add_argument("--reviewer", metavar="NAME", default=None,
+                        help="审核人（缺省取 $USER）")
+    cr_acc.add_argument("--db", metavar="PATH", default=str(DEFAULT_AGENT_DB))
+    cr_acc.add_argument("--suites-root", metavar="DIR", default="suites")
+    cr_acc.add_argument("--generated", metavar="DIR",
+                        default="repository/generated/local")
+    cr_acc.add_argument("--overrides", metavar="DIR",
+                        default="repository/overrides")
+    cr_acc.add_argument("--repo-root", metavar="DIR", default=".")
+    cr_acc.add_argument("--export-patch", action="store_true",
+                        help="只导出将写入的 YAML 文本（不落盘、不 commit，H15）")
+    cr_rej = cand_rev_sub.add_parser("reject", help="拒绝候选（--note 必填）")
+    cr_rej.add_argument("candidate_id")
+    cr_rej.add_argument("--kind", default="test")
+    cr_rej.add_argument("--note", metavar="TEXT", required=True,
+                        help="拒绝理由必填（triage 数据）")
+    cr_rej.add_argument("--reviewer", metavar="NAME", default=None)
+    cr_rej.add_argument("--db", metavar="PATH", default=str(DEFAULT_AGENT_DB))
+
     return parser
 
 
@@ -1005,9 +1089,267 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_generate(args: argparse.Namespace) -> int:
+    """`mta generate` —— 设计 §6.1 主流程的 CLI 落点（Task 3.5 / P3-13）。
+
+    退出码：0 成功（**含零 gap**——空不是错误，与矩阵 #6 的空 Plan 同款）；
+    3 前置错误（env/政策/plan 不存在/metadata 读不到/设备装配失败）。
+
+    **调用顺序照 F7 的语义**：第一行过前置（`load_policy` →
+    `_check_autonomous_env`），过了才做别的事——M1 的 AST 守卫扫本函数体。
+
+    **sandbox 硬前置**（在任何写库/装配之前）：`run_candidate` 的闸门在生成
+    循环**内部**抛 `DryRunRefused`，而 `generate` 不接它——不前置拦，staging
+    下会先入库一部分候选再炸（部分写入正是本仓最防的形态）。
+    """
+    from agents.policy_config import load_policy
+
+    # 1. F7 前置（**第一行**）。env_kind 走唯一解析点（不许字面量）。
+    policy = (load_policy(args.policy) if args.policy is not None
+              else load_policy())
+    env_kind = _resolve_env_kind(args)
+    _check_autonomous_env(policy, env_kind=env_kind, command="generate")
+
+    from executor.guard import EnvKind
+    if env_kind is not EnvKind.SANDBOX:
+        # Dry Run 只在 sandbox（F7 / 矩阵 #9）。这里的拒绝是**前置**的：让
+        # 「环境不对」在写任何东西之前就 fail-loud，而不是跑一半才抛。
+        print(f"PREFLIGHT ERROR: generate 只在 sandbox 运行（F7 / 矩阵 #9），"
+              f"got --env-kind {env_kind.value}——Dry Run 会真跑用例")
+        print("generate: exit 3")
+        return 3
+
+    from cli.pipeline import SessionPipeline, wire_device_stack
+    from experience import SQLiteExperienceStore
+    from generator.coverage import coverage_gap
+    from generator.generator import generate as run_generate
+    from knowledge import build_knowledge
+    from source import build_identity as bi
+
+    # 2. 输入前置：plan 必须存在（追溯锚点）。
+    from agents.storage import SQLiteAgentStore
+    agent_store = SQLiteAgentStore(args.agent_db)
+    plan = agent_store.get_plan(args.gap_from)
+    if plan is None:
+        print(f"PREFLIGHT ERROR: plan {args.gap_from!r} 不存在"
+              f"（--gap-from 取 `mta plan` 的输出；库 {args.agent_db}）")
+        print("generate: exit 3")
+        return 3
+
+    try:
+        metadata = bi.read_metadata(_metadata_path(args))
+    except Exception as e:  # noqa: BLE001 — 与 cmd_plan 同款前置
+        print(f"PREFLIGHT ERROR: 读不到 12.3 metadata：{e}")
+        print("generate: exit 3")
+        return 3
+    app_build = args.build or bi.resolve_app_build(metadata)
+
+    pipeline = SessionPipeline(suites_root=args.suites_root,
+                               secrets=EnvSecretProvider(),
+                               app_id=args.bundle_id or "",
+                               app_build=app_build)
+    try:
+        cases = pipeline.discover()
+    except SessionPipeline.PreflightError as e:
+        print(f"PREFLIGHT ERROR: {e}")
+        print("generate: exit 3")
+        return 3
+
+    repository = Repository.from_dirs(
+        generated_root=getattr(args, "generated", None),
+        overrides_root=args.overrides)
+    knowledge = build_knowledge(
+        experience_store=SQLiteExperienceStore(args.exp_db),
+        trace_db=args.db, cases=cases, app_build=app_build)
+
+    # 3. coverage gap **现场重算**（planner 目前不产 generated_gap 任务，
+    #    `planner/planner.py:102` 明文——故 plan 只作追溯锚点，不读它的 tasks
+    #    当 gap 来源）。图从 trace 现建（12.1 定档）。
+    #    ⚠️ `graph_query` 的第一参是 **app_id**（= `runs.app_bundle_id`），
+    #    不是 build：`P2KnowledgeSources.graph_query` 会 fail-loud 挡住跨 app
+    #    混图。真机路径的 `--bundle-id` 与 trace 里的值必须一致（同 `mta run`）。
+    app_id = args.bundle_id or ""
+    graph = knowledge.graph_query(app_id)
+    gaps = coverage_gap(graph, cases)
+    print(f"generate: plan={args.gap_from}  build={app_build}  "
+          f"gaps={len(gaps)}（现场重算）")
+
+    # 4. LLM：与 `mta run` / `mta plan` 同款的门槛（`--no-llm` 或没有
+    #    LLM_API_KEY → 无 LLM；生成必须有 LLM，故等于「不生成」）。
+    llm = budget = None
+    if not args.no_llm and os.environ.get("LLM_API_KEY"):
+        from llm.budget import LLMBudget
+        from llm.provider import LLMProvider
+
+        llm, budget = LLMProvider(), LLMBudget()
+
+    # 5. 设备侧装配（3.4 抽的公共入口；`--fake-driver` 直通）。Dry Run 的
+    #    `execute` 注入 `pipeline.run_case`——单用例执行入口唯一，不新写路径。
+    from environment.capabilities import DeviceType
+    import uuid
+
+    run_id = f"gen_{uuid.uuid4().hex[:8]}"
+    # ⚠️ **两个 store，两个身份**（同 `cmd_run`）：
+    #   - `agent_store`（agent.db）= 候选/审核的落点（`generate` 的 store 参数）；
+    #   - `trace_store`（trace.db）= **Lifecycle 的记录面**——`Lifecycle` 调的是
+    #     `start_testcase`/`record_step`/`end_testcase`，那是 TraceStore 的契约。
+    # 给 `pipeline.store` 塞 agent_store 会让 Dry Run 的第一次 `begin_testcase`
+    # 以 `AttributeError` 炸掉（Lifecycle 的 store 参数**必须**是 TraceStore）。
+    from tracer.storage import TraceStore
+    trace_store = TraceStore(args.db)
+    trace_store.start_run(run_id, suite=args.suite or "", device_type="simulator",
+                          app_build=app_build, app_bundle_id=app_id)
+    pipeline.store = trace_store
+    udid = args.udid
+    if not args.fake_driver:
+        if not args.bundle_id:
+            print("PREFLIGHT ERROR: 真机路径需要 --bundle-id")
+            print("generate: exit 3")
+            return 3
+        udid = udid or bi.resolve_booted_udid()
+    try:
+        stack = wire_device_stack(
+            pipeline, env_kind=env_kind, run_id=run_id, udid=udid,
+            bundle_id=args.bundle_id, repo=repository,
+            fake_driver=args.fake_driver)
+    except Exception as e:  # noqa: BLE001 — 设备会话建立失败 = 前置配置错误
+        trace_store.end_run(run_id, status="ABORTED", exit_code=3)
+        print(f"PREFLIGHT ERROR: 设备会话建立失败：{e}")
+        print("generate: exit 3")
+        return 3
+
+    def _execute(tc):
+        return pipeline.run_case(stack.runner, stack.lifecycle, tc,
+                                 run_id=run_id)
+
+    try:
+        result = run_generate(
+            gaps, knowledge=knowledge, app_id=app_id,
+            existing_cases=cases, repository=repository,
+            secrets=EnvSecretProvider(), store=agent_store,
+            llm=llm, budget=budget, execute=_execute,
+            env_kind=env_kind, device_type=DeviceType.SIMULATOR,
+            suite=args.suite, requirement=args.requirement)
+    finally:
+        stack.close()
+    trace_store.end_run(run_id, status="PASS", exit_code=0)
+
+    # 6. 输出
+    for c in result.candidates:
+        print(f"candidate: {c.candidate_id}  dry_run={c.dry_run_status}"
+              f"  review={c.review_status}  suite={args.suite or '(未声明)'}")
+    for r in result.rejections:
+        extra = f" duplicate_of={r['duplicate_of']}" if r.get("duplicate_of") else ""
+        print(f"rejected: {r.get('candidate_id') or '(无 id)'}"
+              f"  reason={r['reason']}{extra}")
+    for note in result.notes:
+        print(f"  note: {note}")
+    print(f"generate: {len(result.candidates)} candidates, "
+          f"{len(result.rejections)} rejected/skipped, "
+          f"{result.llm_calls} LLM calls")
+    return 0
+
+
+def cmd_candidate(args: argparse.Namespace) -> int:
+    """`mta candidate review …` —— 统一候选审核（Task 3.5 / F6 首个消费者）。
+
+    动词/字段/错误面与 P2 的 `mta review`（`cmd_review:1258`）对齐：同一个人
+    在两处看到的动词应该一样（F6 的「范式一致」是给人记忆用的）。**不是**
+    自主命令——审核是人工操作，不过 F7 的启动环境闸。
+    """
+    from candidates.review import CandidateReviewError, decide_candidate, \
+        export_candidate_patch
+
+    if getattr(args, "candidate_cmd", None) != "review":
+        print(f"CANDIDATE ERROR: 未知子命令 {args.candidate_cmd!r}")
+        return 2
+    cmd = getattr(args, "candidate_review_cmd", None)
+    from agents.storage import SQLiteAgentStore
+    store = SQLiteAgentStore(args.db)
+
+    if cmd == "list":
+        from testcase.schema import parse_testcase_dict
+
+        status = None if args.status == "ALL" else args.status
+        rows = store.list_candidates(review_status=status)
+        for r in rows:
+            tc = None
+            try:
+                tc = parse_testcase_dict(yaml.safe_load(r["testcase_yaml"]))
+            except Exception:  # noqa: BLE001 — 坏 YAML 也要能列出来（可见性）
+                pass
+            suite = (tc.suite if tc else None) or "(未声明)"
+            fp = (r["fingerprint"] or "")[:8]
+            print(f"{r['candidate_id']} [{r['review_status']}] "
+                  f"dry={r['dry_run_status']} fp={fp} suite={suite} "
+                  f"— {r['created_at']}")
+        if args.rejections:
+            for rej in store.list_rejections():
+                dup = f" duplicate_of={rej['duplicate_of']}" \
+                    if rej["duplicate_of"] else ""
+                print(f"  rejection {rej['rejection_id']} "
+                      f"candidate={rej['candidate_id']} "
+                      f"reason={rej['reason']}{dup}")
+        print(f"candidate review: {len(rows)} 条（status={args.status}）")
+        return 0
+
+    if cmd not in ("accept", "reject"):
+        print(f"CANDIDATE ERROR: 未知审核动词 {cmd!r}")
+        return 2
+
+    import getpass
+    reviewer = args.reviewer or getpass.getuser()
+
+    if cmd == "accept" and args.export_patch:
+        # H15 备选：只导出文本，零写入。
+        try:
+            print(export_candidate_patch(store, args.kind, args.candidate_id,
+                                         suites_root=args.suites_root))
+        except CandidateReviewError as e:
+            print(f"CANDIDATE ERROR: {e}")
+            return 3
+        return 0
+
+    if cmd == "accept":
+        # 现算正式用例 id 集（`candidates/review.py` 不 import cli——依赖单向）。
+        from cli.pipeline import SessionPipeline
+        try:
+            cases = SessionPipeline(suites_root=args.suites_root,
+                                    secrets=EnvSecretProvider()).discover()
+        except Exception as e:  # noqa: BLE001 — 用例发现失败 = 前置输入问题
+            print(f"CANDIDATE ERROR: 读 suites 失败：{e}")
+            return 3
+        existing = frozenset(c.id for c in cases)
+        repository = Repository.from_dirs(
+            generated_root=getattr(args, "generated", None),
+            overrides_root=args.overrides)
+        try:
+            row, sha = decide_candidate(
+                store, args.kind, args.candidate_id, "ACCEPT", reviewer,
+                args.note, repo_root=Path(args.repo_root),
+                suites_root=args.suites_root, existing_case_ids=existing,
+                repository=repository, secrets=EnvSecretProvider())
+        except (CandidateReviewError, RuntimeError) as e:
+            print(f"CANDIDATE ERROR: {e}")
+            return 3
+        print(f"candidate: {row['candidate_id']} ACCEPT（reviewer={reviewer}）")
+        print(f"  suites 已写 + commit {sha}；撤销 = git revert {sha}")
+        return 0
+
+    # reject
+    try:
+        row, _ = decide_candidate(
+            store, args.kind, args.candidate_id, "REJECT", reviewer,
+            args.note, repo_root=Path("."), repository=None, secrets=None)
+    except (CandidateReviewError, RuntimeError) as e:
+        print(f"CANDIDATE ERROR: {e}")
+        return 3
+    print(f"candidate: {row['candidate_id']} REJECT（note 已留痕）")
+    return 0
+
+
 def cmd_repo(args: argparse.Namespace) -> int:
     """mta repo（M3）。`generate`：源码扫描 → 12.3 metadata（P1-09）。
-
     一致性 Gate（--check，12.6/plan Task 3.1 第 5 步）失败语义：缺口是
     **前置配置问题** → exit 3（与 lint ERROR 同档），不是 exit 1——生成成
     功但与人工 overrides 有 diff 要人来看，CI 不能当「工具坏了」。
@@ -1788,6 +2130,10 @@ def main(argv: Sequence | None = None) -> int:
         return cmd_run(args)
     if args.command == "plan":
         return cmd_plan(args)
+    if args.command == "generate":
+        return cmd_generate(args)
+    if args.command == "candidate":
+        return cmd_candidate(args)
     if args.command == "repo":
         return cmd_repo(args)
     if args.command == "source":

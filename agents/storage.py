@@ -255,12 +255,27 @@ class SQLiteAgentStore:
         `generator.generate` 建去重基准时写的是 `if cand.get("fingerprint")`，
         一个 `NULL` 指纹的候选会被**静默跳过** → 它**永久不参与去重** → 同一条
         用例可以被反复生成入库，而每一步都「看起来正常」。
+
+        ⚠️ **已人工决策的候选不可覆写**（AE 第 1 层，handover §9 前置 2）：
+        探针 AE 实测 upsert 的 `ON CONFLICT` 不含 `review_status` → 生成器重跑
+        同 gap 会改写已 ACCEPT 候选的 `testcase_yaml` 而 `review_status` 保持
+        ACCEPT → 落盘文件与库内容分叉。已决行经生成器写路径 fail-loud（第 2 层
+        ——generate 的预过滤——让这条闸门在日常路径上根本轮不到触发）。
+        `review_status` 的**唯一写路径**是 `decide_candidate`。
         """
         if not fingerprint:
             raise ValueError(
                 f"入库的候选必须有 fingerprint（F8 去重的前提），"
                 f"got candidate_id={candidate_id!r}, fingerprint={fingerprint!r}")
         with self._write_tx() as conn:
+            existing = conn.execute(
+                "SELECT review_status FROM test_candidates WHERE candidate_id=?",
+                (candidate_id,)).fetchone()
+            if existing is not None and existing["review_status"] != "PENDING":
+                raise ValueError(
+                    f"候选 {candidate_id} 已人工决策"
+                    f"（{existing['review_status']}）——生成器不得覆写（AE，"
+                    f"handover §9 前置 2）；翻案走人工通道")
             conn.execute(
                 "INSERT INTO test_candidates (candidate_id, testcase_yaml,"
                 " generated_by, generation_evidence_json, fingerprint,"
@@ -327,9 +342,26 @@ class SQLiteAgentStore:
                 "dry_run_detail": json.loads(
                     row["dry_run_detail_json"] or "{}"),
                 "review_status": row["review_status"],
+                "review_note": row["review_note"],
                 "reviewer": row["reviewer"],
                 "reviewed_at": row["reviewed_at"],
                 "created_at": row["created_at"]}
+
+    def decide_candidate(self, candidate_id: str, *, review_status: str,
+                         reviewer: str, note: str | None = None) -> None:
+        """`review_status` 的**唯一写路径**（Task 3.5 / F6；`save_candidate`
+        的 upsert 从不更新它）。
+
+        reviewer / `reviewed_at`（`_now()` 盖章，单一来源）/ `review_note`
+        （迁移 004）一次落齐。PENDING→X 的状态机校验在领域层
+        （`candidates/review.py::decide_candidate`）——这里只管写，与
+        `tracer/storage.py::decide_review:653` 的分工同款。
+        """
+        with self._write_tx() as conn:
+            conn.execute(
+                "UPDATE test_candidates SET review_status=?, reviewer=?,"
+                " reviewed_at=?, review_note=? WHERE candidate_id=?",
+                (review_status, reviewer, _now(), note, candidate_id))
 
     # --- test_candidate_rejections（迁移 002；矩阵 #7/#8 的留痕） ----------------
 

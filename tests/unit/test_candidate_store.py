@@ -96,9 +96,9 @@ def test_migrations_are_idempotent(tmp_path):
     SQLiteAgentStore(db)
     SQLiteAgentStore(db)            # 重放：二次不炸
     from agents.storage import AGENT_SCHEMA_VERSION
-    # 版本串从**链尾派生**（`latest_version`），故加 003 后这里跟着变——
+    # 版本串从**链尾派生**（`latest_version`），故加 004 后这里跟着变——
     # 这正是它该有的行为（加脚本忘改常量也不会撒谎）。
-    assert AGENT_SCHEMA_VERSION == "003_dry_run_detail"
+    assert AGENT_SCHEMA_VERSION == "004_review_note"
 
 
 def test_002_alone_leaves_the_db_readable(tmp_path):
@@ -265,7 +265,8 @@ def test_row_models_roundtrip(store):
     assert set(c.to_store_dict()) == {
         "candidate_id", "testcase_yaml", "generated_by",
         "generation_evidence", "fingerprint", "dry_run_status",
-        "dry_run_detail", "review_status", "reviewer", "reviewed_at"}
+        "dry_run_detail", "review_status", "review_note", "reviewer",
+        "reviewed_at"}
     assert c.to_store_dict()["candidate_id"] == "cand_1"
     r = CandidateRejection.from_store_dict(
         store.save_rejection("rej_1", reason="DUPLICATE", duplicate_of="x"))
@@ -332,3 +333,47 @@ def test_dry_run_detail_roundtrips_through_the_row_model(store):
     # 默认空：没跑过 Dry Run 的候选不是「跑失败了」
     assert store.save_candidate("cand_2", **_candidate())[
         "dry_run_detail"] == {}
+
+
+# --- Task 3.5（P3-13）：审核状态机的存储面 + AE 第 1 层闸门 --------------------
+
+
+def test_decide_candidate_stamps_review_fields(store):
+    """`decide_candidate` 是 `review_status` 的**唯一写路径**（3.5 前
+    `save_candidate` 的 upsert 只写不更新它）——reviewer / reviewed_at /
+    review_note（迁移 004）一次落齐。"""
+    store.save_candidate("cand_1", **_candidate())
+    store.decide_candidate("cand_1", review_status="REJECT",
+                           reviewer="terry", note="与既有用例语义重复")
+    row = store.get_candidate("cand_1")
+    assert row["review_status"] == "REJECT"
+    assert row["reviewer"] == "terry"
+    assert row["review_note"] == "与既有用例语义重复"
+    assert row["reviewed_at"], "reviewed_at 由 store 盖章（_now 单一来源）"
+    # 没给 note 的决策 → review_note 为 None（NULL = 无理由，不是空串）
+    store.save_candidate("cand_2", **_candidate())
+    store.decide_candidate("cand_2", review_status="ACCEPT", reviewer="op")
+    assert store.get_candidate("cand_2")["review_note"] is None
+
+
+def test_save_candidate_refuses_overwriting_a_decided_candidate(store):
+    """AE 第 1 层（handover §9 前置 2）：已人工决策的候选**不可被 upsert 覆写**。
+
+    探针 AE 实测的缺陷形态：upsert 的 `ON CONFLICT` 不含 `review_status` →
+    生成器重跑同 gap 会改写已 ACCEPT 候选的 `testcase_yaml`，而 `review_status`
+    仍是 ACCEPT → 落盘文件与库内容分叉。已决行经生成器写路径**必须 fail-loud**
+    （第 2 层——generate 预过滤——在 `test_generator_pipeline.py`）。
+    """
+    store.save_candidate("cand_1", **_candidate())
+    store.decide_candidate("cand_1", review_status="ACCEPT", reviewer="op")
+    with pytest.raises(ValueError, match="已人工决策"):
+        store.save_candidate("cand_1", **{
+            **_candidate(), "testcase_yaml": "schema_version: '0.2'\nid: x\n"})
+    # 库内容原封不动（不是「改了一半」）
+    assert store.get_candidate("cand_1")["testcase_yaml"] == \
+        _candidate()["testcase_yaml"]
+    # PENDING 行的 upsert 幂等语义**不变**（闸门只挡已决行）
+    store.save_candidate("cand_2", **_candidate())
+    again = store.save_candidate("cand_2", **{
+        **_candidate(), "dry_run_status": "FAIL"})
+    assert again["dry_run_status"] == "FAIL"

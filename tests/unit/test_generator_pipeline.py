@@ -406,6 +406,59 @@ def test_accepted_candidate_does_not_block(tmp_path):
     assert store.list_rejections(reason="DUPLICATE") == []
 
 
+# --- AE 第 2 层（handover §9 前置 2）：已决候选不被覆写 -----------------------
+
+
+def test_generate_skips_a_decided_candidate_and_keeps_its_yaml(tmp_path):
+    """**同一条 gap** 重跑 → 已人工决策的候选**逐字节不变**，且不烧 LLM 预算。
+
+    与 `test_accepted_candidate_does_not_block` 的关键差别：那条换了一条 gap
+    （新 id），**测不到覆写**；本条的 gap 完全相同 → `candidate_id_for(gap)`
+    算出的 id 相同 → 走 upsert 的 `ON CONFLICT` 分支，正是探针 AE 的缺陷形态
+    （改 `testcase_yaml` 而 `review_status` 保持 ACCEPT → 落盘文件与库内容分叉）。
+
+    两层分别可测：本测试钉**第 2 层**（generate 预过滤，`notes` 留痕 + 不调
+    LLM）；第 1 层（storage 闸门 fail-loud）由
+    `test_candidate_store.py::test_save_candidate_refuses_overwriting_a_decided_candidate`
+    钉住。删掉第 2 层 → 第 1 层的 `ValueError` 冒到 `generate` 外 → 本测试红；
+    删掉第 1 层 → 上面那条红。
+    """
+    store = SQLiteAgentStore(tmp_path / "agent.db")
+    first, *_ = _run(tmp_path, replies=[_llm_steps(_steps_two_arrivals())],
+                     store=store)
+    cid = first.candidates[0].candidate_id
+    original_yaml = store.get_candidate(cid)["testcase_yaml"]
+    store.decide_candidate(cid, review_status="ACCEPT", reviewer="op")
+
+    # 同 gap 重跑，LLM 这次会给出**不同**的步骤——若被覆写，yaml 必变
+    result, _, llm, budget, _ = _run(
+        tmp_path, replies=[_llm_steps(_steps_single_arrival())], store=store)
+    assert result.candidates == [], "已决候选不该再被当成新候选入库"
+    assert store.get_candidate(cid)["testcase_yaml"] == original_yaml, \
+        "已 ACCEPT 候选的 testcase_yaml 被覆写了（AE）"
+    assert store.get_candidate(cid)["review_status"] == "ACCEPT"
+    assert llm.calls == [], "已决 gap 不该消耗 LLM 调用"
+    assert budget.calls_used == 0, "已决 gap 不该消耗预算"
+    assert any("已人工决策" in n and cid in n for n in result.notes), \
+        f"跳过必须在 notes 里可见（不静默）：{result.notes}"
+
+
+def test_generate_skips_a_rejected_candidate_too(tmp_path):
+    """REJECT 同样跳过——已决是「人工给过结论」，与 ACCEPT/REJECT 无关。"""
+    store = SQLiteAgentStore(tmp_path / "agent.db")
+    first, *_ = _run(tmp_path, replies=[_llm_steps(_steps_two_arrivals())],
+                     store=store)
+    cid = first.candidates[0].candidate_id
+    store.decide_candidate(cid, review_status="REJECT", reviewer="op",
+                           note="与既有用例重复")
+    result, _, llm, *_ = _run(tmp_path,
+                              replies=[_llm_steps(_steps_two_arrivals())],
+                              store=store)
+    assert result.candidates == [] and llm.calls == []
+    assert store.get_candidate(cid)["review_note"] == "与既有用例重复"
+    assert any("REJECT" in n for n in result.notes)
+
+
 # --- 矩阵 #10：INVALID_OUTPUT 熔断 --------------------------------------------
 
 

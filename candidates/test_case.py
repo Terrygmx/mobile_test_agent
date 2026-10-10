@@ -77,6 +77,9 @@ class TestCandidate(_Strict):
     # 哪来）分开存，两件事不该混在一个 JSON 里。
     dry_run_detail: dict = Field(default_factory=dict)
     review_status: str = "PENDING"
+    # 迁移 004（Task 3.5）：人工审核的理由留痕（REJECT 必填——F6 与 P2
+    # `recovery_reviews` 的 note 字段对齐）。NULL = 未决或无理由。
+    review_note: str | None = None
     reviewer: str | None = None
     reviewed_at: str | None = None
     created_at: str = ""
@@ -99,6 +102,7 @@ class TestCandidate(_Strict):
                 "dry_run_status": self.dry_run_status,
                 "dry_run_detail": self.dry_run_detail,
                 "review_status": self.review_status,
+                "review_note": self.review_note,
                 "reviewer": self.reviewer,
                 "reviewed_at": self.reviewed_at}
 
@@ -118,6 +122,7 @@ class TestCandidate(_Strict):
                    dry_run_status=row.get("dry_run_status") or "PENDING",
                    dry_run_detail=row.get("dry_run_detail") or {},
                    review_status=row.get("review_status") or "PENDING",
+                   review_note=row.get("review_note"),
                    reviewer=row.get("reviewer"),
                    reviewed_at=row.get("reviewed_at"),
                    created_at=row.get("created_at") or "")
@@ -175,11 +180,11 @@ def dump_testcase_yaml(tc: TestCase) -> str:
 def utcnow() -> str:
     """行时间戳（与 `agents/storage.py::_now` **同格式**）。
 
-    ⚠️ **当前零生产调用方**（review_p3_task34 P3-2 实锤）：时间源唯一是
-    `agents/storage.py::_now`（行时间戳归 DB 拥有，调用方不塞——见
-    `to_store_dict` 的注释）。本函数留着是给 Task 3.5 的 ACCEPT 落盘用
-    （那时要在 candidates 侧给 `reviewed_at` 打戳），**不是**第二份时间源：
-    格式一致是硬要求（`created_at` 进 `ORDER BY created_at DESC`，两处格式
-    不同会让「同一次生成」的行排到别处），所以它与 `_now` 必须逐字同形。
+    ⚠️ **当前零生产调用方**（review_p3_task34 P3-2 实锤；3.5 修订后仍然如此
+    ——别让「Task 3.5 会用它」的说法再撒一次谎）：`reviewed_at` 的盖章归
+    `agents/storage.py::decide_candidate`（时间戳与 SQL 同事务、单一来源，
+    `to_store_dict` 的注释同理）。本函数留作 candidates 侧需要同一格式
+    时间戳的**未来**消费方；格式一致是硬要求（时间戳列进 `ORDER BY … DESC`，
+    两处格式不同会让同批行排到别处），所以它与 `_now` 必须逐字同形。
     """
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")

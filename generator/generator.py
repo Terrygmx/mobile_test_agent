@@ -185,14 +185,34 @@ def generate(gaps: Iterable[UncoveredTransition], *,
     graph = knowledge.graph_query(app_id)
 
     fp_index = _existing_fingerprints(existing_cases)
-    pending = store.list_candidates(review_status="PENDING")
+    # ⚠️ **一次读全量、分两用**（AE 第 2 层，handover §9 前置 2）：`pending` 是
+    # 去重基准的「未决候选」一侧；`decided` 是**已人工决策**的 id 集——生成器
+    # 重跑同 gap 时不得覆写它们（探针 AE 实测的缺陷形态：upsert 改写已 ACCEPT
+    # 候选的 `testcase_yaml` 而 `review_status` 保持 ACCEPT → 落盘文件与库内容
+    # 分叉）。第 1 层闸门在 `agents/storage.py::save_candidate`（fail-loud）；
+    # 这里先跳过，让「已决」在日常路径上是**正常跳过**而不是异常——REJECT 的
+    # 人工决定不该被生成器的报错淹没。
+    all_candidates = store.list_candidates()
+    pending = [c for c in all_candidates if c["review_status"] == "PENDING"]
+    decided = {c["candidate_id"]: c["review_status"]
+               for c in all_candidates if c["review_status"] != "PENDING"}
     for cand in pending:
         if cand.get("fingerprint"):
             fp_index.setdefault(cand["fingerprint"], cand["candidate_id"])
     result.notes.append(
-        f"去重基准：正式用例 {len(existing_cases)} 条 + 未决候选 {len(pending)} 条")
+        f"去重基准：正式用例 {len(existing_cases)} 条 + 未决候选 {len(pending)} 条"
+        + (f"；已人工决策 {len(decided)} 条（不覆写，AE）" if decided else ""))
 
     for gap in gap_list:
+        # --- AE 第 2 层：已人工决策的候选**先跳过**（不烧 LLM 预算、不覆写）---
+        # 放在 `try_acquire` 之前：已决 gap 不该消耗预算（它连 LLM 都不用调）。
+        # 第 1 层闸门（storage）是 fail-loud 的兜底；这里是日常路径的正常跳过。
+        skip_id = candidate_id_for(gap)
+        if skip_id in decided:
+            result.notes.append(
+                f"{skip_id}: 已人工决策（{decided[skip_id]}）→ 跳过，不覆写（AE）")
+            continue
+
         # --- F4：预算与熔断（P1 的同一个对象，不新写） ---
         if not budget.try_acquire():
             reason = ("LLM 熔断（连续 INVALID_OUTPUT 达阈值）"

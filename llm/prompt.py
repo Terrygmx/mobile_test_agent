@@ -251,6 +251,8 @@ def build_generation_prompt(*, gaps: list[dict], requirement: str = "",
         "条件 ∈ " + "|".join(GENERATOR_CONDITIONS) + "；"
         "text_equals / text_contains / element_count 必须带 expected 字段。",
         "只输出 steps 数组，不要输出 id / name / suite / status——那些由系统填。",
+        "上面的格式行里，`—— 动作 ∈ …` 这类说明**只是给你看的注解**，"
+        "不要抄进 JSON（注释不是合法 JSON，会导致解析失败）。",
         "不要声明 risk 或 idempotency：风险由系统元数据与 Guard 判定，"
         "你声明的会被忽略（H4）。",
         "target 必须用 `<Screen>.<element>` 或 `screen:<Screen>` 形态，"

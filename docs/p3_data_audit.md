@@ -2692,3 +2692,174 @@ docstring 也写着「只向后追加」。
 - **迁移脚本一旦落盘就只许向后追加**：执行器按「已应用序号」跳过，原地改对
   已建过库的人**完全不生效**——而失效形态是「读 IndexError / 写
   OperationalError」，即库不可用。本仓先例已明写（`graph/migrations/002` 头部）。
+
+---
+
+## Task 3.5 完成记录（P3-13 统一审核 F6 首个消费者 + `mta generate`，2026-10-10）
+
+**M3 收口任务**。3.4 把候选「写下去」（`test_candidates` PENDING），本任务补
+「**审核 + 落盘**」的后半段并给整条管线一个 CLI 出口：
+
+```
+mta generate --gap-from <plan_id> → generate() → 候选（PENDING）
+mta candidate review accept <id>  → suites/<suite>/<id>.yaml + git commit → 入 P1 流程
+mta candidate review reject <id> --note … → 留痕（迁移 004 的 review_note）
+```
+
+F6（统一审核）**首个消费者**在此落地：M4 的 Discovery Event 与 M5 的 Bug
+Candidate 复用同一入口（`kind` 判别，本任务只接 `"test"`）。矩阵 **#7–#10**
+至此全部可验。
+
+### 交付
+
+**Create**
+
+| 文件 | 行数 | 内容 |
+|---|---|---|
+| `agents/migrations/004_review_note.sql` | 25 | `ALTER TABLE test_candidates ADD COLUMN review_note TEXT;`（决定 2） |
+| `candidates/review.py` | 203 | `CandidateReviewError` + `decide_candidate(...)` + `export_candidate_patch(...)` |
+| `phase0/verify_p3_m3.py` | 437 | M3 Gate（G1–G8，`out/p3_m3_gate/summary.json`，决定 1） |
+| `tests/unit/test_candidate_review.py` | 335 | **16** 例（状态机 + 落盘 + 前置 + 回滚 + H15） |
+| `tests/unit/test_cli_generate.py` | 417 | **15** 例（`generate` / `candidate review` 的 CLI 面） |
+
+**Modify**
+
+| 文件 | 改动 |
+|---|---|
+| `agents/storage.py` | +32：`decide_candidate(...)`（`review_status` 的**唯一写路径**）+ `save_candidate` 的已决不覆写闸门（AE 第 1 层）+ `_candidate_from_row` 读回 `review_note` |
+| `generator/generator.py` | +24：AE 第 2 层（已决 gap 预过滤，在 `try_acquire` **之前**）+ 去重基准 notes |
+| `cli/main.py` | +348：顶层 `generate` 子命令 + `cmd_generate`；`candidate → review → list/accept/reject` + `cmd_candidate` |
+| `candidates/test_case.py` | +17：`review_note` 字段（行模型两侧）+ `utcnow()` docstring **如实改写** |
+| `llm/prompt.py` | +2：AF（示例里的注解别抄进 JSON） |
+| `candidates/__init__.py` | docstring 刷新（fingerprint / test_case / review 三块） |
+| `tests/unit/test_candidate_store.py` | +51：版本串 → `"004_review_note"`；`decide_candidate` 盖章 + AE 第 1 层 + 全键集 += `review_note` |
+| `tests/unit/test_generator_pipeline.py` | +53：AE 第 2 层的 ACCEPT / REJECT 两例 |
+| `tests/unit/test_repo_hygiene.py` | `_MIN_WRITE_STATEMENTS` 21 → 22（实际 26） |
+
+### 决策记录
+
+1. **Gate 脚本本任务写**（用户拍板）：照 M2 先例——`checkpoint-p3-m3` 打 tag 前
+   `phase0/verify_p3_m3.py` 必须 exit 0。gate 自建**自足工程**（自己的 `.git` +
+   generated + suites + trace），建仓后断言 `rev-parse --show-toplevel == proj`，
+   防 M2/M4 的「`rev-parse` 穿透到主仓库」事故复发。
+2. **REJECT 的 note 走迁移 004 加列**（用户拍板）：`review_note TEXT` 可空
+   （NULL = 未决/无理由），**只向后追加** 004，不原地改 002/003（round 2 修订 10
+   的先例）。与 P2 `recovery_reviews` 的 note 字段对齐（F6 的字段命名一致）。
+   **不进 `test_candidate_rejections`**：那是**生成器**的拒绝留痕（两条时间线、
+   两种责任），而 `review_note` 是**人工**的拒绝理由。
+3. **翻案通道不做**（用户拍板）：被 SKIP（DUPLICATE）的候选**无库行可 ACCEPT**，
+   要翻案得先给生成器「允许重开」的语义——那是新能力不是补一个 flag。显性登记
+   进 handover §9，归 **M4+**。
+4. **ACCEPT 的顺序照 promoter，不照 `decide_review`**：`decide_review` 是
+   「校验 → 改状态 → 副作用（建 Experience，**可幂等重放**）」；本处副作用是
+   **git commit，不可幂等重放**。若先改状态后落盘，落盘失败时候选已是 ACCEPT
+   且「不可二次决策」→ **永远卡死**。故 `approve_proposal:215-298` 的顺序：
+   **全部校验（零副作用）→ 写文件 + git commit（失败回滚）→ 改状态**，失败时
+   候选保持 PENDING，修复 git 后重试即续传。
+5. **id 冲突 fail-loud，不学 promoter 的「并入」**：promoter 的同 id 是「并入
+   strategies 链尾」（那是它的领域主流程），候选落盘是**新文件**，同 id = 真冲突
+   （会遮蔽既有用例）。
+6. **sandbox 硬前置在 `cmd_generate` 顶部**（矩阵 #9）：`run_candidate` 的闸门在
+   生成循环**内部**抛 `DryRunRefused`，而 `generate` 不接它——不前置拦，staging
+   下会先入库一部分候选再炸（**部分写入**正是本仓最防的形态）。
+
+### 📌 口径登记 1：`cmd_generate` 用**两个库、两个身份**
+
+| 库 | 谁写 | 用途 |
+|---|---|---|
+| `--db`（`trace.db`） | `TraceStore` | **给 `Lifecycle` 用**：`begin_testcase` 会调 `start_testcase`（`SQLiteAgentStore` 没这个方法） |
+| `--agent-db`（`agent.db`） | `SQLiteAgentStore` | 候选入库 / plan 回查 |
+
+二者**不是**同一个 store 的两种用法，是**两个 store**。`pipeline.store` 必须指向
+`TraceStore`（`wire_device_stack` 用它建 Lifecycle），候选仍落 `agent_store`。
+初次接线时 `pipeline.store = agent_store` → `AttributeError: 'SQLiteAgentStore'
+object has no attribute 'start_testcase'`——**装配期炸，不是静默错**（好抓）。
+run 行由 gate/CLI 侧 `start_run` / `end_run` 包住。
+
+**推论（gate 里实测）**：`mta run` 与预置 trace **不可共用同一个 trace 库**——
+run 不带 `--bundle-id` 时 `runs.app_bundle_id` 是空串，与播种的 `com.demo`
+同库会凑出两个 `(app_id, build)` 范围 → `read_trace_steps` 多范围 fail-loud
+（**这是正确的既有行为**：图必须限定单一范围）。gate 因此给 `mta run` 另开一个
+`run_trace.db`，**不**为图源引入污染。
+
+### 📌 口径登记 2：`graph_query` 的第一个参数是 **app_id（= `runs.app_bundle_id`）**
+
+不是 app_build。`P2KnowledgeSources.graph_query(app_id)` 拿它与 trace 的
+`app_bundle_id` 比对，不一致即 fail-loud（"trace 的 app_id 是 X，与查询的 Y 不一致"）。
+`cmd_generate` 因此用 `app_id = args.bundle_id or ""`（真机路径 `--bundle-id`
+必填，fake-driver 路径也要求 trace 的 app_id 与之一致）。同一 `app_id` 同时喂给
+`graph_query` 与 `generate`（候选的 provenance）。
+
+### 📌 口径登记 3：gap **一律现场重算**，`--gap-from` 只作 provenance
+
+`planner/planner.py:102` 明文：`generated_gap` 任务**目前无生产者**（`mta plan`
+只产 `existing`）。故 `cmd_generate` 不读 plan 的 tasks，直接
+`coverage_gap(knowledge.graph_query(app_id), cases)`；`--gap-from <plan_id>` 的
+作用是**必填的追溯锚点**（不存在的 plan_id → exit 3）。这是「参数存在」与
+「功能存在」分开登记的同一手法（R18-4 语义）。
+
+### 📌 口径登记 4：落盘目录必须在 git 根之内（`--suites-root` 与 `--repo-root` 同源）
+
+`git add` 只吃**仓库内**的路径（promoter 的 E10 前提）。初版用绝对路径调
+`git add` → 落盘目录在仓库外时提交失败；修成 `target.relative_to(repo_root)`
+且**前置 fail-loud**（不先写文件再让 git 报错——那是「写了一半」的形态，正是
+回滚逻辑要处理的那种）。`CandidateReviewError` 文案点名「`--suites-root` 与
+`--repo-root` 必须同源」。
+
+### 实测
+
+- 全量 `pytest tests`（macOS）：**1844 passed / 0 failed**（exit 0）。
+  Task 3.4 修订后基线 **1809** → 本任务 **+35**：新增 16 + 15 = **31**，既有文件
+  `test_candidate_store.py` +3、`test_generator_pipeline.py` +2。
+  > 预期变更（不算回归）：`test_migrations_are_idempotent` 的版本串随 004 变
+  > `"004_review_note"`（该测试注释自陈「从链尾派生，加脚本跟着变」）；
+  > `test_row_models_roundtrip` 全键集 += `review_note`；`_MIN_WRITE_STATEMENTS` 上调。
+- **M3 Gate `phase0/verify_p3_m3.py` → exit 0**（`out/p3_m3_gate/summary.json`
+  verdict=PASS），G1–G8 全绿：
+
+  | 判据 | 结果 |
+  |---|---|
+  | G1 `generate --env-kind production` | exit 1 + 含 `F7` + **agent.db 未创建** |
+  | G2 `--env-kind staging` | exit 3 + 点名 sandbox + **零候选入库** |
+  | G3a `mta plan --json` | plan_id=plan_8f7f778380b2a746 |
+  | G3b `mta generate` | exit 0 + `gaps=1（现场重算）` |
+  | G3c 候选入库 | PENDING / dry=PASS / 有指纹 / `coverage_gap=['HomeView -> SearchView']` |
+  | G4 重跑 | 候选仍 1 条 + DUPLICATE 留痕带 `duplicate_of` |
+  | G5a accept | 文件 + commit + 库 ACCEPT + reviewer=gate |
+  | G5b 入 P1 | `mta lint <file>` exit 0 + `mta run --case <id> --fake-driver` exit 0 |
+  | G6 reject 无 note | exit 2 + 报错点名 `--note` |
+  | G7 AE | yaml **逐字节不变** + 状态仍 ACCEPT + notes 有「已人工决策」 |
+  | G8 全量 pytest | 1844 passed |
+
+- **A/B 探针 5 组，全部真红**（每次改完还原 → 清 `__pycache__` → 核对 `md5 -q`
+  一致 + `git diff --stat` 为空）：
+
+  | 探针 | 变异 | 结果 |
+  |---|---|---|
+  | P1 | AE 第 1 层：`if existing … != "PENDING":` → `if False:` | **1 failed**（`test_save_candidate_refuses_overwriting_a_decided_candidate`） |
+  | P2 | AE 第 2 层：`if skip_id in decided:` → `if False:` | **3 failed**（`test_generate_skips_a_decided_candidate_and_keeps_its_yaml` / `…_rejected_…` / CLI 的 `test_decided_candidate_is_not_overwritten_by_a_rerun`） |
+  | P3 | 落盘失败不回滚（`unlink` → `pass`） | **1 failed**（`test_git_failure_rolls_back_the_file_and_keeps_pending`） |
+  | P4 | id 冲突校验 → `if False:` | **1 failed**（`test_accept_with_conflicting_id_is_refused`） |
+  | P5 | `cmd_generate` 的 sandbox 前置 → `if False:` | **1 failed**（`test_non_sandbox_is_refused_before_anything_is_written`） |
+
+  P1/P2 是**两层各自独立可测**的实证（删任一层，另一层的测试都还红）——
+  不是只测「总体没覆写」。
+
+### 教训（已并入 MEMORY §5）
+
+- **「照谁的范式」要分开问**：F6 说「与 P2 审核范式一致」，但 P2 的**两处先例
+  照的是不同的部分**——`decide_review` 照**状态机与报错文案**（可记忆性），
+  `approve_proposal` 照**落盘顺序**（可重放性）。判断依据是「副作用能不能幂等
+  重放」：`decide_review` 建 Experience 可重放（所以先改状态），git commit 不可
+  （所以最后改状态）。**照范式不等于照实现**。
+- **同一命令里的两个 store 必须各自点名**：`cmd_generate` 的 `pipeline.store`
+  （给 Lifecycle）与候选的 `agent_store`（给 `test_candidates`）不是一个对象的
+  两种用法。装配期 `AttributeError` 是**运气好**——换成一个两者都有的方法名
+  （比如都叫 `save`），错的就是「写进了错的库」，静默。
+- **gate 工程的 `suites/` 必须在 git 根之内**：`git add` 只吃仓库内路径，这是
+  promoter 的 E10 前提，也是本次 accept 落盘的硬约束。单测夹具最初把 `suites/`
+  放在 git 根**之外**，第一反应是「修相对路径」，正确的是**前置 fail-loud**
+  （口径登记 4）——「能在前置挡掉就不该走到回滚」。
+- **`mta plan` 的改动范围写死 `HEAD~1..HEAD`**：单 commit 的自建仓库会
+  `fatal: ambiguous argument 'HEAD~1..'` → exit 3。gate 工程必须给**两个** commit
+  （M2 Gate 同款），而 metadata **写盘不提交**（提交了就多一个 commit，范围即漂）。
