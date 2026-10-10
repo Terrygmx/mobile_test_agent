@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+from testcase.schema import AssertionSpec, Postcondition, WaitSpec
+
 __all__ = ["LLM_INVALID_OUTPUT", "MAX_REASON_CHARS", "ParsedCandidateSteps",
            "ParsedLLMOutput", "PlanRationale", "parse_candidate_steps",
            "parse_llm_output", "parse_plan_reasons", "ALLOWED_ACTIONS"]
@@ -297,6 +299,16 @@ def _clean_step(raw) -> tuple[dict | None, dict]:
             post = known["postcondition"]
             if not isinstance(post, dict) or not _target_ok(post.get("target")):
                 return None, ignored
+            # ⚠️ **嵌套层也要过滤**（review_p3_task34 P2-4）：初版把模型的
+            # 原 dict 直接 return，于是 `postcondition` / `wait_for` /
+            # `assertion` 里的未知键（含 `risk`）**既不被忽略也不被记进
+            # `ignored_fields`**——H4 的「越权声明必须可见」在嵌套层不成立。
+            # 拦得住是**巧合**（P1 schema 的 `extra="forbid"` 兜住了），
+            # 而「靠下游兜住」正是本仓反复吃亏的形态。过滤面从 schema 的
+            # **字段名**派生，不手抄。
+            post, sub_ignored = _strip_unknown_spec_keys(post, Postcondition)
+            ignored.update({f"postcondition.{k}": v
+                            for k, v in sub_ignored.items()})
             step["postcondition"] = post
         return step, ignored
 
@@ -310,8 +322,24 @@ def _clean_step(raw) -> tuple[dict | None, dict]:
             from llm.prompt import GENERATOR_CONDITIONS
             if condition not in GENERATOR_CONDITIONS:
                 return None, ignored
+            spec, sub_ignored = _strip_unknown_spec_keys(
+                spec, WaitSpec if key == "wait_for" else AssertionSpec)
+            ignored.update({f"{key}.{k}": v for k, v in sub_ignored.items()})
             return {key: spec}, ignored
     return None, ignored
+
+
+def _strip_unknown_spec_keys(spec: dict, model) -> tuple[dict, dict]:
+    """剥掉嵌套 spec 里**不是该 schema 字段**的键 → `(干净 spec, 被剥的键)`。
+
+    `model` 是 P1 schema 的类（`WaitSpec` / `AssertionSpec` /
+    `Postcondition`），合法键从 `model.model_fields` **派生**——手抄一份字段名
+    必然与 schema 漂移，而漂移方向是「schema 加字段后这里把它当越权剥掉」。
+    """
+    allowed = set(model.model_fields)
+    kept = {k: v for k, v in spec.items() if k in allowed}
+    stripped = {k: v for k, v in spec.items() if k not in allowed}
+    return kept, stripped
 
 
 def parse_candidate_steps(raw: str) -> ParsedCandidateSteps:

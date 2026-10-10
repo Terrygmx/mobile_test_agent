@@ -22,7 +22,15 @@
 -- | test_candidates.dry_run_status | 可空 | `NOT NULL DEFAULT 'PENDING'` + `CHECK` 词表 |
 -- | test_candidates.review_status | `DEFAULT 'PENDING'` | 同上 + `NOT NULL` + `CHECK` 词表 |
 -- | test_candidates.created_at | 可空 | `NOT NULL` |
+-- | test_candidates.dry_run_detail_json | **无此列** | `NOT NULL DEFAULT '{}'`（见下） |
 -- | 索引 | 无 | `idx_test_candidates_review` / `idx_test_candidates_fp` |
+--
+-- ⚠️ **`dry_run_detail_json` 是本次唯一的新增列**（review_p3_task34 P2-2）：
+-- `DryRunResult.detail` 装 `failure_type` / `attempt` / `cleanup_status`，而
+-- 只落一个 `dry_run_status='FAIL'` 恰好是本仓最防的「看起来正常」——人工审核
+-- 看到 FAIL 却不知道**为什么**失败，等于把一次设备执行的结论丢掉一半。
+-- 它不进 `generation_evidence_json`：那是**溯源**（这条候选从哪来），而这是
+-- **执行结论**（跑成什么样），两件事分开存，查询与渲染都更干净。
 --
 -- 词表与 Python 常量是**两处字面量**（`candidates/test_case.py` 的
 -- `DRY_RUN_STATUSES` / `REVIEW_STATUSES` / `REJECTION_REASONS`），一致性由
@@ -47,6 +55,7 @@ CREATE TABLE IF NOT EXISTS test_candidates (
     fingerprint TEXT,                      -- F8：Test Fingerprint（Task 3.3）
     dry_run_status TEXT NOT NULL DEFAULT 'PENDING'
         CHECK (dry_run_status IN ('PENDING', 'PASS', 'FAIL')),
+    dry_run_detail_json TEXT NOT NULL DEFAULT '{}',   -- P2-2：FAIL 的失败类型等
     review_status TEXT NOT NULL DEFAULT 'PENDING'
         CHECK (review_status IN ('PENDING', 'ACCEPT', 'REJECT')),
     reviewer TEXT,

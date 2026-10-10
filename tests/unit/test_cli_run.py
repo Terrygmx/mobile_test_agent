@@ -1039,3 +1039,127 @@ def test_run_records_default_app_build_without_metadata(tmp_path):
     row = sqlite3.connect(db).execute(
         "SELECT app_build FROM runs ORDER BY rowid DESC LIMIT 1").fetchone()
     assert row[0] == "local"
+
+
+# --- review_p3_task34 P0-1 / P3-3：真机装配路径必须**真的被走到** ---------------
+
+
+def test_wire_device_stack_real_device_path_assembles(monkeypatch, tmp_path):
+    """P0-1 / P3-3：`wire_device_stack(fake_driver=False)` 的**真机分支**必须
+    能装配完成，且把四件套回填到位。
+
+    为什么补这条：`test_r16_2_no_fake_driver_exits_3_not_fail` 是此前**唯一**
+    触及真机分支的用例，而它把 `DeviceSession.connect` 换成必抛异常——装配在
+    `os.environ` **之前**就失败，断言文案又被 `NameError` 的报错**恰好命中**
+    → 测试绿、真机路径死（`cli/pipeline.py` 漏了 `import os`，P0-1）。
+    「守卫空转」的教科书形态：唯一覆盖某分支的测试在该分支**第一行之前**就退出。
+
+    本测试 stub 掉设备侧，让装配**跑到底**，逐项断言回填结果。
+    """
+    import session.device_session as ds_mod
+    import cli.pipeline as cp
+    from executor.guard import EnvKind
+
+    quits: list[int] = []
+
+    class _FakeDriver:
+        def quit(self):
+            quits.append(1)
+
+        def implicitly_wait(self, seconds):     # Executor 装配时会调
+            self.implicit = seconds
+
+    class _FakeDS:
+        def __init__(self, url, caps):
+            self.url, self.caps, self.driver = url, caps, None
+
+        def connect(self):
+            self.driver = _FakeDriver()
+            return self.driver
+
+        def ensure_alive(self):
+            return self.driver
+
+    monkeypatch.setattr(ds_mod, "DeviceSession", _FakeDS)
+    monkeypatch.setattr(ds_mod, "resolve_local_caps",
+                        lambda udid, bundle_id: {"udid": udid,
+                                                 "bundleId": bundle_id})
+
+    pipeline = SessionPipeline(suites_root=tmp_path)
+    pipeline.store = None
+    sentinel_repo = object()
+    stack = cp.wire_device_stack(
+        pipeline, env_kind=EnvKind.SANDBOX, run_id="r1", udid="UDID-1",
+        bundle_id="com.example.app", repo=sentinel_repo, fake_driver=False)
+
+    # 四件套与回填逐项在位（漏一项就是「装配半成品」）
+    assert isinstance(stack.device_session, _FakeDS)
+    assert pipeline.deps.repo is sentinel_repo, "repo 没回填进 deps"
+    assert pipeline.deps.device_session is stack.device_session
+    assert pipeline._run_id == "r1"
+    assert pipeline._lifecycle is stack.lifecycle
+    assert pipeline._step_runner is stack.runner
+    assert stack.runner.postcondition_checker is not None, \
+        "H7：非幂等动作的 postcondition 必须接上"
+    # 收尾：close() 真的 quit 了 driver
+    stack.close()
+    assert len(quits) == 1
+
+
+def test_wire_device_stack_closes_the_session_when_assembly_fails(
+        monkeypatch, tmp_path):
+    """P2-3：`connect()` **之后**的装配若抛错 → Appium 会话不能泄漏。
+
+    `DeviceStack.close()` 只在成功返回后由调用方的 `finally` 调到，失败路径
+    必须自己收尾（旧实现同样有这个洞，但抽成「唯一实现」后它成了 3.5 的
+    `mta generate` 也会走的入口）。
+    """
+    import session.device_session as ds_mod
+    import environment.manager as em
+    import cli.pipeline as cp
+    from executor.guard import EnvKind
+
+    quits: list[int] = []
+
+    class _FakeDriver:
+        def quit(self):
+            quits.append(1)
+
+    class _FakeDS:
+        def __init__(self, url, caps):
+            self.driver = None
+
+        def connect(self):
+            self.driver = _FakeDriver()
+            return self.driver
+
+    class _Boom:
+        def __init__(self, *a, **kw):
+            raise RuntimeError("装配中途炸了")
+
+    monkeypatch.setattr(ds_mod, "DeviceSession", _FakeDS)
+    monkeypatch.setattr(ds_mod, "resolve_local_caps",
+                        lambda udid, bundle_id: {"udid": udid})
+    monkeypatch.setattr(em, "EnvironmentManager", _Boom)
+
+    pipeline = SessionPipeline(suites_root=tmp_path)
+    pipeline.store = None
+    with pytest.raises(RuntimeError, match="装配中途炸了"):
+        cp.wire_device_stack(pipeline, env_kind=EnvKind.SANDBOX, run_id="r1",
+                             udid="U", bundle_id="com.x", repo=None,
+                             fake_driver=False)
+    assert len(quits) == 1, "装配失败必须 quit 掉已建立的会话（否则泄漏）"
+
+
+def test_wire_device_stack_requires_bundle_id_on_the_real_path(monkeypatch,
+                                                               tmp_path):
+    """真机路径缺 `--bundle-id` → `ValueError`（调用方翻成 exit 3）。"""
+    import cli.pipeline as cp
+    from executor.guard import EnvKind
+
+    pipeline = SessionPipeline(suites_root=tmp_path)
+    pipeline.store = None
+    with pytest.raises(ValueError, match="bundle-id"):
+        cp.wire_device_stack(pipeline, env_kind=EnvKind.SANDBOX, run_id="r1",
+                             udid="U", bundle_id=None, repo=None,
+                             fake_driver=False)

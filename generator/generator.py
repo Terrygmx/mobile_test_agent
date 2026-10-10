@@ -49,7 +49,7 @@ from candidates.fingerprint import test_fingerprint
 from candidates.test_case import (REJECTION_REASONS, TestCandidate,
                                   dump_testcase_yaml)
 from generator.coverage import UncoveredTransition
-from generator.dry_run import DryRunResult, run_candidate
+from generator.dry_run import run_candidate
 from generator.validator import (SEMANTIC_CONTRADICTED, schema_errors,
                                  validate_schema, validate_semantic)
 from llm.parser import parse_candidate_steps
@@ -161,6 +161,12 @@ def generate(gaps: Iterable[UncoveredTransition], *,
     """
     result = GenerationResult()
     gap_list = list(gaps)
+    # ⚠️ **先物化**：`existing_cases` 的注解是 `Iterable`，下面要遍历**两次**
+    # （建指纹索引 + 报「去重基准」条数）。传生成器时第二次遍历恒为空 →
+    # 审计 note 会写「正式用例 0 条」而实际有 N 条（去重判据本身仍对，因为
+    # `fp_index` 在第一次遍历就建好了）——审计数字撒谎正是本仓要防的
+    # 「看起来正常」（review_p3_task34 P3-4）。
+    existing_cases = list(existing_cases or ())
     if not gap_list:
         result.notes.append(
             "没有 coverage gap → 不生成候选（空不是错误，与矩阵 #6 的空 Plan 同款）")
@@ -179,12 +185,12 @@ def generate(gaps: Iterable[UncoveredTransition], *,
     graph = knowledge.graph_query(app_id)
 
     fp_index = _existing_fingerprints(existing_cases)
-    for cand in store.list_candidates(review_status="PENDING"):
+    pending = store.list_candidates(review_status="PENDING")
+    for cand in pending:
         if cand.get("fingerprint"):
             fp_index.setdefault(cand["fingerprint"], cand["candidate_id"])
     result.notes.append(
-        f"去重基准：正式用例 {len(list(existing_cases or ()))} 条 + "
-        f"未决候选 {sum(1 for c in store.list_candidates(review_status='PENDING'))} 条")
+        f"去重基准：正式用例 {len(existing_cases)} 条 + 未决候选 {len(pending)} 条")
 
     for gap in gap_list:
         # --- F4：预算与熔断（P1 的同一个对象，不新写） ---
@@ -214,6 +220,17 @@ def generate(gaps: Iterable[UncoveredTransition], *,
         result.llm_calls += 1
 
         parsed = parse_candidate_steps(raw)
+        if parsed.ignored_fields:
+            # H4：模型**越权声明的字段不能静默消失**。这里只做「记下来」——
+            # 剥掉它们的强制在解析层（`_clean_step`），判定它们「对不对」
+            # 的强制在 Guard / metadata（风险不由模型声明）。但人工审核时
+            # 必须看得见「这条候选的 LLM 试图声明过什么」——尤其是
+            # `risk: CRITICAL` 这类：它被忽略是**正确**的，但正是最该被
+            # 看一眼的信号（review_p3_task34 P1-2：初版算出后零消费）。
+            ignored = ", ".join(
+                f"{k}={v!r}" for k, v in sorted(parsed.ignored_fields.items()))
+            result.notes.append(
+                f"{candidate_id_for(gap)}: LLM 越权声明已忽略（H4）——{ignored}")
         if not parsed.valid:
             # 契约层非法 = 10.4 的 LLM_INVALID_OUTPUT（fail-closed）。**不建
             # 候选、不写留痕表**：留痕表的三个 reason 都是「候选被拒」，而这里
@@ -284,7 +301,7 @@ def generate(gaps: Iterable[UncoveredTransition], *,
             candidate_id, testcase_yaml=yaml_text,
             generation_evidence=evidence.model_dump(mode="json"),
             generated_by=generated_by, fingerprint=fp,
-            dry_run_status=dry.status)
+            dry_run_status=dry.status, dry_run_detail=dry.detail)
         result.candidates.append(TestCandidate.from_store_dict(row))
         # 本条已入库 → 立刻进去重基准（同批次内的重复候选也要被挡）
         fp_index.setdefault(fp, candidate_id)

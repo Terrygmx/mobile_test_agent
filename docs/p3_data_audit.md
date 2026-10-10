@@ -2378,3 +2378,192 @@ Task 3.3 拍板 `precondition` **不进指纹**，代价是真语料**已有 2 �
   `executed_steps=lifecycle.steps_recorded` 在搬运后炸了（好抓），而
   `pipeline.deps.repo` 那条是**静默错的**（`SessionPipeline` 在装配前没有
   `deps` 属性）——靠读代码发现，不是靠测试。搬运类的重构，回归绿只是**下限**。
+
+---
+
+## Task 3.4 评审修订记录（round 1，2026-10-10）
+
+**评审报告**：`review/review_p3_task34_2026-10-10.md` —— 结论 **不通过**：
+**1×P0 + 2×P1 + 4×P2 + 4×P3**。35 组变异探针 + 12 组只读观察，全部在 worktree
+副本上做（评审结束主仓零改动）。
+
+### 修订 1（P0-1）：`cli/pipeline.py` 真机分支引用未导入的 `os` → `mta run` 真机路径 100% 死
+
+**这是本次最重的一条，也是「守卫空转」的教科书形态。** 抽出 `wire_device_stack`
+时漏了 `import os`（旧实现 `cli/main.py` 有），而 `os.environ.get("APPIUM_URL", …)`
+在**真机分支**里。为什么全量绿没抓到：`test_r16_2_no_fake_driver_exits_3_not_fail`
+是当时**唯一**触及真机分支的用例，它把 `DeviceSession.connect` 换成必抛异常——
+装配在 `os.environ` **之前**就失败，而断言文案 `"设备会话建立失败" in out or
+"build identity" in out` 又**恰好被 `NameError` 的报错文案命中** → 测试绿、真机
+路径死。
+
+- 修：补 `import os`。
+- **加固（比修 bug 更重要）**：补 3 条**直接调 `wire_device_stack(fake_driver=False)`**
+  的单测（stub 设备侧，让装配**跑到底**），逐项断言 `pipeline.deps.repo is repo` /
+  `device_session` / `_run_id` / `_lifecycle` / `_step_runner` /
+  `runner.postcondition_checker is not None` / `close()` 真的 quit。
+  探针实测：**去掉 `import os` → 2 failed**（此前该形态 0 覆盖）。
+- 这条同时核销 **P3-3**（真机分支零覆盖：评审的三条变异 `repo=None` / 删
+  `postcondition_checker` / 删 `recovery.guard` 回填全部 0 red）。补测后
+  `repo=None` 与 `recovery.guard` 两条**不再是零覆盖**。
+
+> **教训（已并入 MEMORY §5）**：**「唯一覆盖某分支的测试」若在该分支第一行之前
+> 就退出，它守的是空气。** 断言写 `A or B` 的文案匹配尤其危险——它把「另一种
+> 失败」也算成通过。判「某分支有没有覆盖」不能看「有没有测试提到它」，要看
+> **测试是否真的走到了那一行**（本条的探针法：让装配跑到底再断言回填结果）。
+
+### 修订 2（P1-1）：语义校验的短路 fail-open——已知矛盾被「零观测」转移掩蔽
+
+初版按 `sorted(declared)` 逐条检查，**遇零观测即 `return unknown`**。于是结论
+取决于**字典序**：一条候选只要**任意**一条零观测转移排在已知矛盾转移之前，矛盾
+就整个不被检查 → 落进 `unknown`（放行）→ 推给 Dry Run 烧设备。评审实测：
+两条候选声明的 `MidView->ProfileView@tap:MidView.x` 完全相同（图里实测落点是
+`DetailView`，**已知矛盾**），只把第一条转移的屏名从 `HomeView` 换成 `ZHomeView`
+（两者都零观测），判定就从**拒绝翻成放行**。
+
+**生产影响（评审量化）**：真语料 20 例里 13 例有声明转移，其 `sorted-first`
+**全是 `HomeView` 打头**——真实形态天然命中这条短路。
+
+- 修：改成**先找矛盾、再谈未知**的全量扫描。优先级
+  `contradicted（任一）> unknown（任一，且无矛盾）> consistent（全部有观测）`。
+  矛盾时**列出全部**矛盾转移（不只第一条），人工一次看全。
+- 补 2 条测试：`test_contradiction_is_not_masked_by_an_earlier_unknown_transition`
+  （两种字典序都拦得住）+ `test_unknown_is_reported_only_when_nothing_contradicts`
+  （反向：修订不能把放行也堵死）。探针：**还原短路 → 1 failed**。
+- **口径登记的缺口一并补上**：原 docstring 的「⚠️ 推论」只登记了**误拒**方向，
+  漏放方向没登记。现改为明写「**误拒方向已登记，漏放方向由 P1-1 修订关掉**」。
+
+> **教训（已并入 MEMORY §5）**：**「逐条检查 + 遇情况即 return」的循环，把
+> 「检查了哪些」交给了遍历顺序。** 只要判据是「任一/全部」的合取或析取，就必须
+> **扫全量再定结论**——`for … if cond: return A` 的写法让**排序**成了判据的一部分，
+> 而排序通常是无意的（`sorted()` 只为让输出确定）。与「空集上恒真」同族：
+> 都是**判据的覆盖面被实现细节偷走**。
+
+### 修订 3（P1-2）：`ignored_fields` 零消费 → H4「越权痕迹必须可见」空转
+
+解析层正确算出 `ignored_fields`（模型声明的 `risk` / `idempotency` / `id` 等），
+生成器**从不读它**——`risk: CRITICAL` 就这么静默消失。忽略它是对的（风险由
+metadata + Guard 判，H4），但**人工审核时看不到「这条候选的 LLM 试图声明过
+CRITICAL」**，而那正是最该看一眼的信号。对照 P2 侧：`planner` 把它落成审计行。
+
+- 修：`generate` 在解析后把 `ignored_fields` 写进 `result.notes`（每条一行）。
+- 补测试 `test_model_declared_risk_is_ignored_but_visible`：断言 YAML 里**没有**
+  `CRITICAL`（确实被剥掉）**且** notes 里**有**（可见）。两个方向都钉。
+
+### 修订 4（P2-1）：`save_candidate` 的「必有指纹」闸门不存在
+
+迁移 002 的 docstring 声称「入库的候选必有指纹——那条由 `save_candidate` 的
+Python 侧闸门保证」，评审实测**当时并不存在**（`fingerprint=None` 入库成功）。
+后果不是「少个字段」：`generator.py` 建去重基准时写 `if cand.get("fingerprint")`，
+一个 `NULL` 指纹的候选被**静默跳过** → **永久不参与去重** → 同一用例可反复生成
+入库，而每一步都「看起来正常」。
+
+- 修：`save_candidate` 加 `if not fingerprint: raise ValueError(...)`。
+- 补测试 `test_save_candidate_refuses_a_missing_fingerprint`（`None` 与 `""` 都拒）。
+  探针：**去掉闸门 → 1 failed**。
+
+### 修订 5（P2-2）：`DryRunResult.detail` 不落库 → `FAIL` 旁边没有「为什么」
+
+`dry_run.py` 的 docstring 声称 `detail` 进「`dry_run_status` 旁边的审计面」，
+实际零消费——候选行只有 `dry_run_status='FAIL'`，`failure_type` 消失。人工审核
+看到 FAIL 却不知道**为什么**失败，等于把一次设备执行的结论丢掉一半。
+
+- 修：迁移 002 加列 `dry_run_detail_json TEXT NOT NULL DEFAULT '{}'`（设计 §11
+  本无此列——**这是本次唯一的新增列**，理由写进迁移头部）；`save_candidate` /
+  `_candidate_from_row` / `TestCandidate` 两侧同步；`generate` 传
+  `dry_run_detail=dry.detail`。
+- 补测试 `test_dry_run_detail_is_persisted_not_just_the_status`（含
+  `failure_type` / `attempt` / `cleanup_status` 三项）+ 行模型往返。探针：
+  **不传 detail → 1 failed**。
+
+### 修订 6（P2-3）：装配失败泄漏 Appium 会话
+
+`ds.connect()` **之后**的装配（`AppSession` / `EnvironmentManager` / `Executor` /
+`StepRunner`）任一抛错都会绕过 `DeviceStack.close()`（后者只在成功返回后由调用方
+的 `finally` 调到）。旧实现同形（非本次回归），但抽成「唯一实现」后它成了 3.5 的
+`mta generate` 也会走的入口。
+
+- 修：把 `connect()` 之后的四件套包进 `try/except`，失败时 `driver.quit()` 再重抛
+  （**不吞原始异常**）。
+- 补测试 `test_wire_device_stack_closes_the_session_when_assembly_fails`：
+  stub `EnvironmentManager` 抛错 → 断言 `quit()` 恰好被调 1 次。
+
+### 修订 7（P2-4）：嵌套 spec 的未知键不过滤 → H4 在嵌套层不成立
+
+`_clean_step` 把模型的**原 dict** 直接 return，于是 `wait_for` / `assertion` /
+`postcondition` 里的 `risk` **既不被忽略也不被记进 `ignored_fields`**。拦得住是
+**巧合**（P1 schema 的 `extra="forbid"` 兜住），而「靠下游兜住」正是本仓反复吃亏
+的形态。
+
+- 修：抽 `_strip_unknown_spec_keys(spec, model)`，合法键从 `model.model_fields`
+  **派生**（不手抄）；三个嵌套位点全部过滤，被剥的键以 `steps[i].<key>.<field>`
+  路径进 `ignored_fields`（与顶层同款）。
+- 补 2 条测试（观测步 + `postcondition` 分支）。探针：**关掉嵌套过滤 → 1 failed**。
+
+### 修订 8（P3-1 / P3-2 / P3-4）：零消费 API 与撒谎的审计数字
+
+- **P3-1**：删 3 处未用 import（`cli/main.py` 的 `PipelineDeps` / `Lifecycle` /
+  `StepRunner`——随装配搬运而失效；`generator.py` 的 `DryRunResult`）；
+  `validator.py` 的 `max_severity` re-export 注释改为如实（当前零消费，生成器用
+  `schema_errors`）。
+- **P3-2**：`utcnow()` 的 docstring 如实写「当前零生产调用方，给 3.5 落盘用」；
+  `to_store_dict` 补**全键**断言（此前只看一个键）。
+- **P3-4**：`generate` 入口先 `existing_cases = list(existing_cases or ())`——
+  它要遍历两次（建索引 + 报条数），传一次性可迭代对象时第二次恒空 → note 写
+  「正式用例 0 条」而实际 N 条。
+  ⚠️ **这条的测试第一版是空转的**：我复用了 `_run` helper，而它自己写了
+  `list(cases)`，把「一次性可迭代」这个被测形态**在 `generate` 看到之前就洗掉了**
+  ——探针 0 red 当场抓出。改成直接调 `generate` 并传生成器后探针 1 red。
+- 另补 `test_last_gap_contract_failure_still_reports_broken`：熔断**恰好发生在
+  最后一条 gap**（`try_acquire` 那一支轮不到）——那是「收尾重读 `budget.broken`」
+  唯一的用武之地，此前无独立测试。
+
+### 未修订（显性登记，非本次范围）
+
+- **AE（评审自创观察）**：reviewer ACCEPT 后重跑生成器 → `review_status` 保持
+  `ACCEPT` 但 `testcase_yaml` **被新内容覆盖**（upsert 不区分该行是否已进人工
+  决策）。按 3.5 的落盘设计（ACCEPT → `suites/<suite>/<id>.yaml`），落盘文件与
+  库内容会**分叉**。**归 Task 3.5 核销时必须处理**（已进 handover §9 的下一步前置）。
+- **AF（prompt 模板诱导注释）**：`build_generation_prompt` 用手写 JSON 片段做
+  示例，照抄含注释即非法 JSON。非代码 bug，未改（prompt 已在 3.4 冻结，改动会
+  影响已有测试的文案断言）——登记为 3.5 的 prompt 迭代输入。
+- **S（`schema_errors` 缺 WARNING 不拒的正面钉子）**：判据本身正确（枚举身份
+  比较），真语料元素 id 与 `NON_IDEMPOTENT_KEYWORDS` 零交集，构造合成仓库会绕过
+  `Repository.from_dirs` 的真实路径。登记为 P3 缺钉子，非行为缺陷。
+- 评审「未验证」第 1 条（父提交 1691 基线未独立复跑）：**主会话已用
+  `git worktree` 独立复跑确认 1691 passed**，本条核销。
+
+### 修订后实测
+
+- 全量 `pytest tests` → **1807 passed / 0 failed**（exit 0）。修订前 1794 →
+  **+13**（真机装配路径 3 + 语义 2 + 越权可见 3 + 存储 2 + 一次性可迭代 1 +
+  最后一条熔断 1 + 全键断言 1）。
+- **A/B 探针 9 组，全部真红**（每次改完还原 → 清 `__pycache__` → 核对 `md5 -q`
+  与 `git diff --stat`）：
+
+  | 探针 | 变异 | 结果 |
+  |---|---|---|
+  | P0-1 | 去掉 `import os` | **2 failed**（真机装配两条） |
+  | P1-1 | 还原「遇零观测即 return」短路 | **1 failed** |
+  | P2-1 | `save_candidate` 指纹闸门 → `if False` | **1 failed** |
+  | P2-2 | `generate` 不传 `dry_run_detail` | **1 failed** |
+  | P2-4 | 关掉嵌套 spec 过滤 | **1 failed** |
+  | P3-4 | 不物化 `existing_cases` | **1 failed** |
+
+- 探针后 `grep -rn MUTANT` 零命中；`git diff` 只剩本次修订的 11 个文件。
+
+### 教训（已并入 MEMORY §5）
+
+1. **「唯一覆盖某分支的测试」可能守的是空气**：断言在该分支**第一行之前**退出，
+   或断言写成 `A or B` 的文案匹配（把另一种失败也算通过），都会让「绿」与
+   「分支活着」脱钩。判覆盖要看**测试是否真的走到了那一行**。
+2. **逐条检查 + 遇情况即 return，把「检查了哪些」交给了遍历顺序**：判据是
+   「任一/全部」时，必须**扫全量再定结论**，否则 `sorted()` 这种只为确定性输出
+   的细节会悄悄变成判据的一部分。
+3. **抽 helper 的重构，「行为等价」必须由新写的直调测试钉住，不能靠全量回归**：
+   全量回归只覆盖**旧测试走过的路**；被抽出的分支若原本就零覆盖，回归绿什么也
+   证明不了（P0-1 正是如此——真机分支此前零覆盖，抽取前后都绿）。
+4. **测试复用的 helper 会把被测形态洗掉**：`_run` 里的 `list(cases)` 让
+   「一次性可迭代」这条测试**永远碰不到**被测行为，而它**照样绿**。
+   **写「守卫某实现选择」的测试前，先用 mutant 确认它真能区分两种实现**（与
+   Task 3.3 的教训同一条，这次栽在「helper 顺手规范化了输入」上）。

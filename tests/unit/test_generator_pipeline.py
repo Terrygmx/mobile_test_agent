@@ -283,6 +283,54 @@ def test_single_arrival_candidate_is_unknown_not_consistent(tmp_path):
     assert "到达点" in v.reason
 
 
+def test_contradiction_is_not_masked_by_an_earlier_unknown_transition():
+    """⚠️ **P1-1 的钉子**：矛盾转移排在零观测转移**之后**，仍必须被拒。
+
+    初版逐条短路（遇零观测即 `return unknown`），结论取决于 `sorted(declared)`
+    的**字典序**——把第一条转移的屏名从 `HomeView` 换成 `ZHomeView`（两者都
+    零观测），后面那条**已知矛盾**的转移就整个不被检查。真语料 20 例里 13 例
+    有声明转移、`sorted-first` 全是 `HomeView` 打头，即真实形态天然命中。
+    """
+    def _tc(first_screen: str) -> TestCase:
+        return parse_testcase_dict({
+            "schema_version": "0.2", "id": "c", "name": "c", "steps": [
+                {"action": "launch_app"},
+                {"wait_for": {"target": f"screen:{first_screen}",
+                              "condition": "active", "timeout": 5}},
+                {"action": "tap", "target": f"{first_screen}.go"},
+                {"wait_for": {"target": "screen:MidView", "condition": "active",
+                              "timeout": 5}},
+                {"action": "tap", "target": "MidView.x"},
+                {"wait_for": {"target": "screen:ProfileView",
+                              "condition": "active", "timeout": 5}}]})
+
+    # 图里 MidView --tap:MidView.x--> DetailView（**不是** ProfileView）
+    graph = _graph(ScreenTransition("MidView", "DetailView", "tap:MidView.x",
+                                    source_of=RUNTIME, count=4))
+    # `ZHomeView` 字典序在 `MidView` **之后**……两种排法都要拦得住
+    for first in ("HomeView", "ZHomeView"):
+        v = validate_semantic(_tc(first), graph=graph)
+        assert v.status == SEMANTIC_CONTRADICTED, (
+            f"first={first}：矛盾被前面的零观测转移掩蔽了（P1-1 回归）")
+        # `observed` 装的是**图里的实测落点**（拒绝时要让人看到图说什么）
+        assert "MidView->DetailView@tap:MidView.x" in v.observed
+        assert "MidView->ProfileView@tap:MidView.x" in v.reason
+
+
+def test_unknown_is_reported_only_when_nothing_contradicts():
+    """反向：**全部**转移零观测 → `unknown`（P1-1 的修订不能把放行也堵死）。"""
+    tc = parse_testcase_dict({
+        "schema_version": "0.2", "id": "c", "name": "c", "steps": [
+            {"action": "launch_app"},
+            {"wait_for": {"target": "screen:HomeView", "condition": "active",
+                          "timeout": 5}},
+            {"action": "tap", "target": "HomeView.go_search"},
+            {"wait_for": {"target": "screen:SearchView", "condition": "active",
+                          "timeout": 5}}]})
+    v = validate_semantic(tc, graph=_graph(T_GAP2))     # 图里没有 HomeView 的观测
+    assert v.status == SEMANTIC_UNKNOWN
+
+
 def test_validate_semantic_rejects_source_graph():
     """源图转移恒空 → 静默接受它会让判据**恒判 consistent**（与 coverage_gap 同款）。"""
     from graph.models import SOURCE
@@ -536,3 +584,122 @@ def test_semantic_verdict_statuses_are_distinct():
                 SEMANTIC_CONTRADICTED}) == 3
     with pytest.raises(ValueError):
         SemanticVerdict(status="maybe")
+
+
+# --- 评审修订（review_p3_task34）：P1-2 / P2-2 / P3-4 的钉子 --------------------
+
+
+def test_model_declared_risk_is_ignored_but_visible(tmp_path):
+    """H4 / P1-2：模型越权声明 `risk` → **被忽略**（不是被采纳），但**必须可见**。
+
+    初版解析层正确算出 `ignored_fields`，生成器却零消费——`risk: CRITICAL`
+    就这么静默消失。忽略它是对的（风险由 metadata + Guard 判），但人工审核
+    时看不到「这条候选的 LLM 试图声明过 CRITICAL」，而那正是最该看一眼的信号。
+    """
+    steps = [{"action": "launch_app", "risk": "CRITICAL",
+              "idempotency": "IDEMPOTENT"}]
+    steps += _steps_two_arrivals()
+    result, store, *_ = _run(tmp_path, replies=[_llm_steps(steps)])
+    assert len(result.candidates) == 1, "越权字段不该让候选作废"
+    yaml_text = store.get_candidate(result.candidates[0].candidate_id)[
+        "testcase_yaml"]
+    assert "CRITICAL" not in yaml_text, "模型声明的 risk 必须被剥掉（H4）"
+    assert any("越权声明" in n and "CRITICAL" in n for n in result.notes), \
+        f"越权声明必须留在 notes 里可见（P1-2 回归）：{result.notes}"
+
+
+def test_nested_spec_unknown_keys_are_stripped_and_visible(tmp_path):
+    """P2-4：嵌套 spec（`wait_for` / `assertion` / `postcondition`）里的未知键
+    同样要被剥掉并记进 `ignored_fields`（H4 在嵌套层也成立）。
+
+    初版把模型的**原 dict** 直接 return——拦得住是**巧合**（P1 schema 的
+    `extra="forbid"` 兜住），而「靠下游兜住」正是本仓反复吃亏的形态。
+    """
+    from llm.parser import parse_candidate_steps
+    raw = json.dumps({"steps": [
+        {"wait_for": {"target": "screen:SearchView", "condition": "active",
+                      "risk": "HIGH", "goto": "x"}}]})
+    p = parse_candidate_steps(raw)
+    assert p.valid
+    assert p.steps[0]["wait_for"] == {"target": "screen:SearchView",
+                                      "condition": "active"}
+    # 键路径带外层步序前缀（`steps[i].`）——与顶层的记录口径一致
+    assert p.ignored_fields["steps[0].wait_for.risk"] == "HIGH"
+    assert p.ignored_fields["steps[0].wait_for.goto"] == "x"
+
+
+def test_nested_postcondition_unknown_keys_are_stripped():
+    """P2-4 的 `postcondition` 分支（与观测步同款，但是另一个 model）。"""
+    from llm.parser import parse_candidate_steps
+    raw = json.dumps({"steps": [
+        {"action": "tap", "target": "HomeView.go_search",
+         "postcondition": {"target": "screen:SearchView",
+                           "condition": "active", "risk": "HIGH"}}]})
+    p = parse_candidate_steps(raw)
+    assert p.valid
+    assert "risk" not in p.steps[0]["postcondition"]
+    assert p.ignored_fields["steps[0].postcondition.risk"] == "HIGH"
+
+
+def test_dry_run_detail_is_persisted_not_just_the_status(tmp_path):
+    """P2-2：`dry_run_status='FAIL'` 旁边必须有**为什么**失败。
+
+    只落一个 FAIL 是「看起来正常」——人工审核看到 FAIL 却不知道失败类型，
+    等于把一次设备执行的结论丢掉一半。
+    """
+    def _fail(tc):
+        return TestcaseResult(testcase_id=tc.id, status="FAIL",
+                              failure_type="WAIT_TIMEOUT", attempt=2,
+                              cleanup_status="OK")
+
+    result, store, *_ = _run(tmp_path, execute=_fail,
+                             replies=[_llm_steps(_steps_two_arrivals())])
+    row = store.get_candidate(result.candidates[0].candidate_id)
+    assert row["dry_run_status"] == "FAIL"
+    assert row["dry_run_detail"]["failure_type"] == "WAIT_TIMEOUT"
+    assert row["dry_run_detail"]["attempt"] == 2
+    assert row["dry_run_detail"]["cleanup_status"] == "OK"
+
+
+def test_existing_cases_iterable_is_materialized_once(tmp_path):
+    """P3-4：`existing_cases` 传一次性可迭代对象时，审计 note 的数字不许撒谎。
+
+    `generate` 要遍历它**两次**（建指纹索引 + 报条数）。传生成器时第二次遍历
+    恒为空 → note 写「正式用例 0 条」而实际有 N 条（去重判据本身仍对，因为
+    `fp_index` 第一次就建好了）——审计数字撒谎正是「看起来正常」。
+    """
+    existing = parse_testcase_dict({"schema_version": "0.2", "id": "existing_001",
+                                    "name": "x",
+                                    "steps": _steps_two_arrivals()})
+    # ⚠️ **不能走 `_run`**：那个 helper 自己写了 `list(cases)`，会在
+    # `generate` 看到它之前就物化掉——变异探针实测 0 red，即这条测试当时
+    # 根本没碰「一次性可迭代」这个形态（`_run` 的 list() 把被测行为洗掉了）。
+    # 直接调 `generate` 并传**生成器**。
+    from generator.generator import generate
+    store = SQLiteAgentStore(tmp_path / "agent.db")
+    result = generate(
+        [GAP2], knowledge=_Knowledge(_graph(T_GAP2)), app_id=APP,
+        existing_cases=(c for c in [existing]),       # 一次性可迭代
+        repository=_repo(), secrets=_Secrets(), store=store,
+        llm=FakeLLM([_llm_steps(_steps_two_arrivals())]),
+        budget=LLMBudget(max_calls_per_run=10, breaker_consecutive_failures=3),
+        execute=_execute_pass, env_kind=EnvKind.SANDBOX,
+        device_type=DeviceType.SIMULATOR, suite="smoke")
+    assert len(store.list_rejections(reason="DUPLICATE")) == 1, "去重仍须生效"
+    assert any("正式用例 1 条" in n for n in result.notes), \
+        f"去重基准的数字必须如实（P3-4 回归）：{result.notes}"
+
+
+def test_last_gap_contract_failure_still_reports_broken(tmp_path):
+    """P3-4 附注：熔断**恰好发生在最后一条 gap** 时 `result.broken` 仍为真。
+
+    `test_invalid_output_trips_the_breaker_and_stops` 用 6 个 gap / 阈值 3，
+    `try_acquire` 那一支会先命中——走不到「最后一次迭代才熔断」这条路径，
+    而它恰恰是「收尾重读 `budget.broken`」唯一的用武之地。
+    """
+    budget = LLMBudget(max_calls_per_run=100, breaker_consecutive_failures=1)
+    result, *_ = _run(tmp_path, gaps=(GAP2,), replies=["不是 JSON"],
+                      budget=budget)
+    assert budget.broken is True
+    assert result.broken is True, "最后一次迭代熔断 → 报告必须说熔断了"
+    assert any("熔断" in n for n in result.notes)

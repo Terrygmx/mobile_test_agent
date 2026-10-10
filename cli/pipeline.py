@@ -15,6 +15,7 @@ R16 修复后职责：
 """
 from __future__ import annotations
 
+import os
 import re
 import time
 import uuid
@@ -212,10 +213,24 @@ def wire_device_stack(pipeline: "SessionPipeline", *, env_kind, run_id: str,
                                            "http://127.0.0.1:4723")
         ds = DeviceSession(url, resolve_local_caps(udid, bundle_id))
         ds.connect()
-        app = AppSession(ds, bundle_id)
-        env = EnvironmentManager(app)
-        ex = Executor(ds)
-        runner = StepRunner(ex, ds, Guard(env_kind), run_id=run_id)
+        # ⚠️ `connect()` **之后**的装配若抛错，Appium 会话会被泄漏
+        # （review_p3_task34 P2-3 实锤：旧实现同样有这个洞，但抽成「唯一
+        # 实现」后它成了 3.5 的 `mta generate` 也会走的入口，继续留着就是
+        # 选择了它）。`DeviceStack.close()` 只在**成功返回**后由调用方
+        # 的 `finally` 调到，所以失败路径必须在这里自己收尾。
+        try:
+            app = AppSession(ds, bundle_id)
+            env = EnvironmentManager(app)
+            ex = Executor(ds)
+            runner = StepRunner(ex, ds, Guard(env_kind), run_id=run_id)
+        except Exception:
+            driver = getattr(ds, "driver", None)
+            if driver is not None:
+                try:
+                    driver.quit()
+                except Exception:  # noqa: BLE001 — 收尾失败不改原始异常
+                    pass
+            raise
 
     store = pipeline.store
     if fake_driver:

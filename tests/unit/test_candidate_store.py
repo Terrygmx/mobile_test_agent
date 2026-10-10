@@ -198,6 +198,12 @@ def test_row_models_roundtrip(store):
                                                            **_candidate()))
     assert c.candidate_id == "cand_1"
     assert c.generation_evidence == GenerationEvidence(**_evidence())
+    # P3-2：`to_store_dict` 是 Task 3.5 落盘要复用的形状——**全键**断言，
+    # 不是只看一个键（少一个键 = store 收到 None 的静默缺字段）。
+    assert set(c.to_store_dict()) == {
+        "candidate_id", "testcase_yaml", "generated_by",
+        "generation_evidence", "fingerprint", "dry_run_status",
+        "dry_run_detail", "review_status", "reviewer", "reviewed_at"}
     assert c.to_store_dict()["candidate_id"] == "cand_1"
     r = CandidateRejection.from_store_dict(
         store.save_rejection("rej_1", reason="DUPLICATE", duplicate_of="x"))
@@ -231,3 +237,36 @@ def test_dump_testcase_yaml_roundtrips_through_p1_parser():
     assert back.model_dump() == tc.model_dump()
     # 中文不转义（给人看的文本，不是 \uXXXX）
     assert "搜索空结果" in text
+
+
+# --- 评审修订（review_p3_task34 P2-1 / P2-2） ---------------------------------
+
+
+def test_save_candidate_refuses_a_missing_fingerprint(store):
+    """P2-1：入库的候选**必有指纹**——`None` → fail-loud。
+
+    迁移 002 的 docstring 早就声称有这道闸门，实际当时并不存在（评审实锤）。
+    为什么必须炸：`generator.generate` 建去重基准时写的是
+    `if cand.get("fingerprint")`，一个 `NULL` 指纹的候选会被**静默跳过** →
+    它**永久不参与去重** → 同一条用例可以被反复生成入库，而每一步都
+    「看起来正常」。
+    """
+    with pytest.raises(ValueError, match="fingerprint"):
+        store.save_candidate("cand_1", **{**_candidate(), "fingerprint": None})
+    with pytest.raises(ValueError, match="fingerprint"):
+        store.save_candidate("cand_1", **{**_candidate(), "fingerprint": ""})
+
+
+def test_dry_run_detail_roundtrips_through_the_row_model(store):
+    """P2-2：`dry_run_detail` 落库并可读回（`TestCandidate` 两侧都要带）。"""
+    row = store.save_candidate("cand_1", **{
+        **_candidate(), "dry_run_status": "FAIL",
+        "dry_run_detail": {"failure_type": "WAIT_TIMEOUT", "attempt": 2}})
+    assert row["dry_run_detail"] == {"failure_type": "WAIT_TIMEOUT",
+                                     "attempt": 2}
+    c = TestCandidate.from_store_dict(row)
+    assert c.dry_run_detail["failure_type"] == "WAIT_TIMEOUT"
+    assert c.to_store_dict()["dry_run_detail"] == c.dry_run_detail
+    # 默认空：没跑过 Dry Run 的候选不是「跑失败了」
+    assert store.save_candidate("cand_2", **_candidate())[
+        "dry_run_detail"] == {}

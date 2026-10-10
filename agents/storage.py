@@ -238,6 +238,7 @@ class SQLiteAgentStore:
                        generated_by: str | None = None,
                        fingerprint: str | None = None,
                        dry_run_status: str = "PENDING",
+                       dry_run_detail: dict | None = None,
                        review_status: str = "PENDING") -> dict:
         """落一条候选（upsert：`candidate_id` 是主键）。
 
@@ -246,22 +247,38 @@ class SQLiteAgentStore:
 
         `created_at` 只在**首次插入**时取 `_now()`（`ON CONFLICT` 分支不更新它）
         ——「这条候选什么时候第一次生成出来的」是审计事实，重存不该改写它。
+
+        ⚠️ **入库的候选必有指纹**（`fingerprint is None` → `ValueError`）。
+        迁移 002 的 docstring 早就声称有这道闸门（`fingerprint` 列在 DDL 里可空
+        是为**留痕表**的 `SCHEMA_INVALID` 行服务的，两表列定义同形而语义不同）
+        ——review_p3_task34 P2-1 实锤它**当时并不存在**。为什么必须 fail-loud：
+        `generator.generate` 建去重基准时写的是 `if cand.get("fingerprint")`，
+        一个 `NULL` 指纹的候选会被**静默跳过** → 它**永久不参与去重** → 同一条
+        用例可以被反复生成入库，而每一步都「看起来正常」。
         """
+        if not fingerprint:
+            raise ValueError(
+                f"入库的候选必须有 fingerprint（F8 去重的前提），"
+                f"got candidate_id={candidate_id!r}, fingerprint={fingerprint!r}")
         with self._write_tx() as conn:
             conn.execute(
                 "INSERT INTO test_candidates (candidate_id, testcase_yaml,"
                 " generated_by, generation_evidence_json, fingerprint,"
-                " dry_run_status, review_status, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?)"
+                " dry_run_status, dry_run_detail_json, review_status,"
+                " created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(candidate_id) DO UPDATE SET"
                 " testcase_yaml=excluded.testcase_yaml,"
                 " generated_by=excluded.generated_by,"
                 " generation_evidence_json=excluded.generation_evidence_json,"
                 " fingerprint=excluded.fingerprint,"
-                " dry_run_status=excluded.dry_run_status",
+                " dry_run_status=excluded.dry_run_status,"
+                " dry_run_detail_json=excluded.dry_run_detail_json",
                 (candidate_id, testcase_yaml, generated_by,
                  json.dumps(generation_evidence, ensure_ascii=False),
-                 fingerprint, dry_run_status, review_status, _now()))
+                 fingerprint, dry_run_status,
+                 json.dumps(dry_run_detail or {}, ensure_ascii=False),
+                 review_status, _now()))
         row = self.get_candidate(candidate_id)
         assert row is not None       # 刚写完必在
         return row
@@ -307,6 +324,8 @@ class SQLiteAgentStore:
                     row["generation_evidence_json"] or "{}"),
                 "fingerprint": row["fingerprint"],
                 "dry_run_status": row["dry_run_status"],
+                "dry_run_detail": json.loads(
+                    row["dry_run_detail_json"] or "{}"),
                 "review_status": row["review_status"],
                 "reviewer": row["reviewer"],
                 "reviewed_at": row["reviewed_at"],

@@ -195,12 +195,13 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
 
 ## 9. 当前状态快照（**2026-10-10**，以实测为准）
 
-- **分支 / HEAD**：`P3-1010` / `8456e14`（`fix(p3): review_p3_task33 修订——wait 分支钉子 + precondition 口径登记`）
-- **全量基线**：**1691 passed / 0 failed**
+- **分支 / HEAD**：`P3-1010` / `feff5ec`（`feat(p3): generation pipeline + test candidates store (P3-12)`）
+  + 本次评审修订（commit 见 `git log`）
+- **全量基线**：**1807 passed / 0 failed**
 - **最新 tag**：`checkpoint-p3-m2`（P3 M2 收口）；**M3 尚未收口**
 - **Gate 状态**：M1 ✅（`checkpoint-p3-m1`）· M2 ✅（`phase0/verify_p3_m2.py` exit 0，8/8 PASS，
   `out/p3_m2_gate/summary.json` verdict=PASS）· **M3 Gate 未写**（收口时才出）
-- **已完成**：P0 / P1 / P2 全部；P3 的 M1、M2 全部；**M3 的 3.1 / 3.2 / 3.3**
+- **已完成**：P0 / P1 / P2 全部；P3 的 M1、M2 全部；**M3 的 3.1 / 3.2 / 3.3 / 3.4**
   - 3.1 Candidate 字段（`72106e1`，评审两轮已清）
   - 3.2 Coverage Gap（`43555e9` + 修订 `0ede83e`）——本体收口，**round 2 核销 P2-1'
     （`31c0fdc`）**：`pending` 只被「到达点」消费（元素 wait / 否定屏 wait 都不消费它）
@@ -208,17 +209,31 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
     review（`review/review_p3_task33_2026-10-10.md`）**通过 + 3×P3**，**3×P3 已修订
     （`8456e14`）**：wait 分支补钉子 + `precondition` 不入指纹的口径登记（含一条
     **故意钉住已知碰撞**的测试）
-- **下一步**：**Task 3.4（P3-12）生成管线**（迁移 002 + `generator/validator.py` +
-  `dry_run.py` + `generator.py` + 矩阵 #7–#10）。⚠️ **开工前置（必须逐条清）**：
-  1. **去重接线时**（3.4 是第一个真实消费者）：`precondition` **不进**指纹（已拍板）；
-     真语料已有 2 对同指纹——`reset_logout_001`(reset=LOGOUT) vs `login_001`(reset=RELAUNCH)
-     **步骤逐字相同、仅 `precondition` 不同** → 会 SKIP 掉一条语义不同的真用例（这对是危险的
-     那个）；`search_001` vs `search_filter_001` 连 precondition 都相同（语料里真的冗余）。
-     **SKIP 留痕必须带上「与哪条既有用例撞指纹」**，否则人工看不见被跳过的是哪一条；
-  2. `_arrivals` 的 8 处 `getattr` 默认值——引入**新 step 形态**时复查
+  - 3.4 生成管线（`feff5ec`）：迁移 002（`test_candidates` + `test_candidate_rejections`）
+    + `candidates/test_case.py` + `generator/{validator,dry_run,generator}.py`
+    + `llm/{prompt,parser}.py` 的生成面 + `cli/pipeline.py::wire_device_stack` 抽取。
+    review（`review/review_p3_task34_2026-10-10.md`）**不通过（1×P0 + 2×P1 + 4×P2 + 4×P3）**，
+    **全部已修订**（`docs/p3_data_audit.md` 的「Task 3.4 评审修订记录」）：P0-1
+    `cli/pipeline.py` 漏 `import os`（真机路径 100% 死，**守卫空转**）+ 语义校验短路
+    fail-open + `ignored_fields` 零消费 + 指纹闸门缺失 + `dry_run_detail` 不落库 +
+    装配失败泄漏会话 + 嵌套 spec 不过滤 + 4×P3
+- **下一步**：**Task 3.5（P3-13）CLI 接线 + 统一审核 + 落盘**（`mta generate` /
+  F6 首个消费者 / promoter）。⚠️ **开工前置（必须逐条清）**：
+  1. **`wire_device_stack` 直接单测已是前置**（Task 3.4 修订时补了 3 条）——3.5 的
+     `mta generate` 会把它当公共入口，P0-1 / P2-3 都会被继承；
+  2. **已 ACCEPT/REJECT 的候选 id 不该被生成器覆写**（review_p3_task34 探针 AE 实测：
+     upsert 会改写已人工批准的 `testcase_yaml`，`review_status` 却仍是 `ACCEPT` →
+     落盘文件与库内容**分叉**）；
+  3. **SKIP 留痕的 `duplicate_of`** 已兑付（矩阵 #8 三条测试）；真语料仍有 2 对同指纹
+     ——`reset_logout_001`(reset=LOGOUT) vs `login_001`(reset=RELAUNCH)（危险的那对，
+     语义不同）与 `search_001` vs `search_filter_001`（真冗余）。**3.5 落盘时若 ACCEPT
+     了被 SKIP 的那条，需要人工翻案通道**；
+  4. `_arrivals` 的 8 处 `getattr` 默认值——引入**新 step 形态**时复查
      （`generator/coverage.py`；评审 §四.2 登记）；
-  3. `_step_trigger` 的「trigger 全是动作步骤」是**实测**非构造保证——出现
-     `wait_for:` 前缀 trigger 即升级 P2。
+  5. `_step_trigger` 的「trigger 全是动作步骤」是**实测**非构造保证——出现
+     `wait_for:` 前缀 trigger 即升级 P2；
+  6. `build_generation_prompt` 的示例用手写 JSON 片段，照抄含注释即非法 JSON
+     （review_p3_task34 探针 AF）——3.5 迭代 prompt 时加一句「示例中不要加注释」。
 - **待拍板的三项**（沿用）：`screen_id` 过滤的数据源缺口（`docs/p3_data_audit.md` Task 2.2）、
   「坏引用用例」的处置口径（同文件 Task 2.3）、`priority_score` / Evidence Score 的
   权重校准所需数据量（`docs/phase3-plan.md` §2 open questions）

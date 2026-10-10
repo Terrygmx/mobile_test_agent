@@ -71,6 +71,11 @@ class TestCandidate(_Strict):
     generation_evidence: GenerationEvidence
     fingerprint: str | None = None
     dry_run_status: str = "PENDING"
+    # P2-2：Dry Run 的**执行结论**（`failure_type` / `attempt` /
+    # `cleanup_status`）。只落一个 `FAIL` 是「看起来正常」——人工审核看到 FAIL
+    # 却不知道**为什么**失败。与 `generation_evidence`（**溯源**：这条候选从
+    # 哪来）分开存，两件事不该混在一个 JSON 里。
+    dry_run_detail: dict = Field(default_factory=dict)
     review_status: str = "PENDING"
     reviewer: str | None = None
     reviewed_at: str | None = None
@@ -92,6 +97,7 @@ class TestCandidate(_Strict):
                 .model_dump(mode="json"),
                 "fingerprint": self.fingerprint,
                 "dry_run_status": self.dry_run_status,
+                "dry_run_detail": self.dry_run_detail,
                 "review_status": self.review_status,
                 "reviewer": self.reviewer,
                 "reviewed_at": self.reviewed_at}
@@ -110,6 +116,7 @@ class TestCandidate(_Strict):
                    generation_evidence=row.get("generation_evidence") or {},
                    fingerprint=row.get("fingerprint"),
                    dry_run_status=row.get("dry_run_status") or "PENDING",
+                   dry_run_detail=row.get("dry_run_detail") or {},
                    review_status=row.get("review_status") or "PENDING",
                    reviewer=row.get("reviewer"),
                    reviewed_at=row.get("reviewed_at"),
@@ -168,8 +175,11 @@ def dump_testcase_yaml(tc: TestCase) -> str:
 def utcnow() -> str:
     """行时间戳（与 `agents/storage.py::_now` **同格式**）。
 
-    格式一致是硬要求：`created_at` 会进 `ORDER BY created_at DESC` 的排序，
-    两处格式不同会让「同一次生成」的行排到别处。本函数是 candidates 侧的
-    时间源，store 侧仍是 `agents/storage.py::_now`——两处都产出同一形状。
+    ⚠️ **当前零生产调用方**（review_p3_task34 P3-2 实锤）：时间源唯一是
+    `agents/storage.py::_now`（行时间戳归 DB 拥有，调用方不塞——见
+    `to_store_dict` 的注释）。本函数留着是给 Task 3.5 的 ACCEPT 落盘用
+    （那时要在 candidates 侧给 `reviewed_at` 打戳），**不是**第二份时间源：
+    格式一致是硬要求（`created_at` 进 `ORDER BY created_at DESC`，两处格式
+    不同会让「同一次生成」的行排到别处），所以它与 `_now` 必须逐字同形。
     """
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")

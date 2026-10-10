@@ -49,12 +49,22 @@ F5 的落点是「Candidate Test 就是 P1 TestCase，走同一套校验」。�
 - 有观测，且其中**有一条**落在 `to_screen` → `consistent`（放行）；
 - 有观测，且**没有一条**落在 `to_screen` → **`contradicted`（拒绝）**。
 
+**多条转移时的优先级（review_p3_task34 P1-1 修订）**：一条候选通常声明多条
+转移，结论按 **`contradicted`（任一）> `unknown`（任一，且无矛盾）> `consistent`
+（全部有观测）** 取。**先找矛盾、再谈未知**——矛盾是「图说这条路走不到那儿」
+的硬结论，不该被同一候选里另一条**没被采样过**的转移稀释。初版按
+`sorted(declared)` 逐条短路（遇零观测即 `return unknown`），于是结论取决于
+**字典序**：零观测的转移排在前面就掩蔽了后面的已知矛盾 → 漏放。**这是漏放
+方向，下面那条「推论」当时只登记了误拒方向。**
+
 ⚠️ 推论（一并登记）：这是「与**已知观测**矛盾」，**不是**「与真值矛盾」。
 `to_screen` 拼错、或 App 真的多了一条图里没有的路径，都会落在 `contradicted`
 里——**误拒是可能的**。代价可接受，因为拒绝**落在留痕表**里
 （`test_candidate_rejections`，带 `reason` + `detail`），人工看得见、能翻案；
 而漏放（把矛盾当 unknown 放行）会把错误推给 Dry Run，那里的代价是一次设备
-执行——两者都不是静默的，但**前者更便宜且不烧设备**。
+执行——两者都不是静默的，但**前者更便宜且不烧设备**。**误拒方向已登记，
+漏放方向由 P1-1 修订关掉**：现在只有「**全部**转移都无矛盾」才会因 unknown
+放行，任一已知矛盾都拦得住。
 
 H18/F13：本模块**纯函数、离设备离网络**（没有 import `cli` / `executor` /
 `session` / `sqlite3`）。
@@ -180,27 +190,54 @@ def validate_semantic(tc: TestCase, *, graph: RuntimeGraph) -> SemanticVerdict:
     for t in graph.transitions:
         observed.setdefault((t.from_screen, t.trigger), set()).add(t.to_screen)
 
+    # ⚠️ **必须扫全量，不许在第一条转移上短路**（review_p3_task34 P1-1 实锤）。
+    # 逐条「遇到零观测就 `return unknown`」的写法让「有没有矛盾」取决于
+    # `sorted(declared)` 的**字典序**：一条候选只要**任意**一条零观测转移排在
+    # 已知矛盾转移之前，矛盾就被掩蔽 → 落进 `unknown`（放行）→ 推给 Dry Run
+    # 烧设备。真语料 20 例里 13 例有声明转移，其 sorted-first **全是
+    # `HomeView` 打头**，即真实形态天然命中这条短路。
+    #
+    # 正确的次序是**先找矛盾，再谈未知**：矛盾是「图说这条路走不到那儿」的
+    # 硬结论，不该被同一候选里另一条**没被采样过**的转移稀释。三条优先级：
+    #   contradicted（任一） > unknown（任一，且无矛盾） > consistent（全部有观测）
+    unknown: list[tuple[str, str, str]] = []
+    contradictions: list[tuple[tuple[str, str, str], tuple[str, ...]]] = []
     for (from_screen, to_screen, trigger) in sorted(declared):
         landings = observed.get((from_screen, trigger))
         if not landings:
-            return SemanticVerdict(
-                status=SEMANTIC_UNKNOWN,
-                reason=(f"图对 ({from_screen}, {trigger!r}) 零观测"
-                        f"——新路径/新元素，放行交给 Dry Run 验证"),
-                observed=())
-        if to_screen not in landings:
-            listed = tuple(sorted(
-                f"{from_screen}->{s}@{trigger}" for s in landings))
-            return SemanticVerdict(
-                status=SEMANTIC_CONTRADICTED,
-                reason=(f"候选声明 {from_screen}->{to_screen}@{trigger}，"
-                        f"但图里同一 (from, trigger) 的实测落点是 "
-                        f"{sorted(landings)}——结构性矛盾"),
-                observed=listed)
+            unknown.append((from_screen, to_screen, trigger))
+        elif to_screen not in landings:
+            contradictions.append((
+                (from_screen, to_screen, trigger),
+                tuple(sorted(f"{from_screen}->{s}@{trigger}" for s in landings))))
+
+    if contradictions:
+        # 全部矛盾都列出来（不是只报第一条）——人工一次看全，不必来回翻案。
+        listed = tuple(o for _, obs in contradictions for o in obs)
+        detail = "；".join(
+            f"候选声明 {f}->{t}@{g}，但图里同一 (from, trigger) 的实测落点是 "
+            f"{list(obs)}" for (f, t, g), obs in contradictions)
+        return SemanticVerdict(
+            status=SEMANTIC_CONTRADICTED,
+            reason=f"{detail}——结构性矛盾",
+            observed=listed)
+
+    if unknown:
+        f, _t, g = unknown[0]
+        more = f"（另有 {len(unknown) - 1} 条转移同样零观测）" if len(unknown) > 1 \
+            else ""
+        return SemanticVerdict(
+            status=SEMANTIC_UNKNOWN,
+            reason=(f"图对 ({f}, {g!r}) 零观测{more}"
+                    f"——新路径/新元素，放行交给 Dry Run 验证"),
+            observed=())
+
     return SemanticVerdict(status=SEMANTIC_CONSISTENT,
                            reason="候选声明的转移全部有已知观测支持")
 
 
-# `max_severity` 在调用方（生成器）用来判「有没有 ERROR」；这里 re-export 是
-# 为了让 `generator/generator.py` 不必同时 import 两个模块（单一校验入口）。
+# `max_severity` 在这里 re-export，让「schema 校验的入口」只有本模块一处——
+# 未来调用方（Task 3.5 的 CLI）若要「只看最严重级别」不必再 import
+# `testcase.lint`。⚠️ 当前生成器**用的是 `schema_errors`**（它要拿到具体的
+# ERROR 列表写进拒绝留痕，不是只要一个级别），故本 re-export 目前零消费。
 __all__ += ["max_severity"]

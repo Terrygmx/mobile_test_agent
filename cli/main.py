@@ -596,10 +596,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     """
     import uuid
 
-    from cli.pipeline import PipelineDeps, SessionPipeline
+    from cli.pipeline import SessionPipeline
     from executor.guard import EnvKind
-    from runner.lifecycle import Lifecycle
-    from runner.runner import StepRunner
     from tracer.storage import TraceStore
 
     # P2-2（review_m4_task43）：--env-kind 真实接线（10.1）。production

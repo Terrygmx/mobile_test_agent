@@ -60,8 +60,10 @@ class DryRunResult:
     """一次 Dry Run 的结论（`dry_run_status` 的取值域）。
 
     `detail` 装 `TestcaseResult` 的关键字段（`failure_type` / `attempt` /
-    `cleanup_status`）——**不装整个对象**：这个结果会被写进
-    `test_candidates.dry_run_status` 旁边的审计面，必须是可 JSON 化的值。
+    `cleanup_status`）——**不装整个对象**：它落
+    `test_candidates.dry_run_detail_json`（review_p3_task34 P2-2 补的列），
+    必须是可 JSON 化的值。只落一个 `dry_run_status='FAIL'` 而不落 `detail`
+    是「看起来正常」：人工看到 FAIL 却不知道**为什么**失败。
     """
 
     status: str
