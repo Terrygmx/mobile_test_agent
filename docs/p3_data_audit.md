@@ -3362,3 +3362,67 @@ git 2.54 实测，其他版本可能不同。
 
 
 
+
+## Task 4.3 完成记录（P3-16 探索预算，2026-10-11）
+
+### 交付
+
+- `explorer/state.py::ExplorationBudget`：四维预算的**不可变值对象**
+  （`max_steps` / `max_duration_seconds` / `max_llm_calls` /
+  `max_repeated_state`）。`from_policy()` 取 `agents/policy_config.py` 的
+  `EXPLORATION_BUDGET` 真值源；`from_file()` 是 `--budget <file>` 的读取口，
+  **校验复用 `ExplorationPolicy` 同一模型**（未知键 / 错型 / 负值 fail-loud
+  ——不写第二份校验）。`DEFAULT_LOOP_WINDOW = 10` 在此**单点**定义
+  （设计 7.3 的 window 不在四维预算里，policy 也没有这个键）。
+- `explorer/agent.py` 接线：新增 `STEPS_BUDGET_EXCEEDED` /
+  `DURATION_BUDGET_EXCEEDED` / `LLM_BUDGET_EXCEEDED` 三个终态；
+  `_budget_exceeded(steps, t0)` 在**每轮顶部**检查，超限即停 + 留痕
+  （trace `result=<终态>`，含已用步数 / 耗时 / LLM 次数）；`budget` 与
+  `llm_budget` 构造参数带**类型断言**；`self.llm_budget` 公开（decider
+  扣配额、报告读用量）。
+- `tests/unit/test_exploration_budget.py` **10 例**（值对象 4 + 主循环消费 6）。
+
+### 决策记录
+
+1. **LLM 预算底层就是 P1 `LLMBudget`（F4）**：不新写计数器。`budget` 给了
+   而 `llm_budget` 没给 → 从 `max_llm_calls` 造一个 P1 实例；显式注入则
+   **类型断言**（`isinstance(llm_budget, LLMBudget)`，注入错对象构造上不可达）。
+2. **`max_repeated_state` 不设第四种 `*_BUDGET_EXCEEDED`**（口径登记）：
+   四维之一**经 loop detector 执行**，终态是矩阵 #12 的 `LOOP_DETECTED`。
+   `budget` 带出这一维时自动补 `loop_window = DEFAULT_LOOP_WINDOW`——
+   调用方不必同时知道两个参数。测试
+   `test_repeated_state_dimension_runs_through_loop_detector` 钉死这条口径。
+3. **超限即停，不自动放宽重试**（F11）：`steps` 停在**恰好** `max` 处，
+   不多跑一步（`test_steps_budget_exceeded_stops_exactly_at_max` 断言
+   `steps == 2 and tap_calls == 2`）。
+4. **检查点在每轮顶部**：duration 维度因此能在**第一个动作之前**生效
+   （`max_duration_seconds=0` → 0 步、0 次设备动作）。
+
+### 过程抓到的两处测试自身的问题
+
+1. `_budget(**overrides)` 里显式传了四个字段又 `**overrides` ——
+   `_budget(max_steps=2)` 直接 `TypeError: got multiple values`。改成
+   `values.update(overrides)` 后传。
+2. `test_budget_with_generous_limits_does_not_short_circuit` 初版用默认
+   `max_repeated_state=3`，而它的 decider 反复点**同一个不改变状态**的按钮
+   —— 于是第 2 步就被 loop detector 判 `LOOP_DETECTED`。**这不是预算层的
+   问题，是 F11 第四维在正常工作**：把该用例的 `max_repeated_state` 调高，
+   让「宽裕预算不短路」这条断言只覆盖 steps/duration/llm 三维，并在注释里
+   指向 `test_repeated_state_dimension_runs_through_loop_detector`。
+
+### 实测
+
+- 全量 pytest **1905 passed / 0 failed**（1895 + 10）。
+- A/B 探针（三轮，逐维）：
+  - `steps >= max_steps` → `>`：**1 red**（steps 用例，`STEPS_BUDGET_EXCEEDED`
+    变 `LOOP_DETECTED`）；
+  - duration 分支 `elapsed >= max_duration_seconds` → `>`：**0 red**
+    ——`max_duration_seconds=0` 时 elapsed 恒 `> 0`，边界两侧不可观测。
+    **登记为测试强度缺口**：这一维只钉住了「0 就停」，没钉住「恰好到点就停」。
+    改用「维度串台」mutant（duration 分支读 `max_steps`）→ **1 red**，
+    证明该用例确实在检查 duration 分支本体。
+  - `calls_used >= cap` → `>`：**1 red**（llm 用例）。
+  - 三轮均还原到 md5 `5f38e0d8c2fa5dc22b7013cdc9fea3c5`，tracked diff 只剩
+    本任务的在途改动，`__pycache__` 已清。
+- 口径核对：`out/pt.sh` 里 `-q` 与 `pytest.ini` 的 `addopts = -q` 叠加会把
+  汇总行吃掉（只留进度点）——**读通过数要去掉包装脚本那层 `-q`**。

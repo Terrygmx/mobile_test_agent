@@ -31,6 +31,7 @@ Verify（post-observe：新 State？指纹变化？→ novelty + visited）
 from __future__ import annotations
 
 import enum
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -38,7 +39,9 @@ from agents.models import AgentState
 from agents.tools import AgentToolkit
 from explorer.loop_detector import is_loop
 from explorer.policy import EXECUTION_TOOLS, action_kwargs, pre_judge
+from explorer.state import DEFAULT_LOOP_WINDOW, ExplorationBudget
 from graph.models import RuntimeGraph
+from llm.budget import LLMBudget
 
 __all__ = ["Decider", "ExplorationError", "ExplorationOutcome",
            "ExplorationResult", "Explorer", "StopDecision", "VisitLog"]
@@ -55,6 +58,12 @@ class ExplorationOutcome(str, enum.Enum):
     COMPLETED = "COMPLETED"
     FRONTIER_EMPTY = "FRONTIER_EMPTY"
     LOOP_DETECTED = "LOOP_DETECTED"
+    STEPS_BUDGET_EXCEEDED = "STEPS_BUDGET_EXCEEDED"
+    DURATION_BUDGET_EXCEEDED = "DURATION_BUDGET_EXCEEDED"
+    LLM_BUDGET_EXCEEDED = "LLM_BUDGET_EXCEEDED"
+    # 口径登记（Task 4.3）：四维里的 max_repeated_state 不设第四种
+    # *_BUDGET_EXCEEDED——它经 loop detector 执行，终态是矩阵 #12 的
+    # LOOP_DETECTED（见 explorer/state.py 的超限语义表）。
 
 
 @dataclass(frozen=True)
@@ -116,7 +125,9 @@ class Explorer:
     def __init__(self, *, toolkit: AgentToolkit, graph: RuntimeGraph,
                  agent_db, task_id: str, decider: Decider, repository,
                  build: str = "local", loop_window: int | None = None,
-                 max_repeated_state: int | None = None) -> None:
+                 max_repeated_state: int | None = None,
+                 budget: ExplorationBudget | None = None,
+                 llm_budget: LLMBudget | None = None) -> None:
         if not isinstance(toolkit, AgentToolkit):
             raise TypeError(
                 "Explorer 只经 AgentToolkit 执行动作（F12：唯一执行通路）——"
@@ -127,6 +138,21 @@ class Explorer:
                 "没有留痕通路的探索不允许启动")
         if not callable(decider):
             raise TypeError("decider 必须可调用（Decider 契约见模块 docstring）")
+        if budget is not None and not isinstance(budget, ExplorationBudget):
+            raise TypeError(
+                "budget 必须是 ExplorationBudget（explorer.state）——"
+                "散装 dict 在构造上不可达（四维预算的类型就是它的契约）")
+        if llm_budget is not None and not isinstance(llm_budget, LLMBudget):
+            raise TypeError(
+                "llm_budget 必须就是 P1 LLMBudget 实例（F4：不新写计数器）——"
+                f"got {type(llm_budget).__name__}")
+        # budget 带出 repeated-state 维：loop 参数没显式给时从预算取
+        # （窗口初版取 DEFAULT_LOOP_WINDOW，explorer/state.py 单点定义）
+        if budget is not None:
+            if loop_window is None:
+                loop_window = DEFAULT_LOOP_WINDOW
+            if max_repeated_state is None:
+                max_repeated_state = budget.max_repeated_state
         if (loop_window is None) != (max_repeated_state is None):
             raise ValueError(
                 "loop_window 与 max_repeated_state 必须成对给出（Task 4.4）——"
@@ -140,6 +166,11 @@ class Explorer:
         self._build = build
         self._loop_window = loop_window
         self._max_repeated_state = max_repeated_state
+        self._budget = budget
+        if llm_budget is None and budget is not None:
+            llm_budget = LLMBudget(max_calls_per_run=budget.max_llm_calls)
+        # 公开属性：decider 拿它扣 LLM 配额（try_acquire），报告读用量
+        self.llm_budget = llm_budget
 
     # --- 主循环 -------------------------------------------------------------
 
@@ -149,6 +180,7 @@ class Explorer:
             raise ValueError(f"no such agent task: {self._task_id}")
         goal = task.goal
         self._db.update_task_state(self._task_id, AgentState.EXECUTING)
+        t0 = time.monotonic()
         visited: list[str] = []          # **去重**视图（novelty / frontier 消费）
         arrivals: list[str] = []         # **到达序列**（含重复）——loop 窗口的数据；
                                          # 两个列表必须分开：去重会让每个指纹永远只
@@ -158,6 +190,23 @@ class Explorer:
         outcome: ExplorationOutcome | None = None
         steps = 0
         while True:
+            # F11：每轮顶部查预算，超限即 *_BUDGET_EXCEEDED 停止 + 留痕，
+            # 不自动放宽重试（repeated_state 维经 loop detector，见下）。
+            stop = self._budget_exceeded(steps, t0)
+            if stop is not None:
+                outcome, reason = stop
+                self._db.append_trace(
+                    self._task_id, step_index=steps,
+                    state=AgentState.OBSERVING, goal=goal,
+                    observation={
+                        "steps": steps,
+                        "elapsed_seconds": round(time.monotonic() - t0, 3),
+                        "llm_calls_used": (self.llm_budget.calls_used
+                                           if self.llm_budget else 0),
+                    },
+                    decision={"reason": reason},
+                    result=outcome.value)
+                break
             observation = self._observe()
             fingerprint = observation.get("fingerprint")
             screen = observation.get("screen")
@@ -273,6 +322,30 @@ class Explorer:
             visited_fingerprints=tuple(visited))
 
     # --- 内部 ---------------------------------------------------------------
+
+    def _budget_exceeded(self, steps: int, t0: float
+                         ) -> tuple[ExplorationOutcome, str] | None:
+        """F11 的三维检查（steps / duration / llm；repeated_state 归
+        loop detector）。返回 (终态, 原因) 或 None。"""
+        budget = self._budget
+        if budget is None:
+            return None
+        if steps >= budget.max_steps:
+            return (ExplorationOutcome.STEPS_BUDGET_EXCEEDED,
+                    f"已执行 {steps} 步 ≥ max_steps={budget.max_steps}")
+        elapsed = time.monotonic() - t0
+        if elapsed >= budget.max_duration_seconds:
+            return (ExplorationOutcome.DURATION_BUDGET_EXCEEDED,
+                    f"耗时 {elapsed:.1f}s ≥ "
+                    f"max_duration_seconds={budget.max_duration_seconds}")
+        if self.llm_budget is not None:
+            cap = (budget.max_llm_calls if budget is not None
+                   else self.llm_budget.max_calls_per_run)
+            if self.llm_budget.calls_used >= cap:
+                return (ExplorationOutcome.LLM_BUDGET_EXCEEDED,
+                        f"LLM 调用 {self.llm_budget.calls_used} 次 ≥ "
+                        f"上限 {cap}（LLMBudget，F4）")
+        return None
 
     def _observe(self) -> dict:
         """一步观测（get_current_screen：屏判定 + 指纹，F8 同一套哈希）。
