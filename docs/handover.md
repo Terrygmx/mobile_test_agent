@@ -195,9 +195,10 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
 
 ## 9. 当前状态快照（**2026-10-11**，以实测为准）
 
-- **分支 / HEAD**：`P4-1011` / **`checkpoint-p3-m5`** = `c7b9185`（M4/M5 均已收口；tag 不可动）
-- **全量基线**：**2148 passed / 0 failed**
-- **最新 tag**：`checkpoint-p3-m5`（**P3 M5 收口**；上一个 `checkpoint-p3-m4` = `2fb0215`）
+- **分支 / HEAD**：`P4-1011` / **`checkpoint-p3-m6`** = `f63b381`（**M1–M6 全部收口**；tag 不可动）
+- **全量基线**：**2207 passed / 0 failed**
+- **最新 tag**：`checkpoint-p3-m6` = `f63b381`（**P3 收口**；里程碑 tag `v0.3-p3-complete`；
+  上一个 `checkpoint-p3-m5` = `233ab1e`）
 - **Gate 状态**：M1 ✅（`checkpoint-p3-m1`）· M2 ✅（`phase0/verify_p3_m2.py` exit 0，8/8 PASS）
   · **M3 ✅**（`phase0/verify_p3_m3.py` exit 0，**11/11 PASS**，`out/p3_m3_gate/summary.json`
   verdict=PASS；G8 内含全量 1866 passed）
@@ -284,14 +285,74 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
     （漂移 run → 规则命中 → 真机复现 3 次 → **11 分过阈值 10** →
     `AUTOMATION_DEFECT` → `HUMAN_REVIEW` → 人工 accept → `CONFIRMED` +
     Evidence Bundle；G10 内含全量 **2148 passed**）。
-- **下一步**：**M6 全部超出本批范围**（agent 状态机 / Subagent 基类 / manager /
-  benchmark / 闭环演示）。M4+M5 均已收口，plan 的「M6 收口必须在两者全过之后」
-  这一前置已满足。
-  ⚠️ **开工前置（M6）**：① `reproduce` 的 `runner` 回调目前是 `_run_reproduction`
-  在 `cli/main.py` 里**手工注入**的（toolkit 通路在 M6 前是 `NOT_WIRED`）——
-  Subagent 基类落地后应改走 `AgentToolkit.run_testcase`；② testcase 的
-  `postcondition` 声明要并进 `StepProbe`；③ 翻案通道仍**显性登记不做**
-  （沿 3.5 拍板）。
-- **待拍板的三项**（沿用）：`screen_id` 过滤的数据源缺口（`docs/p3_data_audit.md` Task 2.2）、
-  「坏引用用例」的处置口径（同文件 Task 2.3）、`priority_score` / Evidence Score 的
-  权重校准所需数据量（`docs/phase3-plan.md` §2 open questions）
+  · **M6 ✅**（`phase0/verify_p3_final.py` exit 0，**33/33 PASS**，**device_half=PASS**，
+  `out/p3_final_gate/summary.json` verdict=PASS，78.2s；G11 内含全量 **2207 passed**。
+  四段：OFF（F7 production 拒绝 + Benchmark 三段闭环 + 矩阵 #18 manager 级）/
+  CHAIN（plan→generate→人工 accept→run --fake-driver）/
+  DEV（真机 explore `LOOP_DETECTED steps=3` → 漂移注入 → run 失败 → 真机复现 3 次
+  → **11 分过阈值 10** → `AUTOMATION_DEFECT` → 人工 accept → `CONFIRMED` +
+  Evidence Bundle）/ 矩阵 #17 资产零改动）。逐条对照设计 §1.2 的留证见
+  `docs/p3_demo_record.md`。
+- **已完成（M6，2026-10-11，Task 6.1–6.6 / P3-26…P3-31 收口）**：Subagent +
+  自主回归闭环 + Benchmark
+  - 6.1 `agents/state.py`：`AgentState` 九态 × `AgentEvent` 九事件的**转换表**
+    （`transition` / `successors` 纯函数，非法转换 fail-loud）+ `should_escalate`
+    （四触发 + 优先级 LLM_POLICY > CRITICAL_ACTION > GUARD_BLOCK_STREAK >
+    LLM_INVALID_STREAK > BUDGET_EXHAUSTED）+ `escalation_context` 人工接手包。
+    **`update_task_state` 强制走表**（判据复用同一张表，不写第二份）。
+    表是这样选的：让既有三处写点（`Explorer.run` 末尾、`cmd_explore` 的两条
+    IDLE→ESCALATED 错误路径、`test_agent_store` 的 IDLE→PLANNING）**零改动**
+    即合法。ESCALATED 是**终态**（无出边）＝「不重试不放宽」。
+  - 6.2 `agents/base.py::Subagent`：构造参数只有 agent_db / task_id / toolkit /
+    llm_budget——**没有 executor / driver / device_session 形参**（F12 在构造层
+    不可达）。toolkit 与 llm_budget 均有类型断言。**口径**：三个 Subagent 共用
+    **同一个 Executor + Guard**（依赖对象同一），但 toolkit **实例**各一个
+    （task_id 烤在 toolkit 里，agent_trace 才能按任务归因）。
+  - 6.3 `agents/context.py::build_agent_context`：四字段全部经 `KnowledgeSources`
+    （F3）。⚠️ **两处签名偏离登记**：设计的 `(task, knowledge)` 两参不可实现
+    （graph_query 要 app_id、experience_lookup 要 screen/target）→ 显式 kwargs；
+    `relevant_history` **不做屏级过滤**（trace 的 steps 表不记 screen，而
+    `trace_history` 对 `screen_id` 是 fail-loud 的）——**用户拍板登记偏离**，
+    屏级收窄等数据源补齐，**保持登记不闭**。
+  - 6.4 `subagents/`（**中立包**）+ `agents/manager.py::TestManager`：三个薄封装
+    委托 M2/M4/M5 的本体；`assess` 是 `should_escalate` 的唯一消费点；升级=
+    停止并交包，已 ESCALATED 的任务再跑直接 `RuntimeError`。
+    ⚠️ **落点偏离**：plan 写 `agents/planner_agent.py`，本仓两条 import 级守卫把
+    两个方向都封死（`agents/**` 不 import `planner.*`；`planner/**` 不 import
+    `agents`），薄封装同时要 import 两边 → 落 `subagents/`。**让结构说话，不给
+    守卫开后门**。
+  - 6.5 `report/agent_metrics.py`（§13.1 指标，分母口径逐条登记：`SCHEMA_INVALID`
+    不进重复率分母 / 复现率分母是 `reproducible IS NOT NULL`）+ `agents/benchmark.py`
+    （§13.2 固定 7 类 case + `compare_benchmarks` → `mta agent benchmark
+    run|compare`，回归即 **exit 1 + AGENT_REGRESSION** 供 CI）+ 迁移
+    **007_benchmark_runs.sql**（plan 写 005，005/006 已被占用——偏离登记）。
+    `Selection Precision` / `Diagnosis Accuracy` 依赖标注真值，**collect 不产出**。
+  - 6.6 `phase0/verify_p3_final.py` + `docs/p3_demo_record.md`：**33/33 PASS**。
+    **Gate 自己被实测推翻六处**（见 `docs/p3_data_audit.md` §6.6.2），其中两处是
+    M4 那次 `FRONTIER_EMPTY steps=0` 假绿的**同款复发**：`max_llm_calls=0` 让
+    第 0 步熔断而 `explore` 仍 exit 0；收紧后又暴露「冷启动停在 LoginView 而
+    声明面只播种了 HomeView→ProfileView」→ frontier 从 LoginView 出发是空的。
+    判据改成「**steps ≥ 1 且终态在设计 §7.2/7.3 词表内**（唯独排除
+    `LLM_BUDGET_EXCEEDED`——那是配置错，不是有界停止）」。
+  - ⚠️ **本轮未能先红后绿**：Bash 分类器故障期间 pytest 完全跑不起来，
+    M6 全部代码写完后才第一次执行。补做 **A/B 变异探针 19/19 如实变红**
+    （改坏一个语义 → 对应测试必须当场红 → 还原 → md5 校验）；其中 3 条第一版
+    **没变红**，据此补了两处断言拆分/补钉（`docs/p3_data_audit.md` §6.6.1 的
+    E1/E3）。全量回归只告诉你「没红」，A/B 探针才告诉你「断言够不够」。
+- **下一步**：**P3 已全部收口**（M1–M6，`checkpoint-p3-m6` = `f63b381`，
+  里程碑 tag `v0.3-p3-complete`）。设计 §1.2 的六条成功标准逐条留证见
+  `docs/p3_demo_record.md`，其中**明写未覆盖项**（LLM 排序质量、Benchmark 的
+  真实统计意义）。
+  遗留的**显性不做 / 未闭项**：① 翻案通道（沿 3.5 拍板）；② `screen_id` 的
+  trace 数据源缺口（用户拍板登记偏离）；③ 模型路由（设计 §9.4 移出核心里程碑）；
+  ④ Evidence Bundle 的外部系统对接（沿 M5 open question #1）；
+  ⑤ `reproduce` 的 `runner` 回调仍是 `cli/main.py` 里手工注入，应改走
+  `AgentToolkit.run_testcase`；⑥ testcase 的 `postcondition` 声明要并进
+  `StepProbe`。
+- **待拍板的三项**（沿用，均**未闭**）：① `screen_id` 过滤的数据源缺口
+  （`docs/p3_data_audit.md` Task 2.2）——M6 Task 6.3 已就此**登记偏离**并保持
+  登记（用户拍板 2026-10-11）：`relevant_history` 改用 app_build + limit 可用键，
+  屏级收窄等 `steps` 表补齐屏列；② 「坏引用用例」的处置口径（同文件 Task 2.3）；
+  ③ `priority_score` / Evidence Score 的权重校准所需数据量
+  （`docs/phase3-plan.md` §2 open questions；M6 新增的两个初值
+  `guard_blocks_before_escalate=3` / `llm_invalid_before_escalate=2` 同属此类）
