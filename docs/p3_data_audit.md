@@ -3318,4 +3318,47 @@ git 2.54 实测，其他版本可能不同。
 - A/B 探针两轮：`_UNEXPLORED_SCORE` 0.5 → 0 red（双重加固，见决策 2）；
   0.1 → 1 red；还原后 10 passed + tracked 文件 diff 干净。
 
+---
+
+## Task 4.4 完成记录（P3-17 Loop Detection，2026-10-11）
+
+### 交付
+
+- `explorer/loop_detector.py::is_loop`：窗口内重复指纹计数的**纯计数函数**
+  ——不做哈希、不做相似度（F8 红线），指纹来自 P2 `screen_fingerprint`。
+- `explorer/agent.py` 接线：`loop_window` / `max_repeated_state` 构造参数
+  （**必须成对**给出，单给一半 fail-loud）+ 终态 `LOOP_DETECTED` + 停止步
+  留痕（trace `result="LOOP_DETECTED"`，审计能回答「为什么停」）。
+- `tests/unit/test_loop_detector.py` **9 例**（纯函数 6 + 接线 3）。
+
+### 决策记录
+
+1. **None 指纹的两层防线**（open question #3 默认口径）：① 主循环的到达
+   序列**不记录** None；② `is_loop` 对 None/空串直接 False。重复的 None
+   是解析器的问题不是 App 在循环——把 None 计入会让「解析坏了」伪装成
+   「探索完成了」。
+2. **参数默认 None = 不启用**（偏离登记：plan 4.4 只列纯函数；矩阵 #12
+   需要主循环消费它）——4.3 的 ExplorationBudget 统一接 policy 默认值，
+   这里不造第二份默认值（同一事实两处字面量必漂移）。
+3. **窗口/阈值非法 fail-loud**：静默的「不算 loop」会让人以为检测在跑、
+   其实从没生效。
+
+### 过程抓到的真 bug（卡死 → 15s 诊断脚本定位）
+
+初版把「去重的 visited」直接喂给 `is_loop`——**去重让每个指纹永远只出现
+一次，出现计数永远到不了阈值**，toggle 场景无限循环（pytest 120s 超时）。
+用打桩诊断脚本（SIGALRM 15s + 打印每次 `is_loop` 的输入输出）实锤后修复：
+**去重视图（novelty/frontier）与到达序列（loop 窗口）分成两个列表**——
+`arrivals` 含重复逐次追加，`visited` 保持去重。两条数据混在一个列表里，
+「见过哪些」和「到过几次」必有一个撒谎。
+
+### 实测
+
+- 全量 pytest **1895 passed / 0 failed**（1886 + 9）。
+- A/B 探针：窗口切片改头部（`[:-window]`）→ **3 red**（ping-pong 识别 /
+  窗口语义 / 接线停止步数 2→8），还原后 9 passed + tracked diff 干净。
+- 过程教训：探针选型避开「检测永不触发」类变异（会挂死而非快红）——
+  **先想清楚 mutant 的失败形态再动手**。
+
+
 

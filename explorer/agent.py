@@ -36,6 +36,7 @@ from typing import Callable
 
 from agents.models import AgentState
 from agents.tools import AgentToolkit
+from explorer.loop_detector import is_loop
 from explorer.policy import EXECUTION_TOOLS, action_kwargs, pre_judge
 from graph.models import RuntimeGraph
 
@@ -53,6 +54,7 @@ class ExplorationOutcome(str, enum.Enum):
 
     COMPLETED = "COMPLETED"
     FRONTIER_EMPTY = "FRONTIER_EMPTY"
+    LOOP_DETECTED = "LOOP_DETECTED"
 
 
 @dataclass(frozen=True)
@@ -113,7 +115,8 @@ class Explorer:
 
     def __init__(self, *, toolkit: AgentToolkit, graph: RuntimeGraph,
                  agent_db, task_id: str, decider: Decider, repository,
-                 build: str = "local") -> None:
+                 build: str = "local", loop_window: int | None = None,
+                 max_repeated_state: int | None = None) -> None:
         if not isinstance(toolkit, AgentToolkit):
             raise TypeError(
                 "Explorer 只经 AgentToolkit 执行动作（F12：唯一执行通路）——"
@@ -124,6 +127,10 @@ class Explorer:
                 "没有留痕通路的探索不允许启动")
         if not callable(decider):
             raise TypeError("decider 必须可调用（Decider 契约见模块 docstring）")
+        if (loop_window is None) != (max_repeated_state is None):
+            raise ValueError(
+                "loop_window 与 max_repeated_state 必须成对给出（Task 4.4）——"
+                "只给一个说明配置写漏了一半，不静默当「未启用」")
         self._toolkit = toolkit
         self._graph = graph
         self._db = agent_db
@@ -131,6 +138,8 @@ class Explorer:
         self._decider = decider
         self._repository = repository
         self._build = build
+        self._loop_window = loop_window
+        self._max_repeated_state = max_repeated_state
 
     # --- 主循环 -------------------------------------------------------------
 
@@ -140,7 +149,11 @@ class Explorer:
             raise ValueError(f"no such agent task: {self._task_id}")
         goal = task.goal
         self._db.update_task_state(self._task_id, AgentState.EXECUTING)
-        visited: list[str] = []
+        visited: list[str] = []          # **去重**视图（novelty / frontier 消费）
+        arrivals: list[str] = []         # **到达序列**（含重复）——loop 窗口的数据；
+                                         # 两个列表必须分开：去重会让每个指纹永远只
+                                         # 出现一次，is_loop 的出现计数永远到不了阈值
+                                         # （2026-10-11 实测卡死的真 bug）
         visited_screens: list[str] = []
         outcome: ExplorationOutcome | None = None
         steps = 0
@@ -148,10 +161,32 @@ class Explorer:
             observation = self._observe()
             fingerprint = observation.get("fingerprint")
             screen = observation.get("screen")
-            if fingerprint and fingerprint not in visited:
-                visited.append(fingerprint)
+            if fingerprint:
+                arrivals.append(fingerprint)
+                if fingerprint not in visited:
+                    visited.append(fingerprint)
             if screen and screen not in visited_screens:
                 visited_screens.append(screen)
+
+            if self._loop_window is not None and is_loop(
+                    arrivals, fingerprint, window=self._loop_window,
+                    max_repeat=self._max_repeated_state):
+                # 矩阵 #12：重复状态到阈值 → LOOP_DETECTED 正常停止，不是错误。
+                # 停下的这一步留痕（审计要能回答「为什么停」）；None 指纹
+                # 不会触发（is_loop 的口径——解析坏 ≠ App 在循环）。
+                self._db.append_trace(
+                    self._task_id, step_index=steps,
+                    state=AgentState.OBSERVING, goal=goal,
+                    observation={"screen": screen, "fingerprint": fingerprint},
+                    decision={"guard_result": "LOOP_DETECTED",
+                              "reason": (
+                                  f"指纹 {fingerprint!r} 在最近 "
+                                  f"{self._loop_window} 步内出现 ≥ "
+                                  f"{self._max_repeated_state} 次"
+                                  f"（max_repeated_state）") },
+                    result="LOOP_DETECTED")
+                outcome = ExplorationOutcome.LOOP_DETECTED
+                break
             memory = VisitLog(fingerprints=tuple(visited),
                               screens=tuple(visited_screens))
 
