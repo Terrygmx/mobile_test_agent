@@ -98,8 +98,8 @@ def test_migrations_are_idempotent(tmp_path):
     from agents.storage import AGENT_SCHEMA_VERSION
     # 版本串从**链尾派生**（`latest_version`），故加脚本后这里跟着变——
     # 这正是它该有的行为（加脚本忘改常量也不会撒谎）。
-    # 004（M3 Task 3.5）→ 005（M5 Task 5.1）→ 006（M4 Task 4.5，未落地）
-    assert AGENT_SCHEMA_VERSION == "005_bug_candidates"
+    # 004（M3 Task 3.5）→ 005（M5 Task 5.1）→ 006（M4 Task 4.5，已落地）
+    assert AGENT_SCHEMA_VERSION == "006_discovery_events"
 
 
 def test_002_alone_leaves_the_db_readable(tmp_path):

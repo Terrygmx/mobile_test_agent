@@ -3628,3 +3628,102 @@ git 2.54 实测，其他版本可能不同。
   （a:0.1 b:0.5 c:0.9 期望次序 a,b,c；再翻成 a:0.9 b:0.5 c:0.1 次序不变）
   才真正钉住。**这条对后续所有「排序键不该包含 X」的钉子测试都适用：变异必须
   能让被禁的字段在组内产生与期望序相反的扰动。**
+
+## Task 4.5 完成记录（P3-18 Discovery Event + 启动环境校验，2026-10-11）
+
+### 交付
+
+- `agents/migrations/006_discovery_events.sql`（新）：设计 §11 字段 + `kind` 四类
+  CHECK + `review_status` 三态 CHECK + **新增三列** `reviewer`/`reviewed_at`/
+  `review_note`（F6 审核留痕）+ 两个索引。
+- `candidates/discovery.py`（新）：`DISCOVERY_KINDS` / `DISCOVERY_REVIEW_STATUSES`
+  词表、`DiscoveryEvent` 行模型、`graph_registration(event)` 与
+  `register(graph_store, event, …)` ——后两个是 **F13 纯函数**（图库注入，函数本身
+  不碰文件/设备）。
+- `agents/storage.py`（改）：`save_discovery_event`（只写 `PENDING`，`review_status`
+  **不是形参**）、`get_discovery_event`、`list_discovery_events`、
+  `decide_discovery_event`（唯一写路径）、`_discovery_from_row`。
+- `candidates/review.py`（改）：`_SUPPORTED_KINDS` 扩到 `("test", "discovery")`；
+  `repo_root`/`repository`/`secrets` 改为**可选**（只有 test 分支消费），新增
+  `graph_store` 参数与 `_decide_discovery` 分支 + `_graph_scope`。
+- `graph/models.py`（改）：新增证据常量 `EVIDENCE_DISCOVERY = "discovery"`。
+- `agents/tools.py`（改）：接线 `create_discovery_event`（`NOT_WIRED` 11 → 10）。
+- `explorer/agent.py`（改）：`discovery_enabled` 构造开关（默认关）+ 主循环
+  `_record_discovery` + `_known_screens`。
+- `cli/main.py`（改）：新增 `_check_exploration_env`（sandbox-only + simulator）。
+- 测试：`tests/unit/test_discovery_event.py`（新，30 用例）+ 5 处存量钉子的链尾
+  更新（`test_agent_store` / `test_agent_tools` / `test_bug_store` /
+  `test_candidate_store` / `test_candidate_review`）+ `test_repo_hygiene` 写语句
+  下界 27 → **29**（实测重新数过）。
+
+### 决策记录
+
+1. **迁移编号 006**（plan 写 003）——偏离在 005 时已登记，此处兑现（003/004 已被
+   M3 占用，迁移只许向后追加）。
+2. **发现进 Source 面而不是 Runtime 面**（口径登记，本任务最关键的一条）：设计
+   §7.5 说「纳入 Source/Runtime Graph 的『已知』集合」，字面读像是「两面都行」。
+   取 **source**（声明面）的理由：`runtime` 面的语义是「trace 实际到达过」的
+   **观测记录**（`graph/builder.py` 只认 `wait_screen` / `recovery_observed` 两类
+   证据），而发现事件**没有走过用例**——它只是被探索撞见、被人确认存在。
+   写进 runtime 面会让「观测」与「确认」混成一体，设计 12.2 的 diff
+   （runtime vs source）立刻失去意义（`ADDED` 会变成「探索到了」而不是「用例
+   到了」）。探针 1 实测：把 `SOURCE` 换成 `RUNTIME` → **4 red**。
+   登记条目 `visit_count=0` / `count=0`（发现不是访问，也不是走过）。
+3. **`register` 是「读出 → 合并 → 写回」，不是 `upsert_graph` 一张新图**：
+   `GraphStore.upsert_graph` 按 `(app_id, app_build, source_of)` **整体替换**
+   （P2 的设计：重跑 `graph build` 必须幂等）。直接 upsert 一张只含新条目的图会
+   把该范围里**别处已确认的发现擦掉**——那是静默数据丢失。
+4. **`repo_root`/`repository`/`secrets` 改可选，但必填性没有消失**：它们的消费者
+   只有 test 分支；做成全局必填会逼 discovery 的调用方伪造一堆用不上的参数。
+   按 kind 分流后在 `_validated_testcase` 里显式挡（新加 `if repo_root is None`，
+   否则 `Path(None)` 会以 `TypeError` 漏成 traceback，而 CLI 只接域错误与
+   `RuntimeError`）。新用例 `test_test_kind_accept_still_requires_its_inputs`
+   钉住「改可选 ≠ 变静默」。
+5. **discovery 分支的顺序与 test 分支相反**（改状态 → 登记图）：test 的副作用
+   （git commit）**不可幂等重放**，所以先落盘后改状态；discovery 的副作用
+   （`register`）**幂等**，先改状态才安全。两处顺序不同是**刻意**的，各自的
+   理由写在 `_decide_discovery` 的 docstring 里。⚠️ 但**校验仍全部在改状态之前**
+   （`graph_store is None` 与范围歧义都先抛）——与 test 分支同一条纪律。
+6. **`review_status` 不是 `save_discovery_event` 的形参**（F6；与 `save_candidate` /
+   `save_bug_candidate` 同款）：接受形参会开一条绕过 `decide_candidate` 全部领域
+   校验的旁路。探针 4 实测：加上形参 → **1 red**。
+7. **`_check_exploration_env` 与 `_check_autonomous_env` 并存，不合并**（plan 的
+   「口径必守」）：公共前置只做 production 一票否决、消息写着「sandbox 或
+   staging」（对 plan/generate 准确）；探索要 sandbox-only，**staging 也拒**。
+   两层是**与**的关系，判据集合本就不同。新用例
+   `test_the_two_layers_are_separate_and_both_apply` 钉住分工（本函数**不复制**
+   总开关判据）。探针 3 实测：把 `is not SANDBOX` 换成 `is PRODUCTION` →
+   **2 red**。
+8. **`discovery_enabled` 默认关**：4.1–4.4 的单测探索是构造场景，默认打开会把
+   测试噪声记进人工审核队列。`mta explore`（Task 4.6）显式打开。
+9. **`event_id` 由调用方给（explorer 用 `stable_hash`，F8 同一原语）**：工具层
+   不生成随机 id——它必须确定性（同一输入同一输出），否则「重跑同一次探索得到
+   同一批发现」这个 upsert 幂等的前提就没了。
+10. **发现是副产品，落库失败不中断探索**：失败如实写一条 `DISCOVERY_FAILED`
+    trace，主循环照常收尾。用例如实钉住这条（探针 5 之外的单测）。
+
+### 实测
+
+- 全量 pytest **2007 passed / 0 failed**（1978 + 30 新 − 1 条被改写）。
+- A/B 探针（六轮，逐个红、逐个还原 md5 一致、`__pycache__` 已清）：
+  - 登记进 runtime 面 → **4 red**（口径 #2）；
+  - REJECT 也登记图 → **1 red**（`UnboundLocalError`，仍是红）；
+  - 环境闸放行 staging → **2 red**（plan 的口径必守）；
+  - `review_status` 变 save 形参 → **1 red**（F6 旁路）；
+  - 已知屏也记发现 → **1 red**；
+  - 登记不再幂等 → **1 red**（`IntegrityError`，仍是红）。
+- ⚠️ **教训（探针 3 的还原写坏了，当场发现）**：该探针把 `_check_exploration_env`
+  的判据改成了 `is EnvKind.PRODUCTION`，而**还原时按字符串替换命中了
+  `_check_autonomous_env` 里那行**（两处文本在那一刻完全相同）——于是
+  `_check_autonomous_env` 被静默改成 sandbox-only（一条**真实的**行为回归，不是
+  探针残留）。靠 `git diff` 里出现了 `-    if kind is EnvKind.PRODUCTION:` 这行
+  **删除**才发现（本任务预期 diff 是纯新增）。修法：**还原时用带消息文案的锚点**
+  （两条消息文本不同），并复核 `git diff --stat` 只有插入没有删除。
+  **后续探针纪律**：还原后除了 md5，还要看 `git diff` 的**删除行数**。
+- 存量钉子的链尾更新（预期内的「迁移链变长」涟漪）：`test_agent_store`
+  （`discovery_events` 现在存在了）、`test_agent_tools`（12 接线 / 10 未接线）、
+  `test_bug_store`（改 `>=` 以免每加一个脚本就红）、`test_candidate_store`
+  （== `006_discovery_events`）、`test_candidate_review`（`discovery` 现在是
+  受支持 kind → 换用 `bug` 作未知 kind 的例子）。
+- `test_repo_hygiene` 的 `_MIN_WRITE_STATEMENTS` 27 → **29**（用守卫自己的判据
+  重新数：experience 13 + agents 10 + graph 6）。

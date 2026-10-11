@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 __all__ = [
     "RUNTIME", "SOURCE",
     "EVIDENCE_WAIT_SCREEN", "EVIDENCE_RECOVERY_OBSERVED",
-    "EVIDENCE_SOURCE_DECLARED",
+    "EVIDENCE_SOURCE_DECLARED", "EVIDENCE_DISCOVERY",
     "ScreenNode", "ScreenTransition", "RuntimeGraph",
 ]
 
@@ -37,6 +37,13 @@ EVIDENCE_RECOVERY_OBSERVED = "recovery_observed"
 """恢复期屏识别的 `stage: screen / outcome: FOUND` → 引擎当场识别出的屏。"""
 EVIDENCE_SOURCE_DECLARED = "source_declared"
 """Source Metadata 声明（Task 5.2 用）——**声明**不是观测，故证据名区分开。"""
+EVIDENCE_DISCOVERY = "discovery"
+"""探索发现经**人工确认**后登记（Task 4.5 / P3-18，设计 §7.5）。
+
+与 `source_declared` 分开记：两者都在 source 面上，但来源不同——前者是
+Source Metadata 的静态声明，后者是「自主探索撞见了、人工 ACCEPT 了」。
+合成一个会让「这条声明是从哪来的」在库里查不出来，而那正是设计 §7.5 把
+Discovery Event 单列一张表的原因。"""
 
 
 @dataclass(frozen=True)

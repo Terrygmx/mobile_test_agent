@@ -173,7 +173,10 @@ def test_wired_and_not_wired_partition_the_allowlist():
     wired = set(TOOL_METHODS) - set(NOT_WIRED)
     assert wired | set(NOT_WIRED) == set(ALLOWED_TOOLS)
     assert not (wired & set(NOT_WIRED))
-    assert len(wired) == 11 and len(NOT_WIRED) == 11
+    # Task 4.5 接线了 create_discovery_event（M4）→ 12 已接线 / 10 未接线。
+    # 每次接线一个工具都要改这一行（这正是它该有的行为：数字是手抄的，
+    # 改不动就说明有人悄悄动了工具表）。
+    assert len(wired) == 12 and len(NOT_WIRED) == 10
 
 
 def test_guarded_tools_are_a_subset_of_the_allowlist():

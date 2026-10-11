@@ -37,6 +37,7 @@ from typing import Callable
 
 from agents.models import AgentState
 from agents.tools import AgentToolkit
+from source.hashing import stable_hash
 from explorer.loop_detector import is_loop
 from explorer.policy import EXECUTION_TOOLS, action_kwargs, pre_judge
 from explorer.state import DEFAULT_LOOP_WINDOW, ExplorationBudget
@@ -127,7 +128,8 @@ class Explorer:
                  build: str = "local", loop_window: int | None = None,
                  max_repeated_state: int | None = None,
                  budget: ExplorationBudget | None = None,
-                 llm_budget: LLMBudget | None = None) -> None:
+                 llm_budget: LLMBudget | None = None,
+                 discovery_enabled: bool = False) -> None:
         if not isinstance(toolkit, AgentToolkit):
             raise TypeError(
                 "Explorer 只经 AgentToolkit 执行动作（F12：唯一执行通路）——"
@@ -167,6 +169,12 @@ class Explorer:
         self._loop_window = loop_window
         self._max_repeated_state = max_repeated_state
         self._budget = budget
+        # Task 4.5：发现事件的上报开关。**默认关**（Task 4.6 的 `mta explore`
+        # 打开）——理由不是「怕影响既有行为」，而是**发现事件是候选资产**：
+        # 4.1–4.4 的单测探索是构造出来的场景，把它们的新屏都记成候选会让
+        # `discovery_events` 里混进测试噪声，人工审核队列失去意义。
+        # 打开时**只落库、不写图**（设计 §7.5 的第二段；写图在人工 ACCEPT 后）。
+        self._discovery_enabled = discovery_enabled
         if llm_budget is None and budget is not None:
             llm_budget = LLMBudget(max_calls_per_run=budget.max_llm_calls)
         # 公开属性：decider 拿它扣 LLM 配额（try_acquire），报告读用量
@@ -313,6 +321,7 @@ class Explorer:
                 continue
             if post_fp and is_new:
                 visited.append(post_fp)
+                self._record_discovery(post_obs, step_index=steps)
 
         assert outcome is not None       # while 只有 break 出口，必已定值
         self._db.update_task_state(self._task_id, AgentState.IDLE,
@@ -322,6 +331,70 @@ class Explorer:
             visited_fingerprints=tuple(visited))
 
     # --- 内部 ---------------------------------------------------------------
+
+    def _record_discovery(self, observation: dict, *, step_index: int) -> None:
+        """观测到一个**图里没有的屏** → 经 toolkit 落一条 `NEW_SCREEN` 发现事件。
+
+        三个「不」：
+        - **不写图**：只落 `discovery_events`（PENDING）。设计 §7.5 的三段式是
+          「发现 → Candidate → 人工审核 → 纳入图」，本方法只做前两段（E12）。
+        - **不调 LLM**：这是确定性判定（新指纹 + 图里没有），没有需要推理的
+          东西——省一次调用，也让发现事件可复核。
+        - **不因失败中断探索**：落库失败（如 agent_db 没注入）不该让整轮探索
+          死掉——发现是**副产品**，主循环的结论比它重要。失败如实留痕到 trace。
+
+        `event_id` 用 `stable_hash`（F8 的**同一哈希原语**）对
+        `(task_id, screen)` 取摘要：同一次探索重跑同一屏 → 同一个 id →
+        `save_discovery_event` 的 upsert 幂等吸收，不线性增长重复行。
+        """
+        if not self._discovery_enabled:
+            return
+        screen = observation.get("screen")
+        if not screen:
+            # 屏判定不出来（`status != OK`）——没有屏名就没有可登记的东西，
+            # 不猜、不记无名节点（`ScreenNode` 的 `__post_init__` 同款纪律）。
+            return
+        if screen in self._known_screens():
+            return
+        event_id = "disc_" + stable_hash([self._task_id, str(screen)])
+        try:
+            result = self._toolkit.call(
+                "create_discovery_event", kind="NEW_SCREEN",
+                event_id=event_id,
+                detail={"screen_id": screen,
+                        "fingerprint": observation.get("fingerprint"),
+                        "visible_markers": list(
+                            observation.get("visible_markers") or ()),
+                        "step_index": step_index})
+        except Exception as e:  # noqa: BLE001 — 发现是副产品，不中断主循环
+            self._db.append_trace(
+                self._task_id, step_index=step_index,
+                state=AgentState.OBSERVING, goal=None,
+                observation={"screen": screen},
+                decision={"discovery": "FAILED",
+                          "reason": f"{type(e).__name__}: {e}"},
+                result="DISCOVERY_FAILED")
+            return
+        self._db.append_trace(
+            self._task_id, step_index=step_index, state=AgentState.OBSERVING,
+            observation={"screen": screen},
+            decision={"discovery": "RECORDED", "event_id": event_id,
+                      "kind": "NEW_SCREEN",
+                      "review_status": result.value.get("review_status")
+                      if isinstance(result.value, dict) else None},
+            result="DISCOVERY_RECORDED")
+
+    def _known_screens(self) -> frozenset[str]:
+        """已知屏集合：构造时注入的图（**声明面**）的屏。
+
+        `graph` 为 None（4.4 的循环检测单测那样）→ 空集合 = 什么都不知道，
+        但 `discovery_enabled` 默认关，那些场景不会走到这里。
+        """
+        graph = self._graph
+        if graph is None:
+            return frozenset()
+        return frozenset(graph.screens)
+
 
     def _budget_exceeded(self, steps: int, t0: float
                          ) -> tuple[ExplorationOutcome, str] | None:

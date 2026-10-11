@@ -163,8 +163,7 @@ NOT_WIRED: dict[str, str] = {
     "run_testcase": "M4/M6（驱动设备的工具循环，非 M3 的注入式 Dry Run）",
     "run_candidate_test": "M4/M6（驱动设备的工具循环，非 M3 的注入式 Dry Run）",
     "create_test_candidate": "M4/M6（候选落库已在 Task 3.4 由 agents/storage 直写）",
-    "create_bug_candidate": "M5（bug_candidates 表，迁移 004）",
-    "create_discovery_event": "M4（discovery_events 表，迁移 003）",
+    "create_bug_candidate": "M5（bug_candidates 表，迁移 005）",
 }
 
 
@@ -601,8 +600,35 @@ class AgentToolkit:
     def _tool_create_bug_candidate(self, **kw):
         raise ToolNotWired(NOT_WIRED["create_bug_candidate"])
 
-    def _tool_create_discovery_event(self, **kw):
-        raise ToolNotWired(NOT_WIRED["create_discovery_event"])
+    def _tool_create_discovery_event(self, *, kind: str, detail: dict | None = None,
+                                     event_id: str | None = None,
+                                     exploration_task_id: str | None = None,
+                                     **kw) -> dict:
+        """落一条 Discovery Event（CANDIDATE tier；Task 4.5 / P3-18）。
+
+        只**落库**（`review_status='PENDING'`），**不碰图**——设计 §7.5 的三段式
+        是「发现 → Candidate → 人工审核 → 纳入图」，工具层是第二段，第三段
+        （登记图）只在人工 ACCEPT 之后由 `candidates/review.py` 做。把它做成
+        「顺手写图」会让 F6 那道闸门形同虚设（E12：图不做自动探索）。
+
+        `event_id` 缺省时由调用方生成——这里**不生成 uuid**：工具层是确定性
+        的（同一输入同一输出），随机 id 会让重放产出不同的行，而「同一次探索
+        重跑得到同一批发现」正是 `save_discovery_event` 的 upsert 幂等所依赖
+        的前提。
+
+        返回值放 `event`（与 `create_promotion_proposal` 的 `value` 同款：
+        `ToolResult.value` 装结构化产物）。
+        """
+        self._need(agent_db=self.agent_db)
+        if not event_id:
+            raise ToolError(
+                "create_discovery_event 需要 event_id（工具层不生成随机 id——"
+                "同一输入同一输出，重放才幂等）")
+        row = self.agent_db.save_discovery_event(
+            event_id, kind=kind, detail=detail or {},
+            exploration_task_id=exploration_task_id or self.task_id)
+        return {"passed": True, "event_id": row["event_id"],
+                "kind": row["kind"], "review_status": row["review_status"]}
 
     def _tool_create_promotion_proposal(self, *, experience_id: str,
                                         reason: str | None = None,

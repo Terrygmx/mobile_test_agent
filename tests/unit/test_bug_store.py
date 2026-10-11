@@ -45,7 +45,9 @@ def test_migrations_are_idempotent_and_version_follows_the_chain(tmp_path):
     SQLiteAgentStore(db)            # 重放：二次不炸
     # 版本串从**链尾派生**（`latest_version`），故加 005 后这里跟着变——
     # 这正是它该有的行为（加脚本忘改常量也不会撒谎）。
-    assert AGENT_SCHEMA_VERSION == "005_bug_candidates"
+    # 链尾已到 006（M4 Task 4.5 的 discovery_events）——本用例只关心
+    # 「005 在链里、版本串从链尾派生」，故断言 >= 而非 ==（加脚本不再红）。
+    assert AGENT_SCHEMA_VERSION >= "005_bug_candidates"
 
 
 def test_bug_candidates_table_exists(store):

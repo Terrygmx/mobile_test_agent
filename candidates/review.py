@@ -44,6 +44,7 @@ from pathlib import Path
 
 import yaml
 
+from candidates.discovery import graph_registration, register
 from candidates.test_case import dump_testcase_yaml
 from source.vcs import run_git
 from testcase.lint import Severity, lint, max_severity
@@ -51,8 +52,8 @@ from testcase.schema import parse_testcase_dict
 
 __all__ = ["CandidateReviewError", "decide_candidate", "export_candidate_patch"]
 
-# 本任务只接 test；M4（Discovery Event）/ M5（Bug Candidate）扩这个集合。
-_SUPPORTED_KINDS = ("test",)
+# Task 3.5 只接 test；Task 4.5 扩 discovery（M4）；Task 5.6 扩 bug（M5）。
+_SUPPORTED_KINDS = ("test", "discovery")
 
 
 class CandidateReviewError(RuntimeError):
@@ -66,19 +67,28 @@ class CandidateReviewError(RuntimeError):
 def _require_kind(kind: str) -> None:
     if kind not in _SUPPORTED_KINDS:
         raise CandidateReviewError(
-            f"未知的候选类型 {kind!r}——本任务只接 "
-            f"{'/'.join(_SUPPORTED_KINDS)}（Discovery/Bug 候选归 M4/M5 接入）")
+            f"未知的候选类型 {kind!r}——目前只接 "
+            f"{'/'.join(_SUPPORTED_KINDS)}（Bug 候选归 Task 5.6 接入）")
 
 
 def decide_candidate(store, kind: str, candidate_id: str, decision: str,
                      reviewer: str, note: str | None = None, *,
-                     repo_root: str | Path,
+                     repo_root: str | Path | None = None,
                      suites_root: str | Path = "suites",
                      existing_case_ids: frozenset[str] = frozenset(),
-                     repository, secrets) -> tuple[dict, str | None]:
-    """PENDING → ACCEPT/REJECT（F6 首个消费者）。返回 `(候选行, commit sha)`。
+                     repository=None, secrets=None,
+                     graph_store=None) -> tuple[dict, str | None]:
+    """PENDING → ACCEPT/REJECT（F6 的统一入口）。返回 `(候选行, commit sha)`。
 
-    REJECT 时 sha 为 `None`（不落盘）。ACCEPT 时 sha 是落盘那一次 commit。
+    ⚠️ **`repo_root` / `repository` / `secrets` 变成可选**（Task 4.5）：它们的
+    消费者只有 `test` 分支（落盘 + lint + git commit）。`discovery` 分支的
+    ACCEPT 副作用是**登记进 Source Graph**（`graph_store`），与 git / 用例
+    发现无关——把「test 分支的输入」做成全局必填会逼 discovery 的调用方
+    伪造一堆用不上的参数。**必填性没有消失，只是按 kind 分流**：
+    `_validated_testcase` 在缺 `repo_root` 时照样 fail-loud（有测试钉住）。
+
+    REJECT 时 sha 恒为 `None`（不落盘）。`test` 的 ACCEPT 时 sha 是落盘那次
+    commit；`discovery` 的 ACCEPT 不碰 git，sha 也是 `None`。
 
     退出码/异常归 CLI：本函数只抛 `CandidateReviewError`（域错误）与
     `RuntimeError`（git 失败已回滚）——两者 CLI 都映成 exit 3。
@@ -89,6 +99,10 @@ def decide_candidate(store, kind: str, candidate_id: str, decision: str,
     if decision == "REJECT" and not (note or "").strip():
         # 拒绝没有理由 = triage 数据断流（与 `decide_review:176-178` 逐字同款）
         raise CandidateReviewError("reject 需要 --note（拒绝理由必须留痕）")
+
+    if kind == "discovery":
+        return _decide_discovery(store, candidate_id, decision, reviewer, note,
+                                 graph_store=graph_store)
 
     row = store.get_candidate(candidate_id)
     if row is None:
@@ -108,7 +122,7 @@ def decide_candidate(store, kind: str, candidate_id: str, decision: str,
     # --- ACCEPT：全部校验（零副作用）→ 落盘（失败回滚）→ 改状态 -------------
     tc = _validated_testcase(row, repository=repository, secrets=secrets,
                              existing_case_ids=existing_case_ids,
-                             suites_root=suites_root)
+                             suites_root=suites_root, repo_root=repo_root)
     target = Path(suites_root) / tc.suite / f"{tc.id}.yaml"
     try:
         rel = target.relative_to(Path(repo_root)).as_posix()
@@ -182,6 +196,84 @@ def decide_candidate(store, kind: str, candidate_id: str, decision: str,
     return decided, sha
 
 
+def _decide_discovery(store, event_id: str, decision: str, reviewer: str,
+                      note: str | None, *, graph_store=None
+                      ) -> tuple[dict, None]:
+    """`kind="discovery"` 的 ACCEPT/REJECT（设计 §7.5 / F6；Task 4.5）。
+
+    与 test 分支的**形状差异**（不是「差不多」，是刻意不同）：
+
+    | | test | discovery |
+    |---|---|---|
+    | ACCEPT 的副作用 | 写 `suites/*.yaml` + `git commit` | 登记进 Source Graph |
+    | 需要 git / lint / 用例发现 | 是 | **否** |
+    | sha | 落盘 commit | 恒 `None`（不碰 git） |
+    | 顺序 | 校验 → 落盘 → 改状态（commit 不可幂等重放） | **改状态 → 登记图** |
+
+    ⚠️ **顺序反过来了**，理由与 test 分支正好对称：test 的副作用（commit）不可
+    幂等重放，所以先落盘后改状态（失败重试即续传）；discovery 的副作用
+    （`register`）**幂等**（同一条已登记 → 返回 False 且不写库），所以先改状态
+    是安全的——若先登记图再改状态，改状态失败会留下「图里有了、库里还是
+    PENDING」的行，重试时 `register` 幂等返回 False 而状态照样推进，最终一致；
+    反过来（先登记后改状态失败且 register 不幂等）才会真卡死。
+
+    ⚠️ **REJECT 不动图**：拒绝的意义就是「不要把这个发现当成已知资产」——
+    去改图反而是把它登记了。
+    """
+    row = store.get_discovery_event(event_id)
+    if row is None:
+        raise CandidateReviewError(f"发现事件 {event_id} 不存在")
+    if row["review_status"] != "PENDING":
+        raise CandidateReviewError(
+            f"发现事件 {event_id} 已是 {row['review_status']}（不可二次决策）")
+
+    if decision == "ACCEPT":
+        if graph_store is None:
+            # 前置在**改状态之前**（零副作用那一步）：ACCEPT 的副作用就是登记
+            # 图，没有图库时先把状态改成 ACCEPT 会让重试撞上「不可二次决策」
+            # ——与 test 分支「校验必须发生在状态变更之前」同一条纪律。
+            raise CandidateReviewError(
+                "discovery 的 ACCEPT 需要 graph_store（ACCEPT 的副作用就是"
+                "把发现登记进 Source Graph）——CLI 用 `--graph-db` 提供")
+        # 登记范围在**改状态之前**算好：`_graph_scope` 会在范围有歧义时
+        # fail-loud，而那时状态还没改（重试即续传）。
+        scope = _graph_scope(graph_store)
+
+    store.decide_discovery_event(event_id, review_status=decision,
+                                 reviewer=reviewer, note=note)
+    if decision == "ACCEPT":
+        register(graph_store, row, app_id=scope[0], app_build=scope[1])
+    decided = store.get_discovery_event(event_id)
+    assert decided is not None
+    return decided, None
+
+
+def _graph_scope(graph_store) -> tuple[str, str]:
+    """登记的 `(app_id, app_build)`：取图库里**唯一**的范围。
+
+    发现事件自己不携带 app 身份（它产生于一次探索任务，而任务的作用域就是
+    图的作用域），所以范围只能从图库推：
+
+    - 库里**没有**范围 → `("", "")`（全新库：第一条发现就是第一张声明面；
+      `app_id`/`app_build` 允许为空串，001 的列定义如此）；
+    - 库里**恰好一个**范围 → 用它（发现登记进既有那张声明面）；
+    - 库里**多个** app_id 或多个 app_build → `CandidateReviewError`（fail-loud：
+      猜一个会让发现登记到别的 app 上，而那是**静默写错库**）。
+    """
+    scopes = graph_store.list_scopes()
+    app_ids = {s[0] for s in scopes}
+    builds = {s[1] for s in scopes}
+    if len(app_ids) > 1:
+        raise CandidateReviewError(
+            f"graph 库里有多个 app_id {sorted(app_ids)}——发现事件不携带 app "
+            f"身份，无法判定登记到哪一个（先清理或分库）")
+    if len(builds) > 1:
+        raise CandidateReviewError(
+            f"graph 库里有多个 app_build {sorted(builds)}——发现事件不携带 "
+            f"build 身份，无法判定登记到哪一个（先清理或分库）")
+    return (next(iter(app_ids), ""), next(iter(builds), ""))
+
+
 def _undo_promote(repo_root: str | Path, rel: str, sha: str) -> tuple[bool, str]:
     """撤销刚做的 promote commit。返回 `(成功?, 手法说明)`。
 
@@ -217,14 +309,23 @@ def _undo_promote(repo_root: str | Path, rel: str, sha: str) -> tuple[bool, str]
 
 def _validated_testcase(row: dict, *, repository, secrets,
                         existing_case_ids: frozenset[str],
-                        suites_root: str | Path):
+                        suites_root: str | Path, repo_root):
     """ACCEPT 的全部前置（**零副作用**），任一不过即 `CandidateReviewError`。
 
-    四条：① `testcase_yaml` 可解析（F5 的同一 Schema）；② `suite` 已声明
-    （落盘目录无从确定）；③ 过 `mta lint`（落盘的文件必须能进 P1 流程——
-    设计 6.1「不是新路径」）；④ id 不与正式用例冲突（**fail-loud**，与
-    promoter 的「同 id 并入」不同：那是它的领域主流程，候选落盘是新文件）。
+    五条：① `repo_root` 已给（落盘目录必须落在 git 仓库内）；② `testcase_yaml`
+    可解析（F5 的同一 Schema）；③ `suite` 已声明（落盘目录无从确定）；④ 过
+    `mta lint`（落盘的文件必须能进 P1 流程——设计 6.1「不是新路径」）；⑤ id 不与
+    正式用例冲突（**fail-loud**，与 promoter 的「同 id 并入」不同：那是它的领域
+    主流程，候选落盘是新文件）。
+
+    ① 是 Task 4.5 补的：`repo_root` 从签名必填变成按 kind 分流之后，「test 分支
+    没拿到它」不再由 Python 签名保证，必须在这里显式挡（否则 `Path(None)` 会以
+    `TypeError` 漏成 traceback，而 CLI 只接域错误与 `RuntimeError`）。
     """
+    if repo_root is None:
+        raise CandidateReviewError(
+            "test 候选的 ACCEPT 需要 repo_root（落盘目录必须落在 git 仓库内）"
+            "——它现在是按 kind 分流的输入，discovery 分支才不用它")
     try:
         tc = parse_testcase_dict(yaml.safe_load(row["testcase_yaml"]))
     except Exception as e:  # noqa: BLE001 — 解析失败的各种形态都归「前置不过」

@@ -559,3 +559,117 @@ class SQLiteAgentStore:
                 "review_decision": row["review_decision"],
                 "reviewed_at": row["reviewed_at"],
                 "created_at": row["created_at"]}
+
+    # --- discovery_events（迁移 006；Task 4.5 / P3-18） ------------------------
+
+    def save_discovery_event(self, event_id: str, *, kind: str,
+                             detail: dict | None = None,
+                             exploration_task_id: str | None = None) -> dict:
+        """落一条 Discovery Event（upsert：`event_id` 是主键）。
+
+        **幂等**：同 id 重存覆盖（与 `save_candidate` / `save_bug_candidate`
+        同款）——同一次探索重跑会算出同 id 的发现，不该线性增长出重复行。
+        `created_at` 只在**首次插入**时取 `_now()`。
+
+        ⚠️ **`review_status` 不是本方法的形参**（与 `save_candidate` 的
+        `review_status` / `save_bug_candidate` 的 `status` 同款处置，
+        review_p3_task35 P2-2）：本方法**只写 `'PENDING'`**（字面量，见下方
+        INSERT）——`review_status` 的唯一写路径是 `decide_discovery_event`。
+        接受形参会让「F6 统一审核」存在一条绕过 `decide_candidate` 全部领域
+        校验（note 必填 / 不可二次决策）的旁路，能产出 `ACCEPT` 但
+        `reviewer`/`reviewed_at` 全 `NULL` 的行（看起来像已审核，实则无人
+        审核）。**形参删掉而不是加断言**：删掉之后调用方传它会以 `TypeError`
+        fail-loud。
+
+        ⚠️ **已人工决策的事件不可覆写**：与 `save_candidate` 的 AE 闸门同款
+        ——探索重跑不得改写已 ACCEPT/REJECT 的行（翻案走人工通道）。
+
+        `kind` 的词表校验在 Python 侧（`candidates.discovery.DISCOVERY_KINDS`）
+        **与** DDL 的 CHECK 两处（后者是最后一道；前者给出带类别名的报错）。
+        """
+        from candidates.discovery import DISCOVERY_KINDS
+        if kind not in DISCOVERY_KINDS:
+            raise ValueError(
+                f"未知 discovery kind {kind!r}——必须是 "
+                f"{list(DISCOVERY_KINDS)} 之一（设计 §11 的四类）")
+        with self._write_tx() as conn:
+            existing = conn.execute(
+                "SELECT review_status FROM discovery_events WHERE event_id=?",
+                (event_id,)).fetchone()
+            if existing is not None and existing["review_status"] != "PENDING":
+                raise ValueError(
+                    f"discovery event {event_id} 已人工决策"
+                    f"（{existing['review_status']}）——探索重跑不得覆写"
+                    f"（与 save_candidate 的 AE 闸门同款）；翻案走人工通道")
+            conn.execute(
+                "INSERT INTO discovery_events (event_id, kind, detail_json,"
+                " exploration_task_id, review_status, created_at)"
+                " VALUES (?,?,?,?,'PENDING',?)"
+                " ON CONFLICT(event_id) DO UPDATE SET"
+                " kind=excluded.kind, detail_json=excluded.detail_json,"
+                " exploration_task_id=excluded.exploration_task_id",
+                (event_id, kind,
+                 json.dumps(detail or {}, ensure_ascii=False),
+                 exploration_task_id, _now()))
+        row = self.get_discovery_event(event_id)
+        assert row is not None       # 刚写完必在
+        return row
+
+    def get_discovery_event(self, event_id: str) -> dict | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM discovery_events WHERE event_id=?",
+                (event_id,)).fetchone()
+            return self._discovery_from_row(row) if row else None
+        finally:
+            conn.close()
+
+    def list_discovery_events(self, *, kind: str | None = None,
+                              review_status: str | None = None
+                              ) -> list[dict]:
+        """发现事件列表（新在前）。两个过滤键都可空（None = 不过滤）。"""
+        conn = self._connect()
+        try:
+            where, params = [], []
+            if kind is not None:
+                where.append("kind=?")
+                params.append(kind)
+            if review_status is not None:
+                where.append("review_status=?")
+                params.append(review_status)
+            sql = "SELECT * FROM discovery_events"
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            sql += " ORDER BY created_at DESC, rowid DESC"
+            return [self._discovery_from_row(r)
+                    for r in conn.execute(sql, params).fetchall()]
+        finally:
+            conn.close()
+
+    def decide_discovery_event(self, event_id: str, *, review_status: str,
+                               reviewer: str, note: str | None = None) -> None:
+        """`review_status` 的**唯一写路径**（F6；`save_discovery_event` 只写
+        `'PENDING'`，连形参都不收——与 `decide_candidate` 同款）。
+
+        reviewer / `reviewed_at`（`_now()` 盖章，单一来源）/ `review_note`
+        一次落齐。PENDING→X 的状态机校验在领域层
+        （`candidates/review.py::decide_candidate`）——这里只管写。
+        """
+        with self._write_tx() as conn:
+            conn.execute(
+                "UPDATE discovery_events SET review_status=?, reviewer=?,"
+                " reviewed_at=?, review_note=? WHERE event_id=?",
+                (review_status, reviewer, _now(), note, event_id))
+
+    @staticmethod
+    def _discovery_from_row(row: sqlite3.Row) -> dict:
+        return {"event_id": row["event_id"],
+                "kind": row["kind"],
+                "detail": json.loads(row["detail_json"] or "{}"),
+                "exploration_task_id": row["exploration_task_id"],
+                "review_status": row["review_status"],
+                "reviewer": row["reviewer"],
+                "reviewed_at": row["reviewed_at"],
+                "review_note": row["review_note"],
+                "created_at": row["created_at"]}

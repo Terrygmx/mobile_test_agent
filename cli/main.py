@@ -572,6 +572,71 @@ def _check_autonomous_env(policy, *, env_kind, command: str) -> None:
     return None
 
 
+def _check_exploration_env(policy, *, env_kind, device_type,
+                          command: str) -> None:
+    """`mta explore` 的**专属**前置：sandbox + simulator，**无例外**（F7 / §7.4）。
+
+    设计 §7.4 原文：
+
+    ```text
+    Exploration 默认只能: Simulator + UITest Build + env.kind == sandbox
+    真机: 只运行已审核的 Test Plan，不运行自由探索
+    ```
+
+    ⚠️ **为什么不复用 `_check_autonomous_env`**（口径必守，review_p3_task12 §4）：
+    那条是**自主命令的公共前置**，它只做「production 一票否决」，拒绝消息对用户
+    说「请在 **sandbox 或 staging** 下运行」——那句话对 `plan`/`generate` 准确
+    （它们确实允许 staging），对 `explore` **不准确**：设计 §7.4 要求探索
+    **sandbox-only 且不能有例外**。若让 `explore` 只过公共前置，staging 下它
+    会被放行，而文案还写着「sandbox 或 staging」——**文案与行为打架**。
+    故这里显式再挡一层：**staging 也拒**。
+
+    调用顺序（在 `cmd_explore` 里）：先 `_check_autonomous_env`（总开关 +
+    production 一票否决），再本函数（sandbox-only + simulator）。两层是**与**
+    的关系，任一层拒即拒——不合并成一个函数，因为它们的判据集合本就不同
+    （公共前置对所有自主命令一致，本层只对 explore 成立）。
+
+    三条判据，任一不过即 `SystemExit`（消息含 `F7` 便于检索）：
+
+    1. `env_kind` 不是合法环境（含 `None` / 拼错 / 大小写不对）→ 拒；
+    2. `env_kind != sandbox` → 拒（**staging / production 一律拒**，无豁免 flag）；
+    3. `device_type` 不是 simulator → 拒（真机只跑已审核用例）。
+
+    唯一出口是 `SystemExit`：坏值若以 `ValueError` 漏出去，调用方的
+    `except Exception` 会把否决一起吞掉（review_p3_task12 P3-4 同款）。
+    """
+    from environment.capabilities import DeviceType
+    from executor.guard import EnvKind
+
+    try:
+        kind = EnvKind(env_kind)
+    except ValueError:
+        raise SystemExit(
+            f"F7: 未知环境 {env_kind!r}——只接受 "
+            f"{[k.value for k in EnvKind]}。`mta {command}` 的 env 来源是 "
+            f"`--env-kind`（与 `mta run` 同款）；拿不到合法值时不假设 "
+            f"sandbox，直接拒。") from None
+    if kind is not EnvKind.SANDBOX:
+        raise SystemExit(
+            f"F7: `mta {command}` 只能在 **sandbox** 下运行（设计 7.4："
+            f"Exploration 默认只能 Simulator + UITest Build + env.kind == "
+            f"sandbox），got env_kind={kind.value!r}——**staging 也不例外**"
+            f"（这与 `plan`/`generate` 不同：那两条允许 staging，探索不允许）。"
+            f"本命令没有豁免 flag；真机与 staging 只运行**已审核**的用例。")
+    try:
+        device = DeviceType(str(device_type).strip().lower().replace("-", "_"))
+    except ValueError:
+        raise SystemExit(
+            f"F7: 未知设备类型 {device_type!r}——只接受 "
+            f"{[d.value for d in DeviceType]}。拿不到合法值时直接拒。") from None
+    if device is not DeviceType.SIMULATOR:
+        raise SystemExit(
+            f"F7: `mta {command}` 只在**模拟器**上运行（设计 7.4：真机只运行"
+            f"已审核的 Test Plan，不运行自由探索），got "
+            f"device_type={device.value!r}——拒绝启动（无豁免 flag）。")
+    return None
+
+
 def _metadata_path(args: argparse.Namespace) -> Path:
     """12.3 metadata 的**唯一路径规则**（`run` 与 `plan` 共用）。
 

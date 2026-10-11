@@ -145,9 +145,11 @@ _WRITE_SQL_PREFIXES = ("INSERT", "UPDATE", "DELETE", "REPLACE")
 # Task 3.5 再加 1 条（`decide_candidate` 的 UPDATE），照此上调。
 # ⚠️ Task 5.1 实测：真实计数是 **27**，而历次「照此上调」累计只把它抬到 22
 # ——下界已经比真实值低 5，等于**静默容忍 5 条写语句消失**。本次按实测校准
-# 到 27（用与守卫逐字相同的 `_write_sql_calls` 判据数出来的）。加写语句时
-# 请**重新数一遍**，不要按「+1」猜。
-_MIN_WRITE_STATEMENTS = 27
+# 到 27（用与守卫逐字相同的 `_write_sql_calls` 判据数出来的）。
+# Task 4.5（迁移 006）再加 2 条（`save_discovery_event` 的 INSERT /
+# `decide_discovery_event` 的 UPDATE）→ 重新数得 **29**（experience 13 +
+# agents 10 + graph 6）。加写语句时请**重新数一遍**，不要按「+1」猜。
+_MIN_WRITE_STATEMENTS = 29
 
 
 def _write_tx_body_ranges(tree: ast.AST) -> list[tuple[int, int]]:
