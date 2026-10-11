@@ -4655,3 +4655,121 @@ SUCCESS」是**同一个坑的两个面**：P1 压根没有「App 崩了」的�
 3. `get_logs` / `get_crash_info` 接线（`NOT_WIRED` 5 → 3）；
 4. `get_network_summary` **维持不接线**，理由改写成 §8.4 的勘察结论
    （「本技术栈不可实现」≠「还没做」）。
+
+### 8.6 拍板：`backend_evidence` **接受缺席，登记为设计缺口**（2026-10-11）
+
+用户拍板：不改被测环境去够一个数据源。`get_network_summary` **维持不接线**，
+理由从「还没做」改写成 §8.4 的勘察结论（**本技术栈不可实现**）——这两句话在
+交接时的含义完全不同：前者是欠账，后者是缺口。
+
+后果显性登记（两处）：`diagnosis/evidence.py` 的校准方法节（该类权重**永远
+无法校准**，故第 2 条触发条件对它永不成立）+ 本节。Benchmark 的
+`backend_failure` case 验证的是「规则在给定摘要下判得对」，**不是**「真能采到
+网络证据」——`docs/p3_demo_record.md` §1.2-6 已按同款口径写明未覆盖。
+
+---
+
+## 9. Batch B —— 设备侧证据采集 + `APP_CRASH` 判定（用户拍板 ②）
+
+**这一批的真正价值不是「接线」，是补上一个**没有任何生产者**的证据类别。**
+`crash_detected` 权重 5，是 §8.3 六类里最重的两项之一，而它今天恒 False——
+见 §8.3 的勘察。
+
+### 9.1 交付
+
+| 文件 | 内容 |
+|---|---|
+| `telemetry/collectors.py` | `SyslogCollector`（`simctl spawn … log show --style ndjson`）+ `CrashCollector`（宿主 `.ips`）+ 两个解析器 + `default_runner` |
+| `telemetry/probe.py` | `CrashProbe`：「自 `since` 起该 bundle 崩过吗」，**有界等待**、失败即 `None` |
+| `cli/pipeline.py` | `_crash_verdict` / `_infra_outcome` / `_infra_detail` 三个纯函数 + `except InfraError` 分支接入 + `crash_probe` 注入点 + `_run_started_at` |
+| `cli/main.py` | `cmd_run` 真机路径注入 `CrashProbe`；`cmd_diagnose` 补 `infra_events` / `--logs` / `--crash-report` |
+| `agents/tools.py` | `get_logs` / `get_crash_info` 接线（`NOT_WIRED` 5 → 3） |
+
+**`telemetry/` 是独立包**，不是塞进 `diagnosis/`：后者有一条 import 级 F3 守卫
+（`test_diagnosis_package_does_not_touch_data_sources_directly`），采集器要
+`subprocess` + 读宿主目录，塞进去只能给守卫开「除了 subprocess 和 pathlib」的
+后门——**让结构说话**（与 M6 把薄封装落到 `subagents/` 同一条纪律）。
+
+### 9.2 判据：`APP_CRASH` 走 `FAIL` 不走 `INFRA_FAILURE`
+
+| 情形 | status | failure_type | 退出码 |
+|---|---|---|---|
+| 探到崩溃报告 | **`FAIL`** | **`APP_CRASH`** | 1 |
+| 没有报告 / 没探测 | `INFRA_FAILURE` | `WDA_FAILURE`（旧行为逐字保留） | 2 |
+
+设计 P1 §8.2 对 `APP_CRASH` 的规定是「**不得当作** `ELEMENT_NOT_FOUND`」——
+其精神同样适用于「不得当作基础设施故障」：App 崩了是 App 的账，记成环境问题
+会让归因方向**反掉**。退出码从 2 变 1 是**有意的**：一次真崩溃不该读成
+「环境不行」。
+
+**App 崩溃时不置 `wda_died`**：`_wda_aftermath` 见它就会重启 WDA 再跑一遍
+——对一个已经崩掉的 App，重启 WDA 不是处置（那是把 App 缺陷当抖动）。
+
+### 9.3 三处**新发现**的缺口（都不是本批引入的）
+
+1. **`cmd_diagnose` 从来没传过 `infra_events`**：`build_context` 的形参一直
+   存在，调用点漏了。于是 `crash_detected` 的**第二条**判据（infra 崩溃事件）
+   在真机上永远拿不到输入。⚠️ **单测看不见这类缺口**——单测自己传参当然绿，
+   漏的是调用点。故补了**调用点级**的钉子
+   （`test_cli_diagnose.py::test_diagnose_feeds_infra_events_into_the_context`，
+   走真 CLI + monkeypatch 监听 `build_context` 的实参）。
+2. **`DeviceSession._log_infra` 的 `record_infra` 契约不匹配**（P1 遗留）：
+   `cli/pipeline.py:208` 早就记下「TraceStore 不做 recorder」，于是 `WDA_DEAD`
+   只进 JSONL 调试副本，**从不落 `trace.db` 的 `infra_events`**。这意味着
+   `crash_detected` 的第二条判据在真机上**同样拿不到数据**（不只是「没传」）。
+   本批**未修**（改 recorder 契约会动 P1 的落库路径，超出本批范围）——**登记
+   为已知缺口**，见 §9.5。
+3. **`--logs` / `--crash-report` 是「调用方给」而不是自动采集**：`diagnose` 是
+   **离线命令**，自动采集会让它隐式连设备。采集由 `mta run` 侧（`CrashProbe`）
+   或人工给。
+
+### 9.4 A/B 探针：14 条，**2 条第一版没变红**
+
+探针改坏一处语义 → 对应测试必须当场红 → 还原 → md5 校验。**2 条没红**，
+两条都是**真覆盖漏洞**（不是探针写错）：
+
+| 探针 | 现象 | 根因 | 处置 |
+|---|---|---|---|
+| B2 `ndjson 遇坏 JSON 行就炸` | 全绿 | 现有噪声测试喂的是 `getpwuid_r …`，**不以 `{` 开头** → 走 `startswith("{")` 守卫，`except JSONDecodeError` 那条**从未被执行** | 补一条「以 `{` 开头但截断」的测试 |
+| B6 `default_runner 非零退出返回空串` | 全绿 | 现有测试让 `subprocess.run` **抛** `CalledProcessError` → 走 `except SubprocessError` 分支；`returncode != 0` 那条**从未被执行**（而真实形态恰恰是 `check=False` 下正常返回非零） | 补一条 `run` 返回非零 `returncode` 的测试 |
+
+补完后 **14/14 全部如实变红**。这是「全量回归只告诉你没红，A/B 探针才告诉你
+断言够不够」的**第二次实证**（第一次见 §6.6.1 的 E1/E3）。
+
+⚠️ 探针脚本第一版把汇总行全打成了 `??`——**`pytest.ini` 已有 `addopts = -q`，
+探针又传了一个 `-q`**，`-qq` 把汇总行吞了。这正是 `.workbuddy-ai` 那份 SKILL
+里写着的坑，我又踩了一次。**判据读不到时不能当「没红」**，重跑一遍拿到真读数
+才发现 B2/B6 的问题。
+
+### 9.5 登记：本批**未闭**的两项
+
+1. **`infra_events` 的 recorder 契约**（§9.3 第 2 条）：`WDA_DEAD` 不落
+   `trace.db`。改它要动 P1 的落库路径（`TraceStore.record_infra` 的签名与
+   `DeviceSession._log_infra` 的调用形态），**单独立项**。
+   ⚠️ 后果要说清：`crash_detected` 的**第二条**判据（infra 崩溃事件）在真机上
+   仍拿不到数据；**第一条**判据（步骤 `failure_type == "APP_CRASH"`）本批已
+   打通并有端到端实测（§9.6）。即**该类别不再是「零生产者」**。
+2. **`get_network_summary`**：按用户拍板维持不接线，理由已改写为
+   「本技术栈不可实现」（§8.4/§8.6），`NOT_WIRED` 3 条。
+
+### 9.6 端到端实测（真模拟器，非单测）
+
+```text
+1) syslog:  3 行（simctl spawn … log show --style ndjson，1.1s）
+2) crash probe: HIT  071AECCD SIGSEGV mach_msg2_trap
+   （kill -SEGV 真机进程 → CrashProbe 有界等待命中）
+3) outcome: status=FAIL failure_type=APP_CRASH wda_died=False
+4) crash_detected(ctx) = True
+```
+
+即 **「App 崩了 → 记成 APP_CRASH → 规则判出崩溃假设」这条链在真机上是通的**，
+不再是「判据写了但没人产出」。
+
+### 9.7 数字
+
+| 项 | 值 |
+|---|---|
+| 新增测试 | 5 个文件 / 40 条（`test_telemetry_collectors` 18 / `test_crash_probe` 7 / `test_pipeline_crash_verdict` 8 / `test_cli_run_crash_probe` 2 / `test_cli_diagnose` +5） |
+| 全量回归 | 2219 → **2261 passed / 0 failed** |
+| `NOT_WIRED` | 5 → **3**（19/22 已接线） |
+| A/B 探针 | 14 条，补 2 条断言后 **14/14 红** |

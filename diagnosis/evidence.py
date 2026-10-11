@@ -66,6 +66,21 @@ backend_evidence: 2          llm_hypothesis_only: 1
 gate 工程里、随 Gate 清理），距 30 条差得远。故本批**只登记方法，不动数值**
 ——`DIAGNOSIS_EVIDENCE_WEIGHTS` 保持 M1 的初版，且 `config/policy.yaml` 里的
 「初版待校准」标注**不许删**。
+
+**⚠️ `backend_evidence` 例外：它永远无法校准（用户拍板 2026-10-11）**
+
+上面第 2 条触发条件对它**永远不成立**——不是「还没建」，是**本技术栈上做不了**：
+没有代理层、WDA 不暴露网络端点、宿主级 MITM 会改被测环境的运行方式（与 F2/F7
+的立场冲突）。勘察过程见 `docs/p3_data_audit.md` §8.4。
+
+故 **`backend_evidence` 的权重 2 是一个永不被校准的初值**，这是**显性接受的
+设计缺口**，不是欠账。后果要说清（别让它静默）：
+
+- 设计 §8.3 的六类里**有一类永远悬空**；
+- Benchmark 的 `backend_failure` case 仍靠**注入的假摘要**（`agents/benchmark.py`
+  的固定场景构造），它验证的是「规则在给定摘要下判得对」，**不是**「真能采到
+  网络证据」——这两件事不许混读（`docs/p3_demo_record.md` §1.2-6 的未覆盖项
+  同款口径）。
 """
 from __future__ import annotations
 
