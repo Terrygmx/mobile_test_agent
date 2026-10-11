@@ -19,6 +19,7 @@ import os
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,7 +33,8 @@ from session.device_session import InfraError
 from source.screen import current_screen
 from testcase.schema import ActionStep, AssertionStep, TestCase, WaitSpec, WaitStep
 
-__all__ = ["SessionPipeline", "PipelineDeps", "make_postcondition_checker"]
+__all__ = ["SessionPipeline", "PipelineDeps", "_crash_verdict",
+           "_infra_detail", "_infra_outcome", "make_postcondition_checker"]
 
 # 12.5/E7：build id 的兜底值。仅在**读不到**构建身份时使用（`--fake-driver`、
 # 单元测试、没跑过 `mta repo generate` 的场景）；真实 run 走 metadata 的
@@ -280,7 +282,7 @@ class SessionPipeline:
     def __init__(self, suites_root: Path | str | None, *,
                  store=None, deps: PipelineDeps | None = None,
                  recovery=None, secrets=None, app_id: str = "",
-                 app_build: str = DEFAULT_APP_BUILD):
+                 app_build: str = DEFAULT_APP_BUILD, crash_probe=None):
         self.suites_root = Path(suites_root) if suites_root else None
         self.store = store
         self.deps = deps
@@ -303,6 +305,13 @@ class SessionPipeline:
         # （14.4「变量解析在 Runner 层完成」的落点拍板 = 管线 ctx 装配处，
         # StepRunner 保持纯值执行）。None = 不解析（直接构造的测试不受影响）。
         self.secrets = secrets
+        # Batch B（设计 P1 §8.2 的第三条信号）：`CrashProbe | None`。
+        # None = **不判崩溃**（既有调用点零改动，旧行为逐字保留）——P1/P2/P3
+        # 全量回归是这次接线的验收标准。注入后，`except InfraError` 处多问一句
+        # 「App 崩了吗」，是则记 `APP_CRASH` 而不是 `WDA_FAILURE`。
+        self.crash_probe = crash_probe
+        # 本次 run 的起点（崩溃报告的时间窗下界）。`run_all` 里设置。
+        self._run_started_at = None
         # 4.2：恢复后的定位覆盖（aux 步骤重跑用）——LLM 候选策略按目标 ref
         # 记住，locate() 优先消费。run 级生命周期（与 RUN_MEMO 同语义：
         # 同 run 同 build 内复用，pipeline 实例即 run 作用域）。
@@ -640,15 +649,23 @@ class SessionPipeline:
                     # 7.5：WDA 中途故障不是测试失败。失败步骤也落 steps 表
                     # ——异常上附着「非幂等是否已发出」（StepRunner 打标，
                     # dispatch 中途断连也算已发出），lifecycle 据此判能否重跑。
-                    status, failure_type = "INFRA_FAILURE", "WDA_FAILURE"
+                    #
+                    # Batch B：**先问一句「App 崩了吗」**（设计 P1 §8.2 的
+                    # 第三条信号）。崩了 → `APP_CRASH` / `FAIL`：App 崩了是
+                    # **App 的账**，记成 INFRA_FAILURE 会把 App 缺陷的归因
+                    # 指向环境（`crash_detected` 权重 5 因此恒 False）。
+                    crash = _crash_verdict(self.crash_probe,
+                                           since=self._run_started_at)
+                    status, failure_type = _infra_outcome(e, crash)
+                    infra_detail = _infra_detail(e, crash)
                     detail["error"] = f"{type(e).__name__}: {e}"
-                    detail["wda_died"] = True
+                    detail.update(infra_detail)
                     lifecycle.record_step(StepOutcome(
                         ok=False, step_index=idx,
                         element_id=(step.target.id
                                     if getattr(step, "target", None) else ""),
                         action=getattr(step, "action", None),
-                        failure_type="WDA_FAILURE",
+                        failure_type=failure_type,
                         error=f"{type(e).__name__}: {e}",
                         effective_idempotency=getattr(
                             e, "effective_idempotency", None),
@@ -1276,6 +1293,10 @@ class SessionPipeline:
 
         run = RunResult(run_id=run_id, suite=cases[0].suite if cases else None)
         self._run_id = run_id
+        # Batch B：崩溃报告的时间窗下界。**在 run 开始时取**（不是用例开始时）
+        # ——App 可能在 precondition 阶段就崩了（reset/launch 那一步），
+        # 那时还没有任何用例在跑。
+        self._run_started_at = datetime.now(timezone.utc)
         try:
             policy = (failure_policy if isinstance(failure_policy,
                                                    FailurePolicy)
@@ -1367,6 +1388,54 @@ def _run_status(run: RunResult) -> str:
         # （M4 Gate 真机实锤：漂移 run exit_code=5 而 runs.status=FAIL）
         return "RECOVERED"
     return "FAIL"
+
+
+def _crash_verdict(crash_probe, *, since):
+    """「App 崩了吗」→ `CrashReport | None`（设计 P1 §8.2 的崩溃日志信号）。
+
+    `crash_probe is None` → `None`（**不判崩溃**）：既有调用点零改动，旧行为
+    逐字保留。探测自身失败也 → `None`（`CrashProbe` 已经吞了异常，这里再兜
+    一层是为了「替身没实现该方法」这类形态）。
+
+    ⚠️ 返回 `None` 的语义是「**没有证据说它崩了**」，不是「确认没崩」——
+    调用方据此保持旧行为，不确定不升级成「崩了」。
+    """
+    if crash_probe is None:
+        return None
+    try:
+        return crash_probe.crashed_since(since)
+    except Exception:  # noqa: BLE001 — 旁路证据不推翻主结论
+        return None
+
+
+def _infra_outcome(e: Exception, crash) -> tuple[str, str]:
+    """基础设施异常 → `(status, failure_type)`。
+
+    | 情形 | status | failure_type |
+    |---|---|---|
+    | 探到崩溃报告 | `FAIL` | **`APP_CRASH`** |
+    | 没有报告 / 没探测 | `INFRA_FAILURE` | `WDA_FAILURE`（旧行为） |
+
+    ⚠️ `APP_CRASH` 走 `FAIL` 而不是 `INFRA_FAILURE`：设计 P1 §8.2 明文
+    「**不得当作** `ELEMENT_NOT_FOUND`」，其精神同样适用于「不得当作基础设施
+    故障」——App 崩了是 App 的账，记成环境问题会让归因方向反掉。退出码也随之
+    从 2（INFRA）变成 1（FAIL），这是**有意的**：一次真崩溃不该读成「环境不行」。
+    """
+    if crash is not None:
+        return "FAIL", "APP_CRASH"
+    return "INFRA_FAILURE", "WDA_FAILURE"
+
+
+def _infra_detail(e: Exception, crash) -> dict:
+    """失败步骤的 `detail` 增量（`wda_died` 的置位在此）。
+
+    **App 崩溃时不置 `wda_died`**：`_wda_aftermath` 见它就会重启 WDA 再跑
+    一遍——对一个已经崩掉的 App，重启 WDA 不是处置（那是把 App 缺陷当抖动）。
+    反钉：没崩时照旧置位，重跑路径逐字不变。
+    """
+    if crash is not None:
+        return {"wda_died": False, "app_crash": crash.as_dict()}
+    return {"wda_died": True}
 
 
 def _map_exception(e: Exception) -> tuple[str, str]:
