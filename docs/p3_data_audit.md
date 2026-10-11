@@ -3557,3 +3557,74 @@ git 2.54 实测，其他版本可能不同。
   return 体）造成 `IndentationError`——那是**语法坏掉**不是行为变异，收集阶段
   就炸，测不出任何东西。改成「函数体首行 `return False`」这种**保留语法**的
   变异才有意义（与 Task 4.4「先想清楚 mutant 的失败形态」同一条教训）。
+
+## Task 5.3 完成记录（P3-22 Evidence Score，2026-10-11）
+
+### 交付
+
+- `diagnosis/evidence.py`（新）：`score_evidence(evidence, *, weights=None) -> int`、
+  `rank_hypotheses(hypotheses, *, weights=None) -> [(Hypothesis, int)]`、
+  `suggested_attribution(hypothesis, *, weights=None, threshold=None) -> str | None`
+  ——全部 F13 纯函数（无 IO、无设备）。
+- `tests/unit/test_evidence_score.py`（新，19 用例）。
+- `diagnosis/__init__.py`（改）：模块图补 `classifier.py` / `analyzer.py` /
+  `evidence.py` 三条（5.2 时漏登记，本任务一并补上）。
+- 权重**不新写字面量**：真值源仍是 `agents/policy_config.py::DIAGNOSIS_EVIDENCE_WEIGHTS`
+  （M1 已建段），阈值取 `ATTRIBUTION_THRESHOLD`（初版 10）。policy.yaml 未改。
+
+### 决策记录
+
+1. **口径登记——「按证据类别求和」而不是「按条目数累加」**。设计 §8.3 的
+   权重表是「每类一项」的形状（六类六个权重），按类求和是字面读法；更硬的理由
+   是 `same_issue_multiple_tests: 3`——若按条目累加，一个影响 100 个用例的根因
+   会拿 300 分，分数随「有多少用例撞上」无界增长，跨候选就再也比不了大小。
+   去重求和让分数只回答「**有哪些类**证据」，与生产者循环了几次无关。
+   探针 3 实测：改成按条目累加 → 1 red。
+2. **排序键 = `(-score, statement)`，`confidence` 明确不进键**（plan 的核心
+   钉子）。同分按 `statement` 定序而不是保持输入序——输入序会让结果依赖调用方
+   怎么拼列表。探针 1 实测：把 `-confidence` 插进排序键 → 1 red。
+3. **`suggested_attribution` 收「假设」而不是收「score」**：分数在函数内部现算。
+   两处各算一次就可能用上不同的 weights，得到一个自相矛盾的结论；测试用
+   `inspect.signature` 钉住签名里没有 `score` 参数。
+4. **方向映射写成表（`_KIND_TO_ATTRIBUTION`），不写 if 链**。权重表是校准点，
+   方向优先级不该是第二处需要同步维护的事实——`max(mapped, key=weight)` 让
+   校准一次生效两处。探针 4 实测：方向写死 `APP_DEFECT` → 1 red。
+5. **两道闸门缺一不可**（矩阵 #16 前半）：① 分数 ≥ 阈值；② 证据里有方向明确的
+   类别。方向词取 P1 `ATTRIBUTIONS`：崩溃 → `APP_DEFECT`、漂移 →
+   `AUTOMATION_DEFECT`（UI 变了，失效的是脚本定位）、5xx → `ENVIRONMENT_DEFECT`
+   （设计 §8.2 原文明写）。`reproducible_3_times` / `same_issue_multiple_tests` /
+   `llm_hypothesis_only` **不映射**——它们说的是「多值得追」，不是「谁的责任」。
+6. **跨任务口径登记（#14 × #16，本任务实测发现）**：矩阵 #14 的 crash 场景规则
+   只产一条 `crash_detected`（5 分）< 阈值 10 → `suggested_attribution` 为 `None`。
+   这是**正确**的：规则出的是假设，要凑到阈值（例如再来一条
+   `reproducible_3_times`，Task 5.4 的产物）才给方向。已写成显式用例
+   `test_crash_needs_corroboration_before_it_is_suggested`。
+   **待办（M5 Gate，Task 5.6）**：`verify_p3_m5.py` 的演示必须让崩溃场景
+   **带上复现证据**（Task 5.4 的 `reproducible_3_times`）才断言「给出归因建议」
+   ——只注入一次崩溃而期望 `suggested_attribution` 非空，会撞上这条阈值口径。
+7. **口径登记——方向闸门在初版权重下不可达，它是为校准留的防御**。三类无方向
+   证据合计 5+3+1=9 < 10，所以「分数够但方向不明」当前构造不出来。用例
+   `test_direction_gate_needs_calibration_to_be_reachable` 把这个关系**钉住**：
+   谁把阈值降到 ≤9 或把无方向权重调高，它会红并要求同时补一条可达用例（同一用例
+   里已示范校准后（`reproducible_3_times: 10`）闸门真的挡住）。探针 6 实测：
+   撤掉方向闸门 → 1 red。
+
+### 实测
+
+- 全量 pytest **1978 passed / 0 failed**（1959 + 19）。
+- A/B 探针（六轮，逐个红、逐个还原 md5 `a2df0998…` 一致、`__pycache__` 已清）：
+  - 排序键加 `-confidence` → **1 red**（本任务核心钉子）；
+  - 阈值闸门失效（`< limit` → `< 1`）→ **3 red**；
+  - 按条目累加（去重求和失效）→ **1 red**；
+  - 方向写死 `APP_DEFECT` → **1 red**；
+  - 未知类别静默（`unknown = []`）→ **1 red**（变成 `KeyError`，仍是 fail-loud
+    的另一种形态，但报错位置从「点名类别」退化为裸 `KeyError`）；
+  - 撤掉方向闸门（无映射时兜底 `crash_detected`）→ **1 red**。
+- **教训（探针 1 首轮假绿）**：第一版
+  `test_same_evidence_set_orders_identically_whatever_the_confidence` 用两组各自
+  单调的 confidence（0.05/0.05/0.05 与 0.95/0.95/0.95），组内 confidence 是
+  **常数序**、与 statement 序同向，把 confidence 塞进排序键的 mutant 照样全绿
+  ——钉子测试自己没钉住。改成**同一列表内 confidence 与 statement 反序**
+  （a:0.1 b:0.5 c:0.9 期望次序 a,b,c；再翻成 a:0.9 b:0.5 c:0.1 次序不变）
+  才真正钉住。**这条对后续所有「排序键不该包含 X」的钉子测试都适用：变异必须
+  能让被禁的字段在组内产生与期望序相反的扰动。**
