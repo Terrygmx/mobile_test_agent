@@ -4580,3 +4580,78 @@ M6 收口后向用户提的四个待拍板项，本批处置如下：
 （reproducible 5 + source_change_correlated 3 + same_issue_multiple_tests 3）
 压根没用到它。这与 ② 是同一件事的两个侧面：**先把数据源建出来，权重才有
 资格谈校准**。
+
+---
+
+## 8. Batch B 前置勘察（决策②的**探路**，2026-10-11）
+
+决策②定的是「单独一批建真实数据源」。开工前先把**数据源到底存不存在**探明
+——否则会写出一个「读本地文件假装有日志」的采集器（正是 §7.2 拒绝的形态）。
+下面每条都是**本机实测**，不是推断。
+
+### 8.1 `get_logs` —— ✅ 可行（模拟器）
+
+```bash
+xcrun simctl spawn <UDID> log show --last 5m --style compact \
+    --predicate 'process == "LoginDemo"'
+```
+
+实测：**1.1s** 返回 143 行（App 冷启动的完整 syslog），进程名过滤有效。
+即日志源是**有界、可重复、可断言**的。真机（非模拟器）需要
+`idevicesyslog`（`libimobiledevice`）——本机**未安装**，故真机路径只能
+fail-loud 而不是静默空。
+
+### 8.2 `get_crash_info` —— ✅ 可行（模拟器），且**能拿到真正的崩溃报告**
+
+- 崩溃报告落点：`~/Library/Logs/DiagnosticReports/<App>-<ts>.ips`（**宿主**目录，
+  不是模拟器内部）。
+- `.ips` 是**两段式**：第 1 行是 JSON 元数据，**第 2 段才是正文 JSON**（整文件
+  不是合法 JSON，`json.load` 直接解析会失败——这是个真坑）。
+- 实测 `kill -SEGV <模拟器进程 pid>` → 6~8s 后产出报告，字段可用：
+  `bug_type=309`、`exception.signal=SIGSEGV`、`faultingThread`、`threads[i].frames`
+  （17 帧，frame0 有 symbol）、`usedImages`（13 个镜像）。
+- **模拟器进程在宿主 `ps` 里可见**（`simctl launch` 返回的 pid 直接 `kill -SEGV`
+  生效），所以「模拟器上做崩溃注入」是可行的。
+
+### 8.3 ⚠️ `crash_detected`（权重 5）**今天没有任何生产者**
+
+勘察发现的一条**比工具没接线更严重**的事实：
+
+| 事实 | 位置 |
+|---|---|
+| `crash_detected` 的判据是「步骤 `failure_type == "APP_CRASH"`」**或**「`infra_events` 里有 `WDA_DEAD` / `DEVICE_UNAVAILABLE` 且现场有失败步骤」 | `diagnosis/classifier.py` 的 `_CRASH_FAILURE_TYPES` / `_CRASH_INFRA_EVENTS` |
+| 全仓 `"APP_CRASH"` 只出现在**测试**里（`tests/**`）；生产侧**没有一处**写入它 | grep 全仓：`tracer/storage.py:48` 只是**词表**（允许的枚举值），不是写入点 |
+| App 崩溃时 `pipeline` 映射出来的是 **`WDA_FAILURE` + status `INFRA_FAILURE`** | `cli/pipeline.py` 的 `except InfraError` 分支 |
+
+即：**App 真的崩了，落库的分类是 `WDA_FAILURE`**（基础设施失败），
+`crash_detected` 返回 False。这条与 M5 那次「`fatalError` 按钮点下去 Appium 记
+SUCCESS」是**同一个坑的两个面**：P1 压根没有「App 崩了」的判定。
+
+→ **Batch B 的真正价值不在接线，而在补上这个判定**：崩溃报告采集器是它的
+**唯一**可能数据源（`crash_detected` 的第二个判据要求 `infra_events` 事件，
+而 `device_session._log_infra` 只写 `WDA_DEAD` / `WDA_RESTARTED`）。
+
+### 8.4 ⚠️ `get_network_summary` —— **本技术栈上不可实现**（勘察结论）
+
+- 没有代理层，也没有任何网络拦截代码（全仓 grep 确认）。
+- **WDA 不暴露网络日志**：`/session/:id/` 下只有 UI 相关的端点。
+- 模拟器有 `xcrun simctl io <UDID> recordVideo`，但**没有** `simctl net` 这类
+  抓包子命令；模拟器流量走宿主网络栈，抓它需要宿主级代理。
+- 宿主装了 `mitmproxy`，但走它意味着「跑回归要先起一个 MITM 代理并让 App 信任
+  其根证书」——那是**改被测环境的运行方式**，与 F2/F7 的立场冲突（本仓的
+  纪律是「不为了测试去改被测系统的形态」）。
+
+→ 结论：`backend_evidence`（权重 2）**在本技术栈上没有可实现的真实生产者**。
+这与 §7.6 的登记一致（那条说「没有生产者」，现在把**为什么**说清了：不是没做，
+是做不了）。**要么接受它永远缺席，要么换被测技术栈**——这是个真问题，不是欠账。
+
+### 8.5 由此得到的 Batch B 形状（**未开工，等拍板**）
+
+1. `evidence/collectors.py`：**两个**真采集器（syslog / crash report）+ 端口
+   （`LogCollector` / `CrashCollector`），全程**离设备可单测**（F13：采集器吃
+   「一个返回原始文本的可调用对象」，测试喂假文本）；
+2. `diagnosis` 侧：崩溃报告 → `failure_type=APP_CRASH` 的判定落点（`pipeline`
+   的 `except InfraError` 分支要能分辨「WDA 死了」与「App 死了」）；
+3. `get_logs` / `get_crash_info` 接线（`NOT_WIRED` 5 → 3）；
+4. `get_network_summary` **维持不接线**，理由改写成 §8.4 的勘察结论
+   （「本技术栈不可实现」≠「还没做」）。
