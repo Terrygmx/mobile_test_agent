@@ -33,7 +33,8 @@ from session.device_session import InfraError
 from source.screen import current_screen
 from testcase.schema import ActionStep, AssertionStep, TestCase, WaitSpec, WaitStep
 
-__all__ = ["SessionPipeline", "PipelineDeps", "_crash_verdict",
+__all__ = ["SessionPipeline", "PipelineDeps", "_CRASH_UNEXPLAINABLE",
+           "_crash_reclassify", "_crash_verdict",
            "_infra_detail", "_infra_outcome", "make_postcondition_checker"]
 
 # 12.5/E7：build id 的兜底值。仅在**读不到**构建身份时使用（`--fake-driver`、
@@ -307,11 +308,16 @@ class SessionPipeline:
         self.secrets = secrets
         # Batch B（设计 P1 §8.2 的第三条信号）：`CrashProbe | None`。
         # None = **不判崩溃**（既有调用点零改动，旧行为逐字保留）——P1/P2/P3
-        # 全量回归是这次接线的验收标准。注入后，`except InfraError` 处多问一句
-        # 「App 崩了吗」，是则记 `APP_CRASH` 而不是 `WDA_FAILURE`。
+        # 全量回归是这次接线的验收标准。注入后，**每个失败出口**都多问一句
+        # 「App 崩了吗」（`_crash_report`，每用例至多探一次），是则记
+        # `APP_CRASH` 而不是 `WDA_FAILURE` / 原症状（§10 的真机实测）。
         self.crash_probe = crash_probe
-        # 本次 run 的起点（崩溃报告的时间窗下界）。`run_all` 里设置。
-        self._run_started_at = None
+        # Batch B 修正：崩溃报告的时间窗下界与**每用例一次**的探测缓存。
+        # 窗从**本条用例**开始算（不是 run 开始）——见 `_crash_report` 的
+        # 「为什么窗口是用例级」。
+        self._crash_since = None
+        self._crash_checked = False
+        self._crash_cache = None
         # 4.2：恢复后的定位覆盖（aux 步骤重跑用）——LLM 候选策略按目标 ref
         # 记住，locate() 优先消费。run 级生命周期（与 RUN_MEMO 同语义：
         # 同 run 同 build 内复用，pipeline 实例即 run 作用域）。
@@ -376,6 +382,19 @@ class SessionPipeline:
                        attempt: int) -> TestcaseResult:
         from executor.assertion import AssertionEngine
         from executor.wait import WaitEngine
+
+        # Batch B：本条用例的崩溃时间窗下界 + 探测缓存复位。逐 attempt 复位
+        # ——WDA 重跑是新的一条 testcase_run，该有自己的窗。
+        #
+        # 边界（如实登记，不假装覆盖）：`manage_env=True` 时本行在 `_prepare`
+        # 之前，precondition（reset/launch）阶段崩掉算这条用例的账；但**套件
+        # 路径**（`manage_env=False`）的 prepare 由 `SuiteRunner` 在调用
+        # `run_one` **之前**做完，落在窗外。那条路径上 prepare 抛异常根本不会
+        # 变成 TestcaseResult（`run_all` 只捕 `SuiteAborted`），没有行可改判，
+        # 所以是「本来就无从归因」而不是「本改动丢的覆盖」。
+        self._crash_since = datetime.now(timezone.utc)
+        self._crash_checked = False
+        self._crash_cache = None
 
         t0 = time.time()
         if self.store is not None:
@@ -654,8 +673,7 @@ class SessionPipeline:
                     # 第三条信号）。崩了 → `APP_CRASH` / `FAIL`：App 崩了是
                     # **App 的账**，记成 INFRA_FAILURE 会把 App 缺陷的归因
                     # 指向环境（`crash_detected` 权重 5 因此恒 False）。
-                    crash = _crash_verdict(self.crash_probe,
-                                           since=self._run_started_at)
+                    crash = self._crash_report()
                     status, failure_type = _infra_outcome(e, crash)
                     infra_detail = _infra_detail(e, crash)
                     detail["error"] = f"{type(e).__name__}: {e}"
@@ -706,6 +724,36 @@ class SessionPipeline:
                         detail["cleanup_error"] = str(e)
                 else:
                     raise
+
+        # Batch B 修正（真机实测逼出来的，见 `docs/p3_data_audit.md` §10）：
+        # **崩溃判定必须覆盖所有失败出口**，不只是 `except InfraError`。
+        # App 死了最常见的表现是「元素找不到 / 屏认不出来」这类普通步骤失败
+        # ——它根本不经过 InfraError 分支，于是真机那次记成了
+        # `CURRENT_SCREEN_UNKNOWN`（崩溃报告在案却没人读）。
+        #
+        # 位置选在 cleanup **之后**：cleanup 失败会把终态升成
+        # ENVIRONMENT_FAILURE（H10，环境的账），那种情形不该再改判。
+        # 只有 `status == "FAIL"` 且症状**能由崩溃解释**时才问探测——
+        # 通过的用例一次都不问（探测有界等待，默认 12s，白等是浪费）。
+        if status == "FAIL" and failure_type \
+                and failure_type not in _CRASH_UNEXPLAINABLE:
+            crash = self._crash_report()
+            new_status, new_ftype = _crash_reclassify(
+                status, failure_type, crash)
+            if new_ftype != failure_type:
+                detail["crash_reclassified"] = {
+                    "failure_type": failure_type,
+                    "crash": crash.as_dict() if crash is not None else None}
+                # **步骤行也要改**：`diagnosis/classifier.py::crash_detected`
+                # 的第一条判据读的是步骤的 failure_type（`ctx.steps` 来自
+                # `steps` 表）——只改用例行，规则引擎仍然看不见崩溃。
+                if self.store is not None \
+                        and getattr(lifecycle, "tc_run_id", None):
+                    self.store.mark_steps_app_crash(
+                        lifecycle.tc_run_id,
+                        exclude=tuple(_CRASH_UNEXPLAINABLE),
+                        crash=crash.as_dict() if crash is not None else None)
+                status, failure_type = new_status, new_ftype
 
         # 8.1 优先级：FAIL > RECOVERED > PASS——有步骤恢复成功且最终没有
         # 更高优先级失败 → 用例 RECOVERED（exit 5：无 FAIL 但需人工确认）
@@ -1253,6 +1301,33 @@ class SessionPipeline:
             return [{"type": "accessibility_id", "value": target_ref.id}]
         return locate
 
+    def _crash_report(self):
+        """本条用例的崩溃报告（**每用例至多探测一次**，结果缓存）。
+
+        ## 为什么缓存
+
+        `CrashProbe.crashed_since` 是**有界等待**（默认 12s）——一次真机崩溃
+        要挂 12 秒。两个消费点（`except InfraError` 与收尾改判）若各自探测，
+        同一个用例要多挂一倍，而且两次结果可能不同（第二次才等到报告落盘），
+        同一条用例上出现两个互相矛盾的结论。
+
+        ## 为什么窗口是**用例级**而不是 run 级
+
+        结论的粒度决定窗口的粒度：这次改判只改写**本条用例**的终态，若窗口
+        是 run 级，「A 用例崩了、B 用例随后也失败」会把 B 的失败一起记到 A 的
+        崩溃账上——归因粒度比证据粒度粗，是误报的常见来源。
+
+        代价说清楚：run 级窗口能覆盖「App 在用例间隙崩了」，用例级覆盖不到。
+        但那种崩溃的**归属本来就说不清**（没有失败步骤可改判），而它一旦在
+        下一条用例里表现出来，下一条用例自己的窗口就会覆盖到。
+        """
+        if self._crash_checked:
+            return self._crash_cache
+        self._crash_checked = True
+        self._crash_cache = _crash_verdict(self.crash_probe,
+                                           since=self._crash_since)
+        return self._crash_cache
+
     def _prepare(self, tc: TestCase) -> None:
         if self.deps is not None and self.deps.env is not None:
             self.deps.env.prepare(tc)
@@ -1293,10 +1368,9 @@ class SessionPipeline:
 
         run = RunResult(run_id=run_id, suite=cases[0].suite if cases else None)
         self._run_id = run_id
-        # Batch B：崩溃报告的时间窗下界。**在 run 开始时取**（不是用例开始时）
-        # ——App 可能在 precondition 阶段就崩了（reset/launch 那一步），
-        # 那时还没有任何用例在跑。
-        self._run_started_at = datetime.now(timezone.utc)
+        # Batch B：崩溃探测的时间窗**逐用例**在 `_run_case_once` 里设
+        # （不是 run 级一处）——归因的粒度必须与结论的粒度一致，见
+        # `_crash_report` 的「为什么窗口是用例级」。
         try:
             policy = (failure_policy if isinstance(failure_policy,
                                                    FailurePolicy)
@@ -1388,6 +1462,65 @@ def _run_status(run: RunResult) -> str:
         # （M4 Gate 真机实锤：漂移 run exit_code=5 而 runs.status=FAIL）
         return "RECOVERED"
     return "FAIL"
+
+
+# 崩溃**解释不了**的失败类型 → 一句「为什么它有别的账主」。
+#
+# 方向是**排除表**而不是白名单：本批的缺口（真机把崩溃记成
+# `CURRENT_SCREEN_UNKNOWN`）正是「没想到的症状形态溜过了白名单」。
+# 白名单下，下次出现一个新的症状名，同一条链会**再断一次**，而且是静默的；
+# 排除表下默认改判，漏判只能来自「误列进排除表」，那是显式动作、看得见。
+_CRASH_UNEXPLAINABLE: dict[str, str] = {
+    "ASSERTION_VALUE_MISMATCH":
+        "断言读到过实际值 = 那一刻 App 活着；且设计 §8.2 末条明文归 P1，"
+        "不进诊断流程——改判会同时错两处",
+    "SECURITY_BLOCKED":
+        "Guard 在**分派前**拦下（8.4），App 死活与该结论无关；它是安全策略"
+        "终态（用例 BLOCKED / exit 4），不该被改写成 FAIL",
+    "PREPARE_FAILED":
+        "环境准备失败（11.2）——环境的账，不是 App 的账",
+    "CLEANUP_FAILED":
+        "cleanup 失败（H10）——环境的账；且它在崩溃改判**之后**才升级终态",
+    "SECRET_NOT_FOUND":
+        "`${VAR}` 运行时解析失败（H9）——配置问题，与 App 无关",
+    "BUILD_METADATA_MISMATCH":
+        "构建身份闸门（8.4 / exit 3）——前置配置问题",
+    "LLM_DISABLED": "LLM 配置问题（8.2）",
+    "LLM_BUDGET_EXCEEDED": "预算耗尽（8.2）——配置问题",
+    "LLM_TIMEOUT": "LLM 超时（8.2）——外部服务问题",
+    "LLM_PROVIDER_ERROR": "LLM 供应商错误（8.2）——外部服务问题",
+    "LLM_INVALID_OUTPUT": "LLM 输出不合法（8.2）——Agent 侧问题",
+    "LLM_LOW_CONFIDENCE": "LLM 低置信（8.2）——Agent 侧结论",
+    "LLM_RISK_BLOCKED": "LLM 提案被风险策略拦下（8.2）——策略结论",
+    "WDA_FAILURE":
+        "基础设施故障，`except InfraError` 分支自己判（那里已经问过探测）",
+    "APPIUM_FAILURE": "驱动层故障（非 App）",
+    "DEVICE_UNAVAILABLE": "设备不可用——基础设施",
+    "ENV_RESET_FAILED": "环境复位失败（11.2）",
+    "UNSUPPORTED_RESET": "环境不支持该复位方式（11.2）",
+}
+
+
+def _crash_reclassify(status: str, failure_type: str | None,
+                      crash) -> tuple[str, str | None]:
+    """「这次失败其实是 App 崩了」→ `(status, failure_type)`（纯函数，F13）。
+
+    判据（三条**同时**成立才改判）：
+    1. `crash is not None`——时间窗内有该 bundle 的真实崩溃报告（权重 5 的
+       强证据；没有报告一律维持旧行为，这是 `crash_probe=None` 的兼容基础）；
+    2. 终态是 `FAIL`——`BLOCKED`/`ENVIRONMENT_FAILURE`/`INFRA_FAILURE` 各有
+       账主，崩溃不该改写（见 `_CRASH_UNEXPLAINABLE` 与 H10）；
+    3. 原症状**不在** `_CRASH_UNEXPLAINABLE` 里——即「崩溃能解释这个症状」。
+
+    ⚠️ 原症状由调用方存进 `detail.crash_reclassified`（留痕）：错误文本说
+    「找不到元素」而类型是 `APP_CRASH`，没有那条审计记录，事后会以为那是
+    脏数据。
+    """
+    if crash is None or status != "FAIL" or not failure_type:
+        return status, failure_type
+    if failure_type in _CRASH_UNEXPLAINABLE:
+        return status, failure_type
+    return status, "APP_CRASH"
 
 
 def _crash_verdict(crash_probe, *, since):

@@ -4765,6 +4765,12 @@ SUCCESS」是**同一个坑的两个面**：P1 压根没有「App 崩了」的�
 即 **「App 崩了 → 记成 APP_CRASH → 规则判出崩溃假设」这条链在真机上是通的**，
 不再是「判据写了但没人产出」。
 
+> ⚠️ **本节结论已被推翻，见 §10。** 上面这段是**函数级**实测（手工把
+> `InfraError` 喂给 `_infra_outcome`）——它证明的是「判据对」，**不是**
+> 「真机会走到那条判据」。同一批的 `mta run` 真机端到端实测记的是
+> `CURRENT_SCREEN_UNKNOWN`：App 死了最常见的表现是普通步骤失败，
+> **根本不经过 `except InfraError`**。这正是「函数级 E2E ≠ 端到端 E2E」。
+
 ### 9.7 数字
 
 | 项 | 值 |
@@ -4773,3 +4779,136 @@ SUCCESS」是**同一个坑的两个面**：P1 压根没有「App 崩了」的�
 | 全量回归 | 2219 → **2261 passed / 0 failed** |
 | `NOT_WIRED` | 5 → **3**（19/22 已接线） |
 | A/B 探针 | 14 条，补 2 条断言后 **14/14 红** |
+
+
+---
+
+## 10. Batch B 修正 —— 崩溃判定必须覆盖**所有**失败出口（2026-10-11）
+
+§9 交付后，用 `mta run` 在真模拟器上做**端到端**验证（不是函数级），
+当场打脸。本节记录缺陷、根因、修法与真机复验。
+
+### 10.1 缺陷：真机崩了，记的却是普通步骤失败
+
+```text
+$ kill -SEGV <LoginDemo pid>   # 后台注入，run 进行中
+$ mta run --case login_again_001 …
+login_again_001: FAIL (CURRENT_SCREEN_UNKNOWN)
+run exit=1
+
+$ ls -t ~/Library/Logs/DiagnosticReports/LoginDemo*.ips | head -1
+LoginDemo-2026-10-11-204403.ips   {'type': 'EXC_CRASH', 'signal': 'SIGSEGV'}
+```
+
+崩溃报告**在案**（时间窗内、bundle 对得上），管线却记 `CURRENT_SCREEN_UNKNOWN`。
+
+**根因**：`_crash_verdict` 只挂在 `except InfraError` 分支上。而 **App 死了
+最常见的表现不是 WDA 报错，而是「元素找不到 / 屏认不出来」这类普通步骤失败**
+——`wait_for(screen:HomeView)` 超时走的是 `WaitStep` 的 `WaitTimeout` 分支，
+与 `InfraError` 毫无关系。
+
+**为什么单测看不见**：上一批 8 条 `test_pipeline_crash_verdict` 全部只喂
+`InfraError`（因为「崩溃判定」这个词的直觉入口就是它）。**真机喂的是
+`WaitTimeout`。** 与 §9.3 第 1 条同款：单测自己传参当然绿，漏的是**真实形态**。
+
+### 10.2 判据方向：**排除表**而不是白名单
+
+第一版修法想用白名单（「哪些症状可以改判」）——**被自己否掉了**：本批的缺口
+正是「没想到的症状形态溜过了白名单」。白名单下，下次出现一个新的症状名，
+同一条链会**再断一次**，而且是静默的。
+
+故 `cli/pipeline.py::_CRASH_UNEXPLAINABLE` 是**排除表**：逐条列出「有别的账主、
+崩溃解释不了」的失败类型，每条带一句理由（断言值不符归 P1、Guard 拦截在
+分派前、环境/变量解析归环境……）；**其余一律改判**。
+
+误报面被两件事夹住：
+1. 必须有**时间窗内**的真实崩溃报告（权重 5 的强证据）；
+2. 原症状留在 `detail.crash_reclassified.failure_type` 里（可审计、可回退）。
+
+### 10.3 两处**必须同时**改（只改一处链还是断的）
+
+| 落点 | 为什么 |
+|---|---|
+| `testcase_runs.failure_type` | 用例终态——报告/退出码读它 |
+| **`steps.failure_type`** | ⚠️ `diagnosis/classifier.py::crash_detected` 的**第一条判据读的是步骤行**（`ctx.steps` 来自 `steps` 表）。只改用例行，规则引擎仍然看不见崩溃 |
+
+新存储原语 `TraceStore.mark_steps_app_crash(tc_run_id, *, exclude, crash)`
+（默认空排除表 = 全部改判，与管线侧同向；只动 `status='FAILED'` 的行）。
+
+### 10.4 三处**新发现**的既存缺口（都不是本批引入）
+
+1. **断言值不符的出口一行步骤都不落**：`cli/pipeline.py` 把
+   `AssertionValueMismatch` 原样 re-raise 给外层 `except Exception`，那条分支
+   不落步骤行。P3-1「失败步骤也落库」的纪律没覆盖到这个出口。
+   **本批未修**（改的是落库路径，独立立项）；已用一条**钉住现状**的断言登记
+   （`test_pipeline_crash_reclassify.py`，明写「这是既存缺口」）。
+2. **`ACTION_FAILED` 不在 `FAILURE_TYPES` 词表里**：`cli/pipeline.py` 的
+   App 级动作失败写的是 `"ACTION_FAILED"`，而 `tracer/storage.py::FAILURE_TYPES`
+   没有这个值（词表里有的是 `APPIUM_FAILURE`）。写入未做词表校验所以不报错，
+   但「词表是口径」这句话对它不成立。**登记，不在本批修。**
+3. **套件路径的 precondition 崩在窗外**：`manage_env=False` 时 prepare 由
+   `SuiteRunner` 在 `run_one` 之前做完，落在用例级时间窗之外。那条路径上
+   prepare 抛异常根本不会变成 `TestcaseResult`，**没有行可改判**——所以是
+   「本来就无从归因」，不是本改动丢的覆盖。已在 `_run_case_once` 就地登记。
+
+### 10.5 时间窗的粒度：**用例级**（有意为之）
+
+原实现是 run 级一处（`_run_started_at`）。本次改为**逐用例**设窗：
+结论的粒度决定窗口的粒度——这次改判只改写**本条用例**的终态，run 级窗会让
+「A 用例崩了、B 用例随后也失败」把 B 的失败记到 A 的崩溃账上（归因粒度比证据
+粒度粗，是误报的常见来源）。
+
+代价如实说：run 级窗能覆盖「App 在用例间隙崩了」，用例级覆盖不到。但那种崩溃
+**归属本来就说不清**（没有失败步骤可改判），而它若在下一条用例里表现出来，
+下一条自己的窗就会覆盖到。
+
+**探测缓存**：`_crash_report()` 每用例至多探测一次（`CrashProbe` 是有界等待，
+默认 12s）。两个消费点（`except InfraError` 与收尾改判）共用一次结果——各自
+探测会让同一条用例多挂一倍，且两次结果可能不同（第二次才等到报告落盘），
+同一条用例上出现两个互相矛盾的结论。
+
+### 10.6 A/B 探针：14 条，**4 条第一版没变红**
+
+| 探针 | 现象 | 根因 | 处置 |
+|---|---|---|---|
+| R7 探测不缓存 | 全绿 | 「至多探一次」那条测试只喂了 **wait 路径**（单消费点）——缓存坏了也看不出来 | 补「两个消费点共用一次」的断言（用 `InfraError` + 动作步，唯一走两次消费点的形态） |
+| R12 收尾改判自己探一次 | 全绿 | 同上 | 同上 |
+| R13 InfraError 分支自己探一次 | 全绿 | 同上 | 同上 |
+| R4 调用点不再只挑 FAIL | 全绿 | **等价变异体**（已证）：`_run_case_once` 里每个非 FAIL 的 `status` 赋值的 `failure_type` 都在排除表里，去掉 `status == "FAIL"` 守卫行为不变 | **不改测试**——守卫是防御性的（新出口若配了可改判类型，它才生效）。用穷举脚本证明等价性，写进本节 |
+
+补完后 **14/14 红**（R4 除外，且已证明它**不可能**红）。
+
+### 10.7 真机端到端复验（这才是验收）
+
+同一场景重跑（`kill -SEGV` 注入在第 6 步 `wait_for(screen:ProfileView)` 期间）：
+
+```text
+$ mta run --case login_again_001 …
+login_again_001: FAIL (APP_CRASH) -- WAIT_TIMEOUT: target='ProfileView' …
+run: exit 1
+
+# trace
+testcase_runs: status=FAIL failure_type=APP_CRASH
+steps[6]:      status=FAILED failure_type=APP_CRASH
+               detail.error = "WAIT_TIMEOUT: target='ProfileView' …"   ← 原症状留着
+               detail.crash_reclassified.crash.path = …/LoginDemo-2026-10-11-213904.ips
+
+# 诊断链（离线，读同一份 trace）
+crash_detected(ctx) = True
+hypothesis: App 在执行过程中崩溃（进程消失）  evidence=crash_detected
+$ mta diagnose … → bug 候选 status=HUMAN_REVIEW score=5
+  （5 < 阈值 10 → 归因建议不达标，保持 UNTRIAGED —— F10「假设不是事实」）
+```
+
+**「App 崩了 → 记成 APP_CRASH → 规则判出崩溃假设」这条链现在在真机上是通的**
+——而且这次的证据是**端到端**的（§9.6 那条是函数级的，被本次实测推翻）。
+
+### 10.8 数字
+
+| 项 | 值 |
+|---|---|
+| 新增测试 | 1 个文件 / **50 条**（`test_pipeline_crash_reclassify.py`） |
+| 全量回归 | 2261 → **2311 passed / 0 failed** |
+| A/B 探针 | 14 条，补 3 条断言后 **14/14 红**（R4 已证等价，不在此列） |
+| 真机复验 | `FAIL (APP_CRASH)` + 步骤行同步改判 + 诊断链闭合 |
+| `NOT_WIRED` | **3**（不变——本批修的是判据覆盖面，不是工具接线） |

@@ -1182,9 +1182,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     # 1b. Batch B（设计 P1 §8.2 的第三条信号）：崩溃探测。
     #     ⚠️ **只真机注入**——fake-driver 没有设备也没有 bundle，注入一个
     #     探不到东西的探针只会白等 12 秒且恒 None（等于没接线却看起来接了）。
-    #     注入后，`except InfraError` 处多问一句「App 崩了吗」，是则记
-    #     `APP_CRASH`（否则 `crash_detected` 权重 5 恒 False，App 崩溃被记成
-    #     基础设施故障——缺陷见 `docs/p3_data_audit.md` §8.3）。
+    #     注入后，**每个失败出口**都会问一句「App 崩了吗」（`_crash_report`，
+    #     每用例至多探测一次），是则记 `APP_CRASH`。否则 `crash_detected`
+    #     权重 5 恒 False：App 崩溃先被记成基础设施故障（§8.3），后又被记成
+    #     普通步骤失败（§10 的真机实测——App 死了最常见的表现恰恰是
+    #     「元素找不到 / 屏认不出来」，根本不经过 `except InfraError`）。
     if not args.fake_driver and args.bundle_id:
         from telemetry.collectors import CrashCollector
         from telemetry.probe import CrashProbe

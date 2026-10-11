@@ -195,10 +195,17 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
 
 ## 9. 当前状态快照（**2026-10-11**，以实测为准）
 
-- **分支 / HEAD**：`P4-1011` / **`4c7d065`**（**M1–M6 全部收口**，其上又叠了 Task 6.7
-  「工具层接线补齐」两个 commit；里程碑 tag `checkpoint-p3-m6` = `f63b381` **不可动**）
-- **全量基线**：**2219 passed / 0 failed**（M6 收口 2207 + Task 6.7 的 17 条，其中 5 条
-  是改写既有人数钉，净新增 17）
+- **分支 / HEAD**：`P4-1011` / **`961952b`**（**M1–M6 全部收口**，其上又叠了 Task 6.7
+  「工具层接线补齐」与 Batch B「设备侧证据采集 + `APP_CRASH` 判定」共 6 个 commit；
+  里程碑 tag `checkpoint-p3-m6` = `f63b381` **不可动**）
+- **全量基线**：**2311 passed / 0 failed**（M6 收口 2207 → Task 6.7 的 2219 →
+  Batch B 的 2261 → Batch B 修正的 2311）
+- ⚠️ **Batch B 的教训（P3 收口后仍抓到真缺陷）**：§9 曾声称「崩溃链在真机上是通的」，
+  那是**函数级**实测；`mta run` 真机端到端实测当场推翻——App 崩了记的是
+  `CURRENT_SCREEN_UNKNOWN`（崩溃判定只挂在 `except InfraError` 上，而 App 死了
+  最常见的表现是普通步骤失败）。**函数级 E2E ≠ 端到端 E2E**，详见
+  `docs/p3_data_audit.md` §10。修正后真机复验：`FAIL (APP_CRASH)`，
+  用例行与**步骤**行同步改判（规则引擎读的是步骤行），诊断链闭合。
 - **最新 tag**：`checkpoint-p3-m6` = `f63b381`（**P3 收口**；里程碑 tag `v0.3-p3-complete`；
   上一个 `checkpoint-p3-m5` = `233ab1e`）
 - **Gate 状态**：M1 ✅（`checkpoint-p3-m1`）· M2 ✅（`phase0/verify_p3_m2.py` exit 0，8/8 PASS）

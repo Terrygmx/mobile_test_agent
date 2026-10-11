@@ -486,6 +486,59 @@ class TraceStore:
              tc_run_id))
         self.conn.commit()
 
+    def mark_steps_app_crash(self, tc_run_id: int, *,
+                             exclude: tuple[str, ...] = (),
+                             crash: dict | None = None) -> int:
+        """把该用例下的失败步骤改判为 `APP_CRASH`（Batch B 修正）。
+
+        ## 为什么是「事后改判」而不是「写的时候就写对」
+
+        崩溃是**异步**才知道的：`telemetry.probe.CrashProbe` 要等崩溃报告落盘
+        （勘察实测 SIGSEGV 后 6~8s），而失败步骤的行在失败的**当下**就落了库。
+        判决只能回写。
+
+        ## 为什么必须回写**步骤**行，不能只改用例行
+
+        `diagnosis/classifier.py::crash_detected` 的第一条判据读的是**步骤**的
+        `failure_type`（`ctx.steps` 来自 `steps` 表）——只改用例行的话，规则
+        引擎仍然看不见崩溃，「App 崩了 → 记成 `APP_CRASH` → 规则判出崩溃假设」
+        这条链还是断的（真机实测实锤，见 `docs/p3_data_audit.md` §10）。
+
+        ## 改判范围由调用方给（存储层保持哑）
+
+        `exclude` 是**崩溃解释不了的**失败类型（域概念在
+        `cli/pipeline.py::_CRASH_UNEXPLAINABLE`）——存储层不判断语义，只执行
+        「除了这些，其余失败步骤都改判」。**默认空元组 = 全部改判**：与管线
+        侧的排除表同向（默认改判，漏判只能来自显式列入排除表）。
+
+        `crash` 非空时往该步骤的 `detail_json` 里**合并**一条
+        `crash_reclassified` 审计记录（与 `triage_testcase` 同款纪律：改判必须
+        留痕）。不留痕的话，事后看到「错误文本说找不到元素、类型却是
+        `APP_CRASH`」会以为那是脏数据。返回改判的行数。
+        """
+        sql = ("SELECT id, failure_type, detail_json FROM steps"
+               " WHERE testcase_run_id=? AND status='FAILED'")
+        params: list = [tc_run_id]
+        if exclude:
+            marks = ",".join("?" * len(exclude))
+            sql += f" AND (failure_type IS NULL OR failure_type NOT IN ({marks}))"
+            params.extend(exclude)
+        rows = self.conn.execute(sql, params).fetchall()
+        note: dict = {"tool": "mta run (crash probe)", "ts": _now()}
+        if crash:
+            note["crash"] = crash
+        for row in rows:
+            d = json.loads(row["detail_json"] or "{}")
+            # 原症状留着（`triage_testcase` 的 `previous` 同款纪律）
+            d["crash_reclassified"] = {**note,
+                                       "failure_type": row["failure_type"]}
+            self.conn.execute(
+                "UPDATE steps SET failure_type=?, detail_json=? WHERE id=?",
+                ("APP_CRASH", json.dumps(redact(d), ensure_ascii=False),
+                 row["id"]))
+        self.conn.commit()
+        return len(rows)
+
     def start_testcase(self, run_id: str, testcase_id: str,
                        attempt: int = 1) -> int:
         cur = self.conn.execute(
