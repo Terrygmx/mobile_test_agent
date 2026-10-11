@@ -430,3 +430,132 @@ class SQLiteAgentStore:
                 "duplicate_of": row["duplicate_of"],
                 "detail": json.loads(row["detail_json"] or "{}"),
                 "created_at": row["created_at"]}
+
+    # --- bug_candidates（迁移 005；Task 5.1 / P3-20） --------------------------
+
+    def save_bug_candidate(self, candidate_id: str, *, title: str,
+                           evidence: list[dict],
+                           failure_type: str = "",
+                           severity: str = "MEDIUM",
+                           attribution_hypothesis: str = "UNTRIAGED",
+                           evidence_score: int = 0,
+                           reproducible: bool | None = None,
+                           reproduction_count: int = 0,
+                           dedup_key: str | None = None,
+                           affected_tests: list[str] | None = None) -> dict:
+        """落一条 Bug Candidate（upsert：`candidate_id` 是主键）。
+
+        **幂等**：同 id 重存覆盖（与 `save_candidate` / `save_plan` 同款）——
+        诊断重跑同一次失败会算出同 id 的候选，不该线性增长出重复行。
+        `created_at` 只在**首次插入**时取 `_now()`。
+
+        ⚠️ **`status` 不是本方法的形参**（与 `save_candidate` 的
+        `review_status` 同款处置，review_p3_task35 P2-2）：本方法**只写
+        `'DISCOVERED'`**（字面量，见下方 INSERT）。状态推进的唯一入口是
+        Task 5.6 的状态机——接受 `status=` 形参会让「DISCOVERED→…→CONFIRMED」
+        这条链**存在一条绕过转换校验的旁路**（能产出 `CONFIRMED` 但
+        `reviewer`/`reviewed_at` 全 `NULL` 的行，看起来像已确认、实则无人确认）。
+        **形参删掉而不是加断言**：删掉之后调用方传它会以 `TypeError` fail-loud。
+
+        ⚠️ **已人工决策的候选不可覆写**（与 `save_candidate` 的 AE 闸门同款）：
+        探针 AE 在 test_candidates 上实锤过「upsert 不含 review_status → 重跑
+        覆写已决行」的形态；这里提前堵住——`status != 'DISCOVERED'` 的行
+        经本方法重存 fail-loud，翻案走人工通道。
+
+        `evidence` 是 `EvidenceItem` 的 `model_dump(mode="json")` 列表
+        （`candidates/bug.py::BugCandidate.to_store_dict` 的产物）。
+        """
+        if not title.strip():
+            raise ValueError("bug 候选必须有 title（审核队列里无法辨认）")
+        with self._write_tx() as conn:
+            existing = conn.execute(
+                "SELECT status FROM bug_candidates WHERE candidate_id=?",
+                (candidate_id,)).fetchone()
+            if existing is not None and existing["status"] != "DISCOVERED":
+                raise ValueError(
+                    f"bug 候选 {candidate_id} 已推进"
+                    f"（{existing['status']}）——诊断重跑不得覆写（与 "
+                    f"save_candidate 的 AE 闸门同款）；翻案走人工通道")
+            conn.execute(
+                "INSERT INTO bug_candidates (candidate_id, title, severity,"
+                " failure_type, attribution_hypothesis, evidence_json,"
+                " evidence_score, reproducible, reproduction_count, dedup_key,"
+                " status, affected_tests_json, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,'DISCOVERED',?,?)"
+                " ON CONFLICT(candidate_id) DO UPDATE SET"
+                " title=excluded.title, severity=excluded.severity,"
+                " failure_type=excluded.failure_type,"
+                " attribution_hypothesis=excluded.attribution_hypothesis,"
+                " evidence_json=excluded.evidence_json,"
+                " evidence_score=excluded.evidence_score,"
+                " reproducible=excluded.reproducible,"
+                " reproduction_count=excluded.reproduction_count,"
+                " dedup_key=excluded.dedup_key,"
+                " affected_tests_json=excluded.affected_tests_json",
+                (candidate_id, title, severity, failure_type,
+                 attribution_hypothesis,
+                 json.dumps(evidence, ensure_ascii=False), evidence_score,
+                 None if reproducible is None else int(reproducible),
+                 reproduction_count, dedup_key,
+                 json.dumps(affected_tests or [], ensure_ascii=False), _now()))
+        row = self.get_bug_candidate(candidate_id)
+        assert row is not None       # 刚写完必在
+        return row
+
+    def get_bug_candidate(self, candidate_id: str) -> dict | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM bug_candidates WHERE candidate_id=?",
+                (candidate_id,)).fetchone()
+            return self._bug_from_row(row) if row else None
+        finally:
+            conn.close()
+
+    def list_bug_candidates(self, *, status: str | None = None,
+                            dedup_key: str | None = None) -> list[dict]:
+        """Bug 候选列表（新在前）。两个过滤键都可空（None = 不过滤）。
+
+        `status`：审核队列按状态取（Task 5.6 的 `HUMAN_REVIEW` 队列）。
+        `dedup_key`：去重合并查同根因的既有行（Task 5.5 / F8）。
+        """
+        conn = self._connect()
+        try:
+            where, params = [], []
+            if status is not None:
+                where.append("status=?")
+                params.append(status)
+            if dedup_key is not None:
+                where.append("dedup_key=?")
+                params.append(dedup_key)
+            sql = "SELECT * FROM bug_candidates"
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            sql += " ORDER BY created_at DESC, rowid DESC"
+            return [self._bug_from_row(r)
+                    for r in conn.execute(sql, params).fetchall()]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _bug_from_row(row: sqlite3.Row) -> dict:
+        return {"candidate_id": row["candidate_id"],
+                "title": row["title"],
+                "severity": row["severity"],
+                "failure_type": row["failure_type"],
+                "attribution_hypothesis": row["attribution_hypothesis"],
+                "evidence": json.loads(row["evidence_json"] or "[]"),
+                "evidence_score": row["evidence_score"],
+                # ⚠️ 三态列：`None` 是「还没试过复现」，**不是** False
+                # （`candidates/bug.py::from_store_dict` 同款处置）
+                "reproducible": (None if row["reproducible"] is None
+                                 else bool(row["reproducible"])),
+                "reproduction_count": row["reproduction_count"],
+                "dedup_key": row["dedup_key"],
+                "status": row["status"],
+                "affected_tests": json.loads(
+                    row["affected_tests_json"] or "[]"),
+                "reviewer": row["reviewer"],
+                "review_decision": row["review_decision"],
+                "reviewed_at": row["reviewed_at"],
+                "created_at": row["created_at"]}

@@ -53,12 +53,12 @@ def test_first_batch_tables_exist(store):
             "SELECT name FROM sqlite_master WHERE type='table'")}
     finally:
         conn.close()
-    # 001（M1）+ 002（M3，Task 3.4 起）都在
+    # 001（M1）+ 002（M3，Task 3.4 起）+ 005（M5，Task 5.1 起）都在
     assert {"agent_tasks", "agent_trace", "test_plans",
-            "test_candidates", "test_candidate_rejections"} <= tables
-    # M4/M5 的表仍随各自里程碑定型（P2 Task 1.2 教训：不提前建表）
+            "test_candidates", "test_candidate_rejections",
+            "bug_candidates"} <= tables
+    # M4 的表仍随各自里程碑定型（P2 Task 1.2 教训：不提前建表）
     assert "discovery_events" not in tables
-    assert "bug_candidates" not in tables
 
 
 # --- agent_tasks --------------------------------------------------------------

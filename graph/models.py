@@ -165,3 +165,9 @@ class TraceStep:
     observed_at: str | None = None
     testcase_id: str = ""
     failure_type: str | None = None
+    # Task 5.1（P3-20）：失败证据的**路径**（`steps.screenshot_path` /
+    # `ui_tree_path`，P1 起就在库里，`read_trace_steps` 早先没读出来）。
+    # 与上面两个字段同款处置：**追加而非重排**、都带默认值、放在末尾——
+    # 既有构造点（全是关键字实参）与消费方不受影响。
+    screenshot_path: str | None = None
+    ui_tree_path: str | None = None

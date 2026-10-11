@@ -127,8 +127,17 @@ class P2KnowledgeSources:
         | `app_build` | 范围（SQL 层，`_read_steps`） | `str` 或 `None`（None = 不过滤） |
         | `testcase_id` | 该用例的历史（`testcase_runs.testcase_id`） | 同上 |
         | `failure_type` | 该失败分类的历史（`steps.failure_type`） | 同上 |
+        | `run_id` | **一次 P1 run 的现场**（Task 5.1 / P3-20） | 同上 |
         | `limit` | 取**最后** N 条 | 非负 `int` |
         | `screen_id` | ⚠️ **不可用**——见下 | — |
+
+        ⚠️ `run_id` 指 **P1 `runs.run_id`**（一次 `mta run`），而
+        `TraceStep.testcase_run_id` 是 `testcase_runs.id`（一次用例尝试）——
+        两个 id 空间各自独立（`cli/pipeline.py:1056` 已登记）。本键按后者所属
+        的 run 过滤（`testcase_runs.run_id` 映射），**不新增读取逻辑**：诊断
+        要的是「这一次失败现场的完整步骤序列」，`trace_history` 本来就是
+        「trace 的 steps 即历史」，多一个范围键即可（Task 2.2 从 2 键扩到 5
+        键是同一手法——**扩键，不新建平行接口**，F3）。
 
         **顺序语义**：其余过滤键**先**应用、`limit` **最后**——`limit=10` +
         `failure_type=APP_CRASH` 是「最近 10 条崩溃步骤」，不是「最近 10 条步骤里
@@ -143,13 +152,13 @@ class P2KnowledgeSources:
         数据源缺口与两条候选修法登记在 `docs/p3_data_audit.md`（Task 2.2 记录）。
         """
         unknown = set(filters) - {"app_build", "screen_id", "testcase_id",
-                                  "failure_type", "limit"}
+                                  "failure_type", "run_id", "limit"}
         if unknown:
             # 过滤键是接口契约的一部分：静默忽略拼错的键会把「想过滤没
             # 过滤」伪装成「结果恰好都对」。
             raise ValueError(f"未知过滤键: {sorted(unknown)}（支持: "
-                             f"app_build, testcase_id, failure_type, limit；"
-                             f"screen_id 见 docstring 的说明）")
+                             f"app_build, testcase_id, failure_type, run_id,"
+                             f" limit；screen_id 见 docstring 的说明）")
         if "screen_id" in filters:
             raise ValueError(
                 "screen_id 过滤暂不可用：trace 里没有屏信息（steps 表不记 screen，"
@@ -164,7 +173,16 @@ class P2KnowledgeSources:
                 app_build is None or isinstance(app_build, str)):
             raise ValueError(
                 f"app_build 必须是 str 或 None，got {app_build!r}")
+        run_id = filters.get("run_id", _UNSET)
+        if run_id is not _UNSET and run_id is not None \
+                and not isinstance(run_id, str):
+            raise ValueError(f"run_id 必须是 str 或 None，got {run_id!r}")
         steps, _app_id, _build = self._read_steps(app_build)
+        if run_id is not _UNSET and run_id is not None:
+            # run 过滤在 SQL 层做不了（`read_trace_steps` 的行不带 run_id），
+            # 故先取该 run 的 testcase_run id 集，再在 Python 层过滤。
+            ids = self._testcase_run_ids(run_id)
+            steps = [s for s in steps if s.testcase_run_id in ids]
         # 逐字段过滤（`None` = 不过滤，与 app_build 同款语义；非 str → fail-loud）
         for key, attr in (("testcase_id", "testcase_id"),
                           ("failure_type", "failure_type")):
@@ -180,3 +198,27 @@ class P2KnowledgeSources:
                 raise ValueError(f"limit 必须是非负 int，got {limit!r}")
             steps = steps[-limit:] if limit else []
         return steps
+
+    def _testcase_run_ids(self, run_id: str) -> set[int]:
+        """该 P1 run 下的 `testcase_runs.id` 集合（`run_id` 过滤键的底座）。
+
+        只读、失败翻译成可诊断的域错误——与 `_read_steps` 的
+        `DatabaseError → ValueError` 同款（P3 的诊断能力会远程消费本接口，
+        「库没初始化」不该以 `no such table` 的形态漏出去）。
+        """
+        try:
+            conn = sqlite3.connect(str(self._trace_db))
+        except sqlite3.Error as e:
+            raise ValueError(
+                f"trace 库不可读（未初始化？）：{self._trace_db}——{e}") from e
+        try:
+            rows = conn.execute(
+                "SELECT id FROM testcase_runs WHERE run_id=?", (run_id,)
+            ).fetchall()
+        except sqlite3.DatabaseError as e:
+            raise ValueError(
+                f"trace 库不可读（未初始化或无表？）：{self._trace_db}"
+                f"——{e}") from e
+        finally:
+            conn.close()
+        return {int(r[0]) for r in rows}

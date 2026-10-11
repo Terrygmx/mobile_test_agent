@@ -376,6 +376,7 @@ def read_trace_steps(trace_db: str | Path, *,
         rows = conn.execute(
             "SELECT s.testcase_run_id, s.step_index, s.step_type, s.target_id,"
             " s.status, s.detail_json, s.failure_type, t.testcase_id,"
+            " s.screenshot_path, s.ui_tree_path,"
             " COALESCE(t.end_time, t.start_time) AS observed_at"
             " FROM steps s JOIN testcase_runs t"
             " ON t.id = s.testcase_run_id"
@@ -396,5 +397,8 @@ def read_trace_steps(trace_db: str | Path, *,
         # Task 2.2（P3-06）：两个本来就在库里、早先没读出来的字段——
         # P3 的 trace_history 要靠它们过滤（见 graph/models.TraceStep 的说明）。
         testcase_id=r["testcase_id"] or "",
-        failure_type=r["failure_type"]) for r in rows]
+        failure_type=r["failure_type"],
+        # Task 5.1（P3-20）：失败证据路径（诊断的「截图/UI 树」入口）。
+        screenshot_path=r["screenshot_path"],
+        ui_tree_path=r["ui_tree_path"]) for r in rows]
     return steps, app_id, build

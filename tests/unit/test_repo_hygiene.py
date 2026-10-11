@@ -37,13 +37,15 @@ _SKIP_DIRS = {"out", "build", "__pycache__", ".git", ".venv", "venv",
               "node_modules", ".workbuddy-ai", ".mypy_cache", ".pytest_cache"}
 
 # 源码包（只扫这些顶层目录下的 .py，避免误入 out/ 的工作副本）
-# ⚠️ Task 3.4 起加入 `generator` / `candidates`：新包若不在扫描面里，
-# 「同名顶层定义」守卫对它们是**空转通过**（本文件 docstring 记的三次事故
-# 全是「宣布固化了，其实没扫到」）。加包时同步加这一行。
-_SOURCE_DIRS = ("tests", "agent", "agents", "candidates", "cli", "environment",
-                "executor", "experience", "generator", "graph", "knowledge",
-                "llm", "planner", "report", "repository", "runner", "session",
-                "source", "testcase", "tracer")
+# ⚠️ Task 3.4 起加入 `generator` / `candidates`；M4/M5 再加 `explorer` /
+# `diagnosis`：新包若不在扫描面里，「同名顶层定义」守卫对它们是**空转通过**
+# （本文件 docstring 记的三次事故全是「宣布固化了，其实没扫到」）。
+# 加包时同步加这一行。
+_SOURCE_DIRS = ("tests", "agent", "agents", "candidates", "cli", "diagnosis",
+                "environment", "executor", "experience", "explorer",
+                "generator", "graph", "knowledge", "llm", "planner", "report",
+                "repository", "runner", "session", "source", "testcase",
+                "tracer")
 
 
 def _iter_python_files():
@@ -141,7 +143,11 @@ _WRITE_SQL_PREFIXES = ("INSERT", "UPDATE", "DELETE", "REPLACE")
 # + 各自的 upsert 形态），下界同步上调——不调会让守卫在新写语句绕过
 # `_write_tx` 时仍然绿（下界只防「零命中」，不防「漏算新增的」）。
 # Task 3.5 再加 1 条（`decide_candidate` 的 UPDATE），照此上调。
-_MIN_WRITE_STATEMENTS = 22
+# ⚠️ Task 5.1 实测：真实计数是 **27**，而历次「照此上调」累计只把它抬到 22
+# ——下界已经比真实值低 5，等于**静默容忍 5 条写语句消失**。本次按实测校准
+# 到 27（用与守卫逐字相同的 `_write_sql_calls` 判据数出来的）。加写语句时
+# 请**重新数一遍**，不要按「+1」猜。
+_MIN_WRITE_STATEMENTS = 27
 
 
 def _write_tx_body_ranges(tree: ast.AST) -> list[tuple[int, int]]:

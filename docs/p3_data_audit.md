@@ -3426,3 +3426,79 @@ git 2.54 实测，其他版本可能不同。
     本任务的在途改动，`__pycache__` 已清。
 - 口径核对：`out/pt.sh` 里 `-q` 与 `pytest.ini` 的 `addopts = -q` 叠加会把
   汇总行吃掉（只留进度点）——**读通过数要去掉包装脚本那层 `-q`**。
+
+## Task 5.1 完成记录（P3-20 诊断模型 + 上下文装配 + bug_candidates 表，2026-10-11）
+
+### 交付
+
+- `diagnosis/__init__.py`：包说明（F10 第一道防线 + F3 不直连数据源）。
+- `diagnosis/models.py`：`EvidenceItem`（`kind` 必须是权重表键集，拼错当场报错）、
+  `Hypothesis`（**空 evidence 拒绝创建**；`origin ∈ {rule_based, llm_hypothesis}`）、
+  `BugCandidateDraft`（`attribution_hypothesis` 默认 `UNTRIAGED`）；
+  三处词表 `EVIDENCE_KINDS`（**派生**自 `DIAGNOSIS_EVIDENCE_WEIGHTS`）/
+  `HYPOTHESIS_ORIGINS` / `ATTRIBUTIONS`（刻意复制的第二处字面量，F3 拿不到
+  `tracer.storage`，故加一致性测试）/ `BUG_STATUSES` / `BUG_SEVERITIES`。
+- `diagnosis/context.py`：`DiagnosisContext`（值对象）+ `build_context`
+  （**全部经注入的 `KnowledgeSources`**；`steps` 与 `history` 是两个字段，
+  后者**剔除本 run**）。
+- `agents/migrations/005_bug_candidates.sql`（设计 §11 字段 + 三处 CHECK 词表 +
+  两个索引；**偏离登记**：plan 写的 004 已被 M3 占用，顺延 005）。
+- `candidates/bug.py`：`BugCandidate` 行模型（dict 互转，SQL 不在本包）。
+- `agents/storage.py`：`save_bug_candidate` / `get_bug_candidate` /
+  `list_bug_candidates` / `_bug_from_row`（+2 条写语句，全部在 `_write_tx` 内）。
+- `experience/knowledge.py`：`trace_history` **扩 `run_id` 过滤键**（Task 2.2
+  从 2 键扩到 5 键是同一手法——扩键，不新建平行接口，F3）。
+- `graph/models.py` + `graph/builder.py`：`TraceStep` **追加**
+  `screenshot_path` / `ui_tree_path`（设计 §8.1 的「Screenshot/UI Tree」入口；
+  P1 起就在 `steps` 表里，早先没读出来。追加而非重排，既有构造点不受影响）。
+- 测试：`tests/unit/test_diagnosis_models.py`（22 例）、
+  `tests/unit/test_bug_store.py`（11 例）。
+
+### 决策记录
+
+1. **F3 的实现选择：扩过滤键，不新增检索方法**。初版给
+   `KnowledgeSources` 加了个 `trace_run(run_id)`——但 F3 的原文是「**不新建
+   平行的检索接口**」，而 `test_build_knowledge_adds_no_retrieval_method`
+   钉死了「公开面 == Protocol 四方法」。诊断要的「这一次失败现场的完整步骤
+   序列」本来就落在 `trace_history` 的语义里（「trace 的 steps 即历史」），
+   多一个范围键即可——**新方法会同时打破那条守卫与 F3 的字面**。
+   对照：`test_p2_knowledge_sources_is_constructed_in_one_place` 要求
+   `P2KnowledgeSources` 构造点唯一，所以 `_testcase_run_ids`（`run_id` 键的
+   底座）也只能在本类里。
+2. **`reproducible` 保持三态**（迁移 005 不写 `NOT NULL DEFAULT 0`）：
+   `NULL` = 还没试过复现 / `0` = 试过但复现不了 / `1` = 复现了。压成两态会让
+   「复现不了」被静默改写成「还没试过」。`candidates/bug.py::from_store_dict`
+   与 `_bug_from_row` 两处都**显式判 `is None`**——`or None` 会把 `False`
+   变成 `None`（False 是假值），那正是本仓最防的「看起来正常」。
+3. **`status` 不是 `save_bug_candidate` 的形参**（与 `save_candidate` 的
+   `review_status` 同款处置，review_p3_task35 P2-2）：只写 `'DISCOVERED'`。
+   状态推进的唯一入口是 Task 5.6 的状态机——**形参删掉而不是加断言**，调用方
+   传它会 `TypeError` fail-loud。已推进的行同样不可被诊断重跑覆写（AE 闸门）。
+4. **`severity` 复用 `Risk` 的四档名**（设计 §11 只写了 `severity TEXT`，
+   没给词表）：`CRITICAL/HIGH/MEDIUM/LOW`，默认 **`MEDIUM`** 不是 `HIGH`
+   ——证据不足时的默认立场是「不知道多严重」，抬到 HIGH 会让每个未复核的候选
+   都挤进高优先队列。
+5. **`graph_diff` 由调用方算好传进来**：`diff_graphs` 需要「参照面」而参照面
+   的取法取决于 `--base-build` 的语义（§12.3），那是 CLI 的输入装配职责
+   （Task 5.6）。本模块只声明「上下文里有这份 diff」，保持纯装配、零 I/O。
+
+### 顺带修掉的两处存量守卫缺口
+
+1. **`test_repo_hygiene` 的 `_SOURCE_DIRS` 没扫 `explorer/`**（Task 4.1–4.3
+   落地后一直空转）：新增的 `diagnosis` 一并加入，现在两个新包都在
+   「同名顶层定义」守卫的扫描面里。
+2. **`_MIN_WRITE_STATEMENTS` 已比真实值低 5**：实测真实计数是 **27**
+   （`experience/store.py` 13 + `agents/storage.py` 8 + `graph/storage.py` 6，
+   用与守卫逐字相同的 `_write_sql_calls` 判据数出来的），而历次「照此上调」
+   只把它抬到 22 ——等于**静默容忍 5 条写语句消失**。按实测校准到 27。
+
+### 实测
+
+- 全量 pytest **1938 passed / 0 failed**（1905 + 33）。
+- A/B 探针（五轮，逐个红）：
+  - 撤掉 `Hypothesis._evidence_not_empty` → **1 red**（F10 第一道防线）；
+  - `attribution_hypothesis` 默认改 `APP_DEFECT` → **1 red**（系统不自动归因）；
+  - `history` 不剔除本 run → **1 red**（矩阵 #16 的证据会凭空多一条）；
+  - 空现场静默放行 → **1 red**（fail-loud 前置）；
+  - `run_id` 过滤不生效 → **3 red**（现场/历史/空现场三条同时红）。
+  - 五轮均还原到原 md5，`__pycache__` 已清，tracked diff 只剩本任务的在途改动。
