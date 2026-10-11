@@ -3281,3 +3281,41 @@ git 2.54 实测，其他版本可能不同。
   的 sandbox HIGH 放行是**人工用例**的空间；自主 Agent 不能借这个口子。指望
   「Guard 会替我拦」而不核对 Guard 的实际规则，拦截就是假的。
 
+---
+
+## Task 4.2 完成记录（P3-15 Frontier 选择，2026-10-11）
+
+### 交付
+
+- `explorer/frontier.py`：`select_frontier`（F13 纯函数）+ `make_frontier_decider`
+  （把 frontier 包成 4.1 的 decider 契约）。
+- `explorer/agent.py` 扩展：`StopDecision`（带终态的结束）+ `VisitLog`
+  （指纹/屏 id 双视图）+ 终态 `FRONTIER_EMPTY`。
+- `tests/unit/test_frontier.py` **10 例**。
+
+### 决策记录
+
+1. **签名偏离登记**：plan 写 `select_frontier(graph, visited, current_screen)`
+   单图入参，但「source 有/runtime 无」与「runtime visit_count」需要两面图，
+   `RuntimeGraph` 图级 `source_of` 一致性校验禁止混面 → 拆显式
+   `source` / `runtime` 两入参。
+2. **unexplored 优先是双重加固**（组标志进排序键 + `_UNEXPLORED_SCORE=3.0`
+   高于一切 explored 分值）——探针 round 1 实测：单把分值压到 0.5，排序
+   纹丝不动（组标志独立兜住）；round 2 压到 0.1（组标志与分值倒挂）→
+   `test_novelty` 1 red。novelty 分值的钉子为真，序的钉子为组标志。
+3. **「jump/skip」语义**：`action_for` 返回 None = 这条翻不成动作 → 跳下一项
+   （None 是「跳过」不是「结束」）；全部翻不成/frontier 空 →
+   `StopDecision(FRONTIER_EMPTY)`。由 `test_frontier_decider_skips_items_...`
+   钉住。
+4. **transition 身份复用 `graph.diff.transition_key`**（F8 同一身份定义），
+   不手写第二份三元组拼接。
+5. 过程教训：skip 测试初版备 3 个提议但只有 2 条 frontier 项——第三个提议
+   永远轮不到，测试当场红。**fixture 的数量要数一遍「会轮到几次」。**
+
+### 实测
+
+- 全量 pytest **1886 passed / 0 failed**（1876 + 10）。
+- A/B 探针两轮：`_UNEXPLORED_SCORE` 0.5 → 0 red（双重加固，见决策 2）；
+  0.1 → 1 red；还原后 10 passed + tracked 文件 diff 干净。
+
+

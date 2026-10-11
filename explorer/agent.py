@@ -24,9 +24,9 @@ Verify（post-observe：新 State？指纹变化？→ novelty + visited）
   BLOCK 的步骤**不执行但必须留痕**（toolkit 的 audit 已写一条，循环自己的
   步骤记录再写一条——两处视角不同：前者是「它想干什么」，后者是「这步的
   结果」），循环**继续**而不是死在被拦的步骤上；
-- **F11 前置**：4.1 的循环只有 COMPLETED 一种终态；预算/loop/frontier 空
-  的终态词表由 4.2/4.3/4.4 增量加进 `ExplorationOutcome`（登记：词表随
-  任务定型，与迁移链「只向后追加」同款思路）。
+- **F11 前置**：终态词表增量定型——4.1 `COMPLETED`、4.2 `FRONTIER_EMPTY`；
+  预算与 loop 的终态由 4.3/4.4 加（登记：词表随任务定型，与迁移链「只向后
+  追加」同款思路）。
 """
 from __future__ import annotations
 
@@ -40,18 +40,46 @@ from explorer.policy import EXECUTION_TOOLS, action_kwargs, pre_judge
 from graph.models import RuntimeGraph
 
 __all__ = ["Decider", "ExplorationError", "ExplorationOutcome",
-           "ExplorationResult", "Explorer"]
+           "ExplorationResult", "Explorer", "StopDecision", "VisitLog"]
 
 
 class ExplorationOutcome(str, enum.Enum):
     """探索终态词表（设计 7.2/7.3；增量定型）。
 
-    4.1 只有 COMPLETED；4.2 加 FRONTIER_EMPTY、4.3 加四类
-    `*_BUDGET_EXCEEDED`、4.4 加 LOOP_DETECTED——每项都有各自的测试与
-    矩阵行，不提前占词。
+    4.1 有 COMPLETED、4.2 加 FRONTIER_EMPTY；四类 `*_BUDGET_EXCEEDED`
+    与 LOOP_DETECTED 由 4.3/4.4 各自增量加——每项都有各自的测试与矩阵行，
+    不提前占词。
     """
 
     COMPLETED = "COMPLETED"
+    FRONTIER_EMPTY = "FRONTIER_EMPTY"
+
+
+@dataclass(frozen=True)
+class StopDecision:
+    """decider 的「就此结束」结论（4.2 起）。
+
+    decider 返回 `None` 仍表示「没有下一步」（→ COMPLETED，goal 达成）；
+    返回 `StopDecision` 表示「没下一步，**且原因是一个终态**」（如 frontier
+    耗尽 → FRONTIER_EMPTY）——原因不同，落库的 outcome 就不同，CLI/Gate
+    才能区分「探索完了」和「没得可探索」。
+    """
+
+    outcome: ExplorationOutcome
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class VisitLog:
+    """decider 看到的访问记录（一个参数、两个视图，调用方各取所需）：
+
+    - `fingerprints`：到过的屏指纹（F8 同一套哈希）——4.4 循环检测消费；
+    - `screens`：到过的屏 id——frontier 的 novelty 消费（屏名可比，
+      指纹不可读）。
+    """
+
+    fingerprints: tuple[str, ...] = ()
+    screens: tuple[str, ...] = ()
 
 
 class ExplorationError(RuntimeError):
@@ -62,11 +90,13 @@ class ExplorationError(RuntimeError):
     """
 
 
-# decider 契约：(observation, graph, visited) -> ProposedAction | None。
-# 返回 None = 没有下一步（→ COMPLETED）。observation 是 get_current_screen
-# 的 value（status/screen/visible_markers/fingerprint），visited 是**指纹**
-# 列表（循环检测 4.4 与 frontier 的 novelty 都消费它）。
-Decider = Callable[[dict, RuntimeGraph, list[str]], "ProposedAction | None"]
+# decider 契约：(observation, graph, visited) -> ProposedAction | StopDecision
+# | None。observation 是 get_current_screen 的 value（status/screen/
+# visible_markers/fingerprint）；visited 是 VisitLog（指纹 + 屏 id 两个视图）。
+# 返回 None = 没有下一步（→ COMPLETED）；StopDecision = 带终态的结束
+# （4.2 起，frontier 耗尽 → FRONTIER_EMPTY）。
+Decider = Callable[[dict, RuntimeGraph, VisitLog],
+                   "ProposedAction | StopDecision | None"]
 
 
 @dataclass(frozen=True)
@@ -111,15 +141,26 @@ class Explorer:
         goal = task.goal
         self._db.update_task_state(self._task_id, AgentState.EXECUTING)
         visited: list[str] = []
+        visited_screens: list[str] = []
+        outcome: ExplorationOutcome | None = None
         steps = 0
         while True:
             observation = self._observe()
             fingerprint = observation.get("fingerprint")
+            screen = observation.get("screen")
             if fingerprint and fingerprint not in visited:
                 visited.append(fingerprint)
+            if screen and screen not in visited_screens:
+                visited_screens.append(screen)
+            memory = VisitLog(fingerprints=tuple(visited),
+                              screens=tuple(visited_screens))
 
-            action = self._decider(observation, self._graph, visited)
+            action = self._decider(observation, self._graph, memory)
             if action is None:
+                outcome = ExplorationOutcome.COMPLETED
+                break
+            if isinstance(action, StopDecision):
+                outcome = action.outcome
                 break
             if action.tool not in EXECUTION_TOOLS:
                 raise ValueError(
@@ -189,10 +230,11 @@ class Explorer:
             if post_fp and is_new:
                 visited.append(post_fp)
 
+        assert outcome is not None       # while 只有 break 出口，必已定值
         self._db.update_task_state(self._task_id, AgentState.IDLE,
-                                   outcome=ExplorationOutcome.COMPLETED.value)
+                                   outcome=outcome.value)
         return ExplorationResult(
-            outcome=ExplorationOutcome.COMPLETED, steps=steps,
+            outcome=outcome, steps=steps,
             visited_fingerprints=tuple(visited))
 
     # --- 内部 ---------------------------------------------------------------
