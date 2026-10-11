@@ -185,18 +185,20 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
 
 | # | 说法 | 实测 |
 |---|---|---|
-| 1 | `SKILL.md` 自称 **P2**（引用 `docs/phase2-plan.md`、`925+ passed`、「延后项已全部清空」） | 现行应读 **`docs/phase3-plan.md`**；基线 **1691**；P3 的登记项在 `docs/p3_data_audit.md` |
+| 1 | ~~`SKILL.md` 自称 **P2**（引用 `docs/phase2-plan.md`、`925+ passed`）~~ | **2026-10-11 已修**（`.workbuddy-ai/skills/mta-p2-task-workflow/SKILL.md`）：plan 路径 → `phase3-plan.md`、基线 → **2219**、`feat(p3):` / `checkpoint-p3-mN` / `verify_p3_m*.py` / `p3_data_audit.md`，并补了 7 条 P3 实锤坑。⚠️ 该目录**不入库**（`git ls-files .workbuddy-ai` = 0），改动只在本机生效；**目录名仍叫 p2**（改名会动 skills 结构，已在正文首行标注） |
 | 2 | `docs/phase3-plan_by_claude.md` 看起来像计划 | 它是**底稿**。权威是 `phase3-design.md` + `phase3-plan.md` |
 | 3 | 两批记忆目录 | `.workbuddy/memory/`（旧，9 月）vs `.workbuddy-ai/memory/`（现行）。**只有后者会自动注入** |
 | 4 | 旧文档写「`AgentToolkit` 装配点归 Task 2.4」 | **已被实现证伪**：`mta plan` 离线、不碰 App，装配它是死对象。真正的装配点是**第一个会驱动设备的命令**（M6 自主闭环 / **M3 Dry Run**） |
-| 5 | `docs/handover.md` §9 自己写的快照（曾停在 `b4810f7` / 1609 / 「下一步 Task 3.1」） | **本文件已刷新到 2026-10-10**；再过期时以 `git log` + 全量 pytest 为准（这是本文件的固有风险：**它不会自动更新**） |
+| 5 | `docs/handover.md` §9 自己写的快照（曾停在 `b4810f7` / 1609 / 「下一步 Task 3.1」） | **本文件已刷新到 2026-10-11**（含 Task 6.7）；再过期时以 `git log` + 全量 pytest 为准（这是本文件的固有风险：**它不会自动更新**） |
 | 6 | `candidates/fingerprint.py` / `docs/p3_data_audit.md` 称「**每个步骤恰好落入一个分量**」 | **实测为假**：带 `postcondition` 的 `ActionStep` **同时落入 `screens` + `actions` 两个分量**（真语料 2 处）——见 `review/review_p3_task33_2026-10-10.md` P3-2 |
-| 7 | `MEMORY.md` §1 记的「**6 个固定假失败**」 | **已过时**：2026-10-10 实测那两条文件 **11 passed**（当前基线 0 failed）。MEMORY 是自动注入的，**它 §1 那行未同步**（该目录不入库，只能人工改） |
+| 7 | `MEMORY.md` §1 记的「**6 个固定假失败**」+ 基线停在「3.5 round 2 修订后 1866」 | **均已过时**：2026-10-10 实测那两条文件 **11 passed**（当前基线 0 failed）；基线已到 **2219**。⚠️ `.workbuddy-ai/memory/MEMORY.md` **不入库**（该目录 0 个 tracked 文件），只能人工改——本次未改，**下个会话若读到「6 个固定假失败」或「1866」即知是它** |
 
 ## 9. 当前状态快照（**2026-10-11**，以实测为准）
 
-- **分支 / HEAD**：`P4-1011` / **`checkpoint-p3-m6`** = `f63b381`（**M1–M6 全部收口**；tag 不可动）
-- **全量基线**：**2207 passed / 0 failed**
+- **分支 / HEAD**：`P4-1011` / **`4c7d065`**（**M1–M6 全部收口**，其上又叠了 Task 6.7
+  「工具层接线补齐」两个 commit；里程碑 tag `checkpoint-p3-m6` = `f63b381` **不可动**）
+- **全量基线**：**2219 passed / 0 failed**（M6 收口 2207 + Task 6.7 的 17 条，其中 5 条
+  是改写既有人数钉，净新增 17）
 - **最新 tag**：`checkpoint-p3-m6` = `f63b381`（**P3 收口**；里程碑 tag `v0.3-p3-complete`；
   上一个 `checkpoint-p3-m5` = `233ab1e`）
 - **Gate 状态**：M1 ✅（`checkpoint-p3-m1`）· M2 ✅（`phase0/verify_p3_m2.py` exit 0，8/8 PASS）
@@ -347,23 +349,35 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
   trace 数据源缺口（用户拍板登记偏离）；③ 模型路由（设计 §9.4 移出核心里程碑）；
   ④ Evidence Bundle 的外部系统对接（沿 M5 open question #1）；
   ⑤ `reproduce` 的 `runner` 回调仍是 `cli/main.py::cmd_diagnose` 里手工注入
-  （`_run_reproduction`），应改走 `AgentToolkit.run_testcase`；
-  ⑥ **工具表仍有 10 个「已注册未接线」**（`agents/tools.py::NOT_WIRED`，
-  22 个允许工具里 12 个已接线）：`get_relevant_source` /
-  `get_relevant_experience` / `get_graph_neighbors`（标着「Task 2.2」，M2 早已
-  过去——M6 的 `agents/context.py::build_agent_context` 已经把同样的四个查询
-  经 `KnowledgeSources` 做出来了，接线是现成的）、`get_logs` /
-  `get_network_summary` / `get_crash_info`（标着「M5」）、`run_testcase` /
-  `run_candidate_test` / `create_test_candidate` / `create_bug_candidate`
-  （标着「M4/M6」）。这是本仓「**声称的能力必须有落点**」纪律下最实在的一段
-  欠账：`call()` 对它们明确报错不静默，所以不是假绿，但确实是没做完。
+  （`_run_reproduction`）。**这条现在有明确结论**（Task 6.7 探明）：不是欠账而是
+  **正确的形态**——`run_testcase` 的执行上下文（`manage_env` / lifecycle /
+  `run_id` / suite）不在工具层拿得到，工具本体**故意没有默认实现**，`NOT_WIRED`
+  里写明了原因。若将来要让工具本体也能跑，得先把这套上下文定义进工具层。
+  ⑥ **工具表 22 个里已接线 17 个，剩 5 个**（`agents/tools.py::NOT_WIRED`，
+  Task 6.7 / P3-32 已把 3 知识 + 2 提案接上，`NOT_WIRED` 10 → 5）：
+  - **3 个诊断数据源** `get_logs` / `get_network_summary` / `get_crash_info`：
+    本仓**没有任何采集代码**（grep 全仓确认）。`backend_evidence`（权重 2）
+    至今**没有真实生产者**就是这条的直接后果。**单独一批建**（用户拍板 ②）。
+  - **2 个重跑入口** `run_testcase` / `run_candidate_test`：见上条 ⑤。
+  ⚠️ `NOT_WIRED` 的指路**曾是过期里程碑**（「等 Task 2.2」「等 M5」「等 M4/M6」，
+  那些里程碑都收口了且没交付它们）——已逐条改写成「缺什么数据源 / 为什么不该接」，
+  并有断言钉住（理由里不许出现已完成里程碑的字样）。**这是本仓最容易复发的
+  文档说谎形态**。
   ⚠️ 顺带更正本条旧账：testcase 的 `postcondition` **已经**并进 `StepProbe`
   （`diagnosis/reproducer.py` 的 `has_postcondition` / `postcondition`，
   `cli/pipeline.py` 侧按 `step_index` 取用例声明），M5 之前记的这条待办已过时。
-- **待拍板的三项**（沿用，均**未闭**）：① `screen_id` 过滤的数据源缺口
-  （`docs/p3_data_audit.md` Task 2.2）——M6 Task 6.3 已就此**登记偏离**并保持
-  登记（用户拍板 2026-10-11）：`relevant_history` 改用 app_build + limit 可用键，
-  屏级收窄等 `steps` 表补齐屏列；② 「坏引用用例」的处置口径（同文件 Task 2.3）；
-  ③ `priority_score` / Evidence Score 的权重校准所需数据量
-  （`docs/phase3-plan.md` §2 open questions；M6 新增的两个初值
-  `guard_blocks_before_escalate=3` / `llm_invalid_before_escalate=2` 同属此类）
+- **待拍板的三项**（2026-10-11 用户拍板后**全部收口**）：
+  ① `screen_id` 过滤的数据源缺口（`docs/p3_data_audit.md` Task 2.2）——
+  **保持登记不闭**（用户拍板）：`relevant_history` 改用 app_build + limit 可用键，
+  屏级收窄等 `steps` 表补齐屏列；
+  ② 「坏引用用例」的处置口径 → **「列出不猜」**（用户拍板）：不为了让表好看而给
+  无数据源的工具编假实现，已机械化为断言（`NOT_WIRED` 理由不得指向已完成里程碑
+  且长度 > 30，见 `docs/p3_data_audit.md` §7.3）；
+  ③ 权重校准所需数据量 → **登记不动，等真实数据**（用户拍板）：校准方法已写死在
+  `diagnosis/evidence.py` 的 docstring（触发条件 ≥30 条人工确认归因 + 每类都要有
+  生产者；判据：真 bug 分数中位数 ≥ 阈值、非 bug 95 分位 < 阈值、Benchmark 仍 7/7；
+  不许动的三项：类别集合 / 按类去重求和 / 阈值初值）。**当前样本量 1 条**
+  （M6 Gate 自注入的那条，且随 gate 工程清理）——差得远，故数值一律不动，
+  `config/policy.yaml` 的「初版待校准」标注不许删。
+  ⚠️ M6 新增的两个初值 `guard_blocks_before_escalate=3` /
+  `llm_invalid_before_escalate=2` 同属「初版待校准」类。
