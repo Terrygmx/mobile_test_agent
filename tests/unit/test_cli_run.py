@@ -1235,3 +1235,69 @@ def test_wire_device_stack_shares_the_guard_with_recovery(monkeypatch,
     assert pipeline.recovery.guard is stack.runner.guard, (
         "9.3-4 / 10.1：recovery 的 Guard 复检必须与动作步**同一实例**"
         "（否则 LLM 候选的风险门控在真机上静默关闭）")
+
+
+def test_real_device_run_records_app_build_scope(monkeypatch, tmp_path):
+    """真机路径也必须写 `runs.app_build`——**这条此前是假绿的**。
+
+    `test_run_records_app_build_scope` 只跑 `--fake-driver`，而缺陷只在真机
+    路径上现形：`cmd_run` 在 Build Identity 那一段用 `bi_fields = {...}` 整体
+    赋值，把前面刚写进去的 `app_build` **覆盖掉**，于是真机 run 的
+    `runs.app_build` 是 NULL。后果不是「少一列」：`read_trace_steps` 对同一
+    库里 `NULL` 与 `'local'` 两个范围**必然 fail-loud**，`mta explore` 直接
+    exit 3——M4 Gate 现场踩到（同库的 explore 行是 `'local'`，run 行是 NULL）。
+
+    单测封闭：stub 掉 Build Identity 的读取与设备装配，让真机分支跑到写库。
+    """
+    import sqlite3
+
+    from source import build_identity as bi
+
+    monkeypatch.setattr(bi, "read_app_identity",
+                        lambda udid, bundle: bi.AppIdentity(git_commit="abc1234",
+                                                            build="local"))
+    monkeypatch.setattr(bi, "resolve_booted_udid", lambda: "UDID-1")
+    monkeypatch.setattr("session.device_session.resolve_local_caps",
+                        lambda udid, bundle_id: {"udid": udid})
+
+    class _FakeDriver:
+        def quit(self):
+            pass
+
+        def implicitly_wait(self, seconds):
+            pass
+
+        def activate_app(self, bundle_id):      # `launch_app` 走它
+            pass
+
+    class _FakeDS:
+        def __init__(self, url, caps):
+            self.url, self.caps, self.driver = url, caps, None
+
+        def connect(self):
+            self.driver = _FakeDriver()
+            return self.driver
+
+        def ensure_alive(self):
+            return self.driver
+
+    monkeypatch.setattr("session.device_session.DeviceSession", _FakeDS)
+
+    suites = tmp_path / "suites"
+    suites.mkdir()
+    (suites / "a_001.yaml").write_text(VALID_TC, encoding="utf-8")
+    meta = tmp_path / "source_metadata.json"
+    meta.write_text('{"build": "local", "git_commit": "abc1234"}',
+                    encoding="utf-8")
+    db = tmp_path / "trace.db"
+
+    code = main(["run", "--case", "login_001", "--suites-root", str(suites),
+                 "--db", str(db), "--no-llm", "--bundle-id", "com.example.app",
+                 "--udid", "UDID-1", "--metadata", str(meta),
+                 "--generated", str(tmp_path)])
+    assert code == 0, f"装配应跑通（真机分支），got {code}"
+    row = sqlite3.connect(db).execute(
+        "SELECT app_build FROM runs ORDER BY rowid DESC LIMIT 1").fetchone()
+    assert row[0] == "local", (
+        "真机路径的 runs.app_build 被 Build Identity 那段覆盖成了 NULL——"
+        "同库混进两个范围会让 read_trace_steps fail-loud")

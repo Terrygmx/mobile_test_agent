@@ -3911,3 +3911,232 @@ max、`reproducible` 三态**单调**（`True` 支配 `False` 支配 `None`—�
   登记三交给调用方（Task 5.6）。**教训**：探针全绿有两种可能——测试没钉住实现，
   或者**声称本身是错的**；后者只能靠回头读声称发现（与 Task 5.4 的两处自我纠正同
   源）。
+
+## Task 4.6 完成记录（P3-19 `mta explore` CLI + M4 Gate，2026-10-11）
+
+### 交付
+
+| 文件 | 变化 |
+|---|---|
+| `cli/main.py` | +426/-3：`explore` 子命令（注册 + `cmd_explore` + `_explore_action_for` + `_runtime_graph_for` + `_explore_audit`）；`cmd_run` 的 `bi_fields` 改 `update`（见下「顺带修掉的三处存量缺陷」） |
+| `phase0/verify_p3_m4.py` | **新增**（591 行）：M4 Gate，离线半边 + 真机半边 |
+| `tests/unit/test_cli_explore.py` | **新增** 31 例 |
+| `tests/unit/test_cli_run.py` | +66：`test_real_device_run_records_app_build_scope` |
+
+### 口径登记（四条）
+
+1. **`explore` 在 staging 也拒，且是两层前置**（口径必守 review_p3_task12 §4）。
+   `_check_autonomous_env`（公共：总开关 + production 一票否决）与
+   `_check_exploration_env`（探索专属：sandbox-only + simulator）**依次调用、互不替代**
+   ——公共前置的文案写「请在 sandbox 或 staging 下运行」，那句对 `plan`/`generate`
+   准确、对 `explore` 不准确。有一条 AST 测试钉住两者的**存在与先后**
+   （`test_the_two_preflight_layers_are_both_called_in_order`），而不是只断言拒绝文案
+   （文案对了、调用删了，测试仍会绿——这是本仓记录在案的空转型守卫）。
+2. **退出码契约**：0 = 探索结束（**含 `*_BUDGET_EXCEEDED` 与 `LOOP_DETECTED`**——
+   F11/矩阵 #11/#12 的口径是「预算耗尽与循环是**结论**不是失败」，与矩阵 #6 的空
+   Plan 同款）；3 = 前置错误（env / 政策 / 输入读不到 / 预算文件坏 / 设备装配失败 /
+   App 起不来）。`LOOP_DETECTED` 与预算超限**不**产生 exit≠0。
+3. **`--build` 缺省**不沿用 `_resolve_app_build` 的静默兜底。那条函数读不到 metadata
+   时退回 `"local"`——对 `mta run` 无害（build 只是 E7 集合的一个元素），对 `explore`
+   是**fail-open**：build 与声明面错位 → `load_graph` 查不到那一面 → frontier 恒空 →
+   **零发现，而输出长得像「真的探完了」**。故 `cmd_explore` 自己读 metadata，
+   读不到就 exit 3。探针 P7 钉住这条（把兜底加回去 → 1 red）。
+4. **`_explore_action_for` 复用 `graph/impact.py::trigger_element`**，不手写第二份
+   `<step_type>:<target_id>` 解析；`wait_for` / `assert_*` / `launch_app` / 无前缀
+   trigger 一律返回 `None`（decider 的**跳过**语义，不是结束——「再 wait 一次」不驱动
+   App 走任何新路）。
+
+### ⚠️ 真机半边一开始是**全绿假象**：`FRONTIER_EMPTY steps=0`
+
+首轮 Gate 的 G3b/G4/G5 全 FAIL，输出一致是
+`outcome=FRONTIER_EMPTY steps=0 screens=1 discoveries=0`，而 G3c 从库里读回了播种的
+声明面（`screens=['HomeView'] transitions=1`）——**声明面在、frontier 却是空的**。
+
+逐层实测（`page_source` 原样打印）定位到根因**不在探索逻辑，而在起点**：
+
+- 冷模拟器上 `activate_app` 之前 `page_source` 是 **springboard**（`bundleId=
+  com.apple.springboard`，App 根本没起）→ `current_screen` 恒
+  `CURRENT_SCREEN_UNKNOWN` / `screen=None` → `select_frontier(current_screen="")`
+  匹配不到任何 `from_screen` → frontier 空 → 立刻 `StopDecision(FRONTIER_EMPTY)`。
+- **只加 activate 还不够**：LoginDemo 冷启动落在 **LoginView**，而 Gate 的声明面
+  （以及多数真实工程）登记的是登录后的屏 → 仍是 UNKNOWN。Gate 因此改用**生产路径**
+  把 App 开到起点：跑一条 gate 自己的用例（terminate → launch → 填表 → 登录 →
+  `wait_for screen:HomeView`）经 `mta run`，副产品是 `trace.db` 有了真实观测面。
+
+修法两条：① `cmd_explore` 增加「把 App 带到前台」一步（无参 `AppSession.launch()`
+走 `activate_app`，幂等——已在前台时不会重置调用方手工导航到的状态）；② Gate 用
+`mta run` 建立起点。**这一步此前没有任何测试覆盖**：探针 P4（删掉 `app.launch()`）
+1 red，补的正是 `test_explore_brings_the_app_to_the_front`。
+
+这条是「配置错误伪装成功能退化」的又一例（review_p3_task12 P3-4 的同族）：**探索
+一步没走，输出与「探完了」逐字相同**。真机 Gate 的价值就在这里——三个单测层
+（frontier / loop / guard）全绿，而端到端一步都走不动。
+
+### 顺带修掉的第一、二处**存量**缺陷（都是 Gate 现场暴露的）
+
+1. **`runs.app_build` 在真机路径上被覆盖成 NULL**。`cmd_run` 的 Build Identity 段用
+   `bi_fields = {...}` **整体赋值**，把上面刚写进去的 `app_build` 覆盖掉。同段注释
+   声称该列「此前从未被写入（P1 遗留）……没有它所有真实 run 的图都会落进同一个空
+   scope」——**注释说已修，代码没修**，而缺陷只在真机路径现形（`--fake-driver` 分支
+   不走那段，所以既有的 `test_run_records_app_build_scope` 是**假绿**）。
+   后果不止「少一列」：同库混进 `NULL` 与 `'local'` 两个范围 →
+   `read_trace_steps` **必然 fail-loud** → `mta explore` 直接 exit 3。Gate 现场即
+   此形态（explore 行 `'local'`、run 行 NULL）。修 `update`；补
+   `test_real_device_run_records_app_build_scope`（探针 P8 → 1 red）。
+2. **`discoveries=` 与 `discovery:` 行统计的是整库，不是本次任务**。
+   `list_discovery_events()` 无过滤地返回全部历史事件 → 同一 agent.db 上重跑会打印
+   **上一轮**的发现。Gate 现场：G4/G5 各自打印了 G3 那条 `disc_0731f877…`，而它们
+   各自的探索根本没撞见新屏。审计输出必须是「这一轮做了什么」，不是「这个库里有什么」。
+   按 `exploration_task_id` 收窄；补 `test_explore_reports_only_its_own_discoveries`
+   （探针 P6 → 1 red）。
+
+### 顺带修掉的第三处存量缺陷：成功路径的 `runs` 行没收口
+
+`cmd_explore` 只在**异常**路径 `end_run(status="ABORTED")`，成功路径直接 return——
+`runs` 里留下 `status='RUNNING'` / `end_time=NULL`。而 `TraceStore.__init__` 会把
+**所有** RUNNING 行扫成 `FAIL`（那是给「进程异常中断」的兜底），于是**一次成功的
+探索在库里显示为 FAIL**。M4 Gate 现场实测：同库的 explore 行全是
+`status='FAIL' exit_code=None`。
+
+这与 `cmd_generate` 的 review_p3_task35 P3-8 是**同一个缺陷**——那条修在 `generate`
+上，`explore` 写的时候又漏了一遍（「已修过的模式会被复制」的又一例，方向相反：
+这次是「已修过的缺陷被漏掉」）。终态词落 `PASS`：`*_BUDGET_EXCEEDED` /
+`LOOP_DETECTED` 是 F11/矩阵 #11/#12 的**正常收束**，落 FAIL 会让「预算生效」在
+报表上长得像「探索挂了」。补两条测试（成功路径 + 预算停止路径各一），探针 P9 → 2 red。
+
+### Gate 自身的第三处修正：无设备时不许以 traceback 收场
+
+`_scaffold` 在设备半边**之前**跑，而它要 `read_app_identity`（simctl 找 booted
+设备）来写 metadata 的 build/git_commit。没有设备时那个异常直接冒出去——**离线
+半边（G1 的三种 F7 拒绝）与 G7 全量回归都不跑**，而它们恰恰是任何机器上都该跑的
+那部分。2026-10-11 实测（`MTA_SIM_UDID` 指一个不存在的设备）：Gate 以一个
+`BuildIdentityError` traceback 收场，**一条判据都没报**。
+
+这与本文件反复记的「守卫空转」同族，只是形态相反：不是假绿，是**假红到没有输出**。
+修法两条：① 身份读不到就写占位 metadata（设备半边随后按 `pre_ok` 跳过）；
+② 设备半边跳过时**显式报一条 FAIL 且 `ok=False`**——没有设备的 `exit 0` 会是一句
+「M4 Gate 通过」的假话，但跳过**不阻断**离线半边与 G7。实测：无设备时
+`exit 1 (device_half=SKIPPED_ENV)`，G1 三条与 G7 照常给出结论。
+
+### 实测
+
+- 全量 `pytest tests`（macOS）：**2108 passed / 0 failed**（exit 0；父提交 2094，
+  +14：`test_cli_explore.py` 31 例 + `test_cli_run.py` 1 条）。
+- `phase0/verify_p3_m4.py` **连续三轮 exit 0**（device_half=PASS；第三轮在
+  两段 review 的修正之后重跑，逐项仍全 PASS），逐项：
+  | 判据 | 结果 |
+  |---|---|
+  | PF_* 模拟器/Appium/App | PASS |
+  | G1 production / staging / real_device 启动即拒 | PASS ×3（三者均 `wrote_db=False`，即**在写任何库之前**） |
+  | G2 `max_steps:0` → `STEPS_BUDGET_EXCEEDED` exit 0 | PASS |
+  | G2 坏预算文件 → exit 3 且不建库 | PASS |
+  | G3 撞见 ProfileView → PENDING 事件；图不变 | PASS（`events=[('NEW_SCREEN','ProfileView')]` + `review=['PENDING']`，`screens=['HomeView']`） |
+  | G4 HIGH 目标拦截：3 次 BLOCK、0 次执行、屏幕仍是 HomeView | PASS |
+  | G5 `max_repeated_state:2` → `LOOP_DETECTED` exit 0 | PASS |
+  | G6 gate 工程 git 干净 + 主仓库资产逐字节未变 | PASS |
+  | G7 全量回归 | PASS |
+- A/B 探针（十六轮，逐个红、逐个还原 md5 一致、`__pycache__` 已清）：
+
+  | # | 变异 | 红数 |
+  |---|---|---|
+  | 1 | 删掉 `_check_exploration_env` 调用（只剩公共前置） | **3** |
+  | 2 | `--budget` 文件被忽略（恒取 policy 段） | **3** |
+  | 3 | `_explore_action_for` 永不补 `Screen.` 限定名 | **0 → 补测后 1** |
+  | 4 | 删掉「把 App 带到前台」那一步 | **1** |
+  | 5 | 不写 `agent_tasks` 任务行 | **10** |
+  | 6 | 输出不过滤 `exploration_task_id` | **1** |
+  | 7 | `--build` 缺省改回静默兜底 `"local"` | **1** |
+  | 8 | `bi_fields` 改回整体赋值（真机路径丢 `app_build`） | **1** |
+  | 9 | 成功路径不写 `end_run`（run 行留 RUNNING → 被扫成 FAIL） | **2** |
+  | 10 | 删掉 `_budget_problem` 前置校验（`max_repeated_state:0` 跑到一半才炸） | **1** |
+  | 11 | `_trace_has_runs` 移出 try（坏 trace 文件冒 traceback） | **1** |
+  | 12 | 删掉陈旧 trace 范围对齐（`trace_build != app_build`） | **1** |
+  | 13 | 删掉异常路径的 `EXPLORATION_FAILED` 收口（任务行停 `EXECUTING`） | **1** |
+  | 14 | `agent_db` 提前到 `app_id` 校验之前（纯前置错误也建库） | **1** |
+  | 15 | 删掉「App 起不来」路径的 `stack.close()`（泄漏 Appium 会话） | **1** |
+  | 16 | 删掉 `_explore_action_for` 的空 `from_screen` 兜底 | **1** |
+
+- **探针 3 全绿是一次诚实的覆盖缺口**（不是「实现正确所以没红」）：`_explore_action_for`
+  的「短名补限定名」分支（`if "." not in target`）此前一行都没被覆盖，22 条测试里
+  没有任何一条走短名 trigger。修法是补 `test_action_for_qualifies_a_bare_element_id_with_its_screen`
+  （短名 → 限定名；已限定 → 原样透传），补后探针 3 转红。**教训与 Task 5.5 探针 9
+  同源**：探针全绿的两种成因——测试没钉住实现，或**声称本身是错的**——这次是前者，
+  且只在真机/跨屏同名场景才现形（`resolve` 的短名唯一性要求），属「单测构造不出的
+  输入形状」。
+- 现场卫生：十六轮探针 + 三轮 Gate 之后 `git status --porcelain` 只剩预期的
+  `M cli/main.py` / `M tests/unit/test_cli_run.py` 与三个新文件；主仓库
+  `repository/overrides`、`repository/generated`、`suites` 的 md5 快照逐字节未变
+  （G6b）。
+
+### 对抗性评审补的六个收口（2026-10-11，第一段 review）
+
+评审对 `cli/main.py` 的**未提交 diff** 做对抗性复核，报了 8 条；逐条在真码上
+复现后**采纳 6 条**（另 2 条经复核为误报，见下）。六条的共同形态是
+**「失败路径上的收口不完整」**——正常路径完全看不出来，全部只在异常/前置
+错误时现形，故前面 9 轮探针（都是正向路径）一条都没覆盖到。
+
+| # | 缺陷 | 修法 | 探针 |
+|---|---|---|---|
+| 1 | `Explorer.run()` 中途抛错 → `agent_tasks` 永远停在 `EXECUTING`（`run()` 开头置位、只在正常返回写 `IDLE`）；审计根上挂一个永久「还在跑」的僵尸任务 | `except` 分支补 `update_task_state(..., "EXPLORATION_FAILED")`（与两条前置失败路径同款收口） | P13 |
+| 2 | `_trace_has_runs(args.db)` **裸奔在 try 外**——它按契约不吞 `DatabaseError`，「文件不是 sqlite 库」会一路冒成 traceback 而非 exit 3 | 把探测移进那个 `(ValueError, sqlite3.Error)` 的 try（`cmd_generate` 本来就是两个调用同一个 try） | P11 |
+| 3 | 预算里**模型层收不下**的取值没在启动期挡：`max_repeated_state: 0` 过 `ge=0` 校验，直到 `is_loop` 在探索第一步后才抛——先建库/建任务/起设备/拉 App，再以「探索失败」收场 | 新增 `_budget_problem()`：按 `is_loop` 的**同一口径**（阈值必须为正）在写任何东西之前 exit 3；解析也一并提到 `_load_repository` 之前 | P10 |
+| 4 | 纯前置错误也留下新 `agent.db`——`SQLiteAgentStore.__init__` 会建库+跑迁移，而它排在 `app_id` 校验之前 | `SQLiteAgentStore(...)` 推迟到 `create_task` 之前（「失败的读不该产生新文件」纪律） | P14 |
+| 5 | trace 里只有**一个陈旧范围**（`build=v2`）而本次 `--build local` 时不报错：`read_trace_steps` 的 fail-loud 只管「同库混多范围」；此时运行时图的 key 全来自旧 build，`select_frontier` 把**已走过的边**当成没走过 | 前置显式对齐 `trace_build != app_build` → exit 3（不静默挑一个） | P12 |
+| 6 | 「App 起不来」路径早返回**不 `stack.close()`**——`wire_device_stack` 已 `connect()` 成功，Appium 会话被泄漏（P2-3 那个泄漏在被抬高一层处重犯）；且该路径 `finally` 覆盖不到 | 早返回前显式 `stack.close()` | P15 |
+
+另补一条**契约兜底**（评审第 8 条，当前不可达）：`_explore_action_for` 在
+`from_screen` 为空时会产出 `".elem"` → `Repository.resolve` 拆成
+screen="" + elem → `AgentToolkit.call` 对 `ValueError` 子类**故意原样重抛**
+→ 从 `Explorer.run()` 冒出去打死整场探索。`ScreenTransition.__post_init__`
+拒绝空 `from_screen`，故当前构造器产不出这种值；按「纯函数不制造自己都知道
+解析不了的值」返回 `None`，并用桩对象喂入补测。
+
+**两条误报（复核后不改）**：
+
+- 「`runtime_graph` 由**全部** build 的 trace 建成、与 `(app_id, app_build)`
+  限定的 source 面错配」——机制描述不对：`read_trace_steps(app_build=None)`
+  在库里混多范围时**已经** fail-loud（`scopes>1` 直接抛）。真正的缺口是
+  「库里只有一个**别的** build」，已按上表第 5 条修（比原报更窄也更准）。
+- 「build 对齐的注释描述了代码没做的事」——注释说的是「**声明面**（graph）
+  的范围由 build 决定」，那部分代码是有的（`load_graph(app_id, app_build)`）；
+  观测面的对齐是这次新加的第 5 条，两件事不要混。
+
+评审同时确认**零发现**的类别（F1/F6/F7/F11 的 steps·duration·llm 三维/F12/
+F13/E12，以及 `cmd_run` 的 `bi_fields` 修）逐条核过——特别是 F7 的两层前置
+在 `1527/1529`（任何 DB/GraphStore 写之前）与「discoveries 收窄到本次任务」
+都已落地。
+
+### 第二段 review（M4 Gate + 测试的**假绿**专查）与随之修的三处 Gate 缺陷
+
+第二段 review 只问一件事：**有没有假绿**。结论是**没有**——当前版本的每条
+承重行为被删/被反之后，都至少有一条测试或 Gate 判据变红（它在 `/tmp` 的
+副本上做了变异，**没有改动本仓**）：删 `_check_exploration_env`、把两处 F7
+调用硬编码成 `EnvKind.SANDBOX`（docstring 声称「有守卫钉这条」——**证实有**）、
+`select_frontier → []`（4 条红，防「空转型假绿」的钉子真在干活）、删探索侧
+HIGH 拦截、删 5b 激活、删 discovery 输出收窄、删 run 行 `end_run(PASS)`、
+回退 `bi_fields.update`、以及**本次新加的 6 条守卫**——逐一neutered 后各自
+变红。Gate 的 G3/G4/G5 也各给了一条「怎么改能让它红」的构造，均成立。
+
+它同时报了三处 **Gate 自身的**缺陷（都不是假绿，是「判据/注释宽于实现」），
+已修：
+
+1. **`_seed_source_face` 的证据词与注释打架**：docstring 说播种形态与
+   `candidates/discovery.register` 的库形态「**逐列一致**（`evidence=discovery`）」，
+   代码却写 `evidence=("source_declared",)`——恰好是它点名的那个 token 不一致。
+   改为 `EVIDENCE_DISCOVERY`（`graph/models.py` 特意把「人工确认的发现」与
+   「源码声明」分开记，混用会让人以为这条边是源码声明的）。
+2. **`_seed_source_face` / `_device_home` 硬编码 `app_build="local"`**，而
+   `_scaffold` 已改成**从装好的 App 读 build**。今天 App 的 `MTA_BUILD_ID` 就是
+   `local` 故碰巧通过；若哪天不是，声明面会落在 `(BUNDLE,"local")` 而
+   `cmd_explore` 用 metadata 的 build → `load_graph` 查不到那一面 → frontier
+   恒空 → **G3b 假红**（响亮，不是假绿）。改为全程用 `g["build"]`，消除这个
+   潜伏耦合。
+3. **G3b 没断言 `review_status == "PENDING"`**，而 Gate docstring 把它列为判据。
+   补上（无代码路径会写非 PENDING，但判据不该弱于声称）。
+
+另两条**不改**：`test_the_two_preflight_layers_are_both_called_in_order` 是
+AST-only（钉「都在且公共在前」，看不到 env_kind 来源）——review 确认
+production/staging 两条测试独立覆盖了「硬编码 sandbox」的变异，故够用；
+G6a 只看 **gate 工程**的 `git status`、G6b 只 md5 三个资产目录（主仓整体
+`git status` 不查）——这是有意的收窄（Gate 要保护的正是那三处资产），
+本次收口后主仓状态也逐字复核过。

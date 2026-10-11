@@ -448,7 +448,51 @@ def build_parser() -> argparse.ArgumentParser:
     gen_p.add_argument("--no-llm", action="store_true",
                        help="禁用 LLM（生成必须有 LLM，故等于「不生成」）")
 
-    # --- mta candidate（Task 3.5：统一候选审核，F6 首个消费者）---
+    # --- mta explore（Task 4.6 / P3-19：Bounded Exploration，设计 7 节）---
+    exp_p = sub.add_parser(
+        "explore", help="Bounded Exploration（设计 7 节；**仅 sandbox + "
+                        "模拟器**，F7/§7.4）")
+    exp_p.add_argument("--goal", metavar="TEXT", required=True,
+                       help="探索目标（进 `agent_tasks.goal`——审计要能回答"
+                            "「这次为什么探」，必填）")
+    exp_p.add_argument("--budget", metavar="FILE", default=None,
+                       help="探索四维预算 YAML（同 exploration 段结构；缺省取 "
+                            "policy.yaml 的 exploration 段）")
+    exp_p.add_argument("--generated", metavar="DIR", default=None,
+                       help="generated 根目录（缺省 repository/generated/local"
+                            "——metadata 与元素都从这里读）")
+    exp_p.add_argument("--overrides", metavar="DIR", default=None,
+                       help="overrides 根目录（缺省 repository/overrides）")
+    exp_p.add_argument("--suites-root", metavar="DIR", default="suites")
+    exp_p.add_argument("--db", metavar="PATH", default="out/trace.db",
+                       help="trace 库（观测面：已到达过的屏与转移）")
+    exp_p.add_argument("--graph-db", metavar="PATH",
+                       default=str(DEFAULT_GRAPH_DB),
+                       help="Graph SQLite 路径（声明面：frontier 的 source 侧）")
+    exp_p.add_argument("--agent-db", metavar="PATH",
+                       default=str(DEFAULT_AGENT_DB),
+                       help="agent 库（探索任务 / 发现事件 / 每步审计）")
+    exp_p.add_argument("--bundle-id", metavar="ID", default=None,
+                       help="App bundle id（图的范围第一段；真机/模拟器会话"
+                            "也需要它）")
+    exp_p.add_argument("--build", metavar="ID", default=None,
+                       help="本次探索的 build id（缺省取 metadata 的 build）")
+    exp_p.add_argument("--udid", metavar="UDID", default=None,
+                       help="模拟器 UDID（缺省取第一个 booted 设备）")
+    exp_p.add_argument("--suite", metavar="NAME", default=None,
+                       help="只用于 trace 的 runs 行标注（探索不跑用例）")
+    exp_p.add_argument("--policy", metavar="PATH", default=None,
+                       help="policy.yaml 路径（缺省读默认路径）")
+    exp_p.add_argument("--env-kind", choices=["sandbox", "staging",
+                                              "production"],
+                       default="sandbox",
+                       help="环境（**探索只接受 sandbox**，staging 也拒——"
+                            "F7/§7.4；本命令没有豁免 flag）")
+    exp_p.add_argument("--device-type", choices=["simulator", "real_device"],
+                       default="simulator",
+                       help="设备端别（**探索只接受 simulator**——真机只跑"
+                            "已审核用例）")
+
     # ⚠️ **不是**自主命令（不在 `AUTONOMOUS_COMMANDS`）：审核是人工命令，
     # 不过 F7 的启动环境闸（与 `mta review` 同款）。
     cand_p = sub.add_parser(
@@ -901,13 +945,20 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"PREFLIGHT ERROR: build identity 读取失败：{e}")
             print("run: exit 3")
             return 3
-        bi_fields = {
+        # ⚠️ **`update` 而不是整体赋值**（2026-10-11 实测修）：上面刚写进去的
+        # `app_build` 若在这里被覆盖掉，真机路径的 `runs.app_build` 就是
+        # **NULL**——而这正是上面那段注释声称已经修好的 P1 遗留。实证：M4
+        # Gate 的 `trace.db` 里 `mta run` 的行 `app_build=None`，而同库的
+        # `mta explore` 行是 `'local'`；两者一混进 `read_trace_steps`，多范围
+        # 判定就 fail-loud（Gate 现场踩到）。只读的那条路径（`--fake-driver`）
+        # 没这个覆盖，所以缺陷只在真机路径上现形。
+        bi_fields.update({
             "app_git_commit": gr.app.git_commit,
             "metadata_git_commit": gr.meta.git_commit,
             "metadata_build": gr.meta.build,
             "metadata_mismatch": int(gr.mismatch),
             "metadata_mismatch_override": int(gr.override),
-        }
+        })
         if gr.blocked:
             store.start_run(run_id, suite=args.suite, env_kind=env_kind.value,
                             **bi_fields)
@@ -1405,6 +1456,376 @@ def cmd_generate(args: argparse.Namespace) -> int:
           f"{len(result.rejections)} rejected/skipped, "
           f"{result.llm_calls} LLM calls")
     return 0
+
+
+# `mta explore` 的 trigger 词表（F13 纯函数；`graph/builder.py` 定义的
+# `<step_type>:<target_id>` 形状）。**只把「驱动 App 走一步」的步骤翻成动作**：
+# `wait_for` / `assert_*` 是**观测**不是动作——再 wait 一次不会让 App 走到新屏，
+# 翻成动作只会让探索空转；`launch_app` 没有 target 也没有可重放的元素。
+_EXPLORE_TRIGGER_TOOLS = {"tap", "input"}
+
+
+def _explore_action_for(transition):
+    """一条 source 转移 → 可重放的探索动作（`None` = 翻不成，跳过）。
+
+    ⚠️ **不能把 trigger 整串当 target**：trigger 是 `<step_type>:<target_id>`
+    （`graph/builder._trigger_of`），`tap:HomeView.go_profile` 整串交给
+    `Repository.resolve` 会被拆成 screen=`tap:HomeView` + elem=`go_profile`
+    → 解析失败。这里按 `graph/impact.py::trigger_element` 的同一口径拆开
+    （**不手写第二份解析**——那条函数就是为这个形状写的）。
+
+    返回值是 `explorer.policy.ProposedAction`：`make_frontier_decider` 的
+    `action_for` 契约（`None` = 跳过，不是结束）。
+    """
+    from explorer.policy import ProposedAction
+    from graph.impact import trigger_element
+
+    raw = (getattr(transition, "trigger", "") or "")
+    step_type, sep, tail = raw.partition(":")
+    if not sep:
+        return None
+    if step_type in _EXPLORE_TRIGGER_TOOLS:
+        target = trigger_element(raw)
+        # 元素 id 单独出现会在跨屏同名时歧义（`Repository.resolve` 的短名
+        # 规则要求全局唯一）——转移两端都在手里，用限定名 `Screen.elem`
+        # （`resolve` 的 `Screen.elem` 分支还会校验归属，写错了 fail-loud）。
+        if not target:
+            return None
+        if "." not in target:
+            # 短名 → 限定名。**from_screen 为空时返回 None**：补出来的
+            # `.elem` 会被 `Repository.resolve` 拆成 screen="" + elem，
+            # 而 `AgentToolkit.call` 对 `ValueError` 子类**故意原样重抛**
+            # （坏参数 = 调用方写错，不该被翻成「工具执行失败」），于是它会
+            # 从 `Explorer.run()` 冒出去、把整场探索打死。当前 `graph/` 的
+            # 构造器不会产出空 from_screen，这里是**契约兜底**：纯函数不
+            # 制造自己都知道解析不了的值。
+            screen = getattr(transition, "from_screen", "") or ""
+            if not screen:
+                return None
+            target = f"{screen}.{target}"
+        return ProposedAction(tool=step_type, target=target)
+    if step_type == "swipe":
+        return ProposedAction(tool="swipe", direction=(tail or "up"))
+    if step_type == "back":
+        return ProposedAction(tool="back")
+    return None
+
+
+def cmd_explore(args: argparse.Namespace) -> int:
+    """`mta explore` —— Bounded Exploration 的 CLI 落点（Task 4.6 / P3-19）。
+
+    退出码：0 成功（**含 `*_BUDGET_EXCEEDED` 与 `LOOP_DETECTED`**——F11/矩阵
+    #11/#12：预算耗尽与循环检测是**结论**不是失败，与矩阵 #6 的空 Plan 同款）；
+    3 前置错误（env/政策/输入读不到/预算文件坏/设备装配失败）。
+
+    **调用顺序照 F7 的语义**：第一行过前置（`load_policy` →
+    `_check_autonomous_env` → `_check_exploration_env`），过了才做别的事
+    ——「启动时校验」不是「跑一半才拦」。两层前置是**与**的关系、各管各的
+    判据（见 `_check_exploration_env` 的 docstring）：公共前置管总开关与
+    production 一票否决，探索专属前置管 **sandbox-only（staging 也拒）** 与
+    simulator。
+
+    装配与 `mta run` 同路：设备侧一律经 `cli.pipeline.wire_device_stack`
+    （**唯一实现**），探索动作一律经 `AgentToolkit`（F12）。
+    """
+    from agents.policy_config import PolicyConfigError, load_policy
+
+    # 1. F7 前置（**第一行**）。`env_kind` 走唯一解析点（不许字面量：
+    #    硬编码 "sandbox" 会让 F7 退化成永真，有守卫钉这条）。
+    policy = (load_policy(args.policy) if args.policy is not None
+              else load_policy())
+    _check_autonomous_env(policy, env_kind=_resolve_env_kind(args),
+                          command="explore")
+    _check_exploration_env(policy, env_kind=_resolve_env_kind(args),
+                           device_type=args.device_type, command="explore")
+
+    from agents.storage import SQLiteAgentStore
+    from cli.pipeline import SessionPipeline, wire_device_stack
+    from environment.capabilities import DeviceType
+    from explorer.agent import Explorer
+    from explorer.frontier import make_frontier_decider
+    from explorer.state import ExplorationBudget
+    from graph import SOURCE, GraphStore
+    from graph.builder import read_trace_steps
+    from llm.budget import LLMBudget
+    from repository.resolver import Repository
+    from tracer.storage import TraceStore
+
+    # 2. 预算（F11）。**在任何写库之前**：坏文件是前置错误，不该留下半张库。
+    try:
+        budget = (ExplorationBudget.from_file(args.budget)
+                  if args.budget is not None
+                  else ExplorationBudget.from_policy(policy.exploration))
+    except PolicyConfigError as e:
+        print(f"PREFLIGHT ERROR: 预算不可用：{e}")
+        print("explore: exit 3")
+        return 3
+    problem = _budget_problem(budget)
+    if problem is not None:
+        print(f"PREFLIGHT ERROR: 预算不可用：{problem}")
+        print("explore: exit 3")
+        return 3
+
+    # 3. 装配（与 `mta run` 同路：Repository / trace 观测面 / 声明面）。
+    #
+    # ⚠️ **trace 库不存在 ≠ 前置错误**（与 `cmd_generate` 的 P1-1 同款处置）：
+    # 没跑过 `mta run` 的工程照样可以探索——观测面为空而已。`read_trace_steps`
+    # 对**未初始化**的库会 `no such table: runs`（那是给「库被指错」的诊断），
+    # 故先用只读探测 `_trace_has_runs` 把「还没跑过」与「库读不了」分开。
+    # 真正读不了（坏 schema / 多范围歧义）仍 fail-loud → exit 3。
+    import sqlite3
+
+    repository = _load_repository(args)
+    steps: list = []
+    trace_app_id = ""
+    trace_build = ""
+    # `_trace_has_runs` **本身**也可能炸（「文件不是 sqlite 库」这类真错误
+    # 它按契约不吞，见其 docstring），故探测也在 try 里——`cmd_generate`
+    # 是把两个调用包进同一个 try 的，这里同样不许有裸奔的调用。
+    try:
+        has_runs = _trace_has_runs(args.db)
+        if has_runs:
+            steps, trace_app_id, trace_build = read_trace_steps(args.db)
+    except (ValueError, sqlite3.Error) as e:
+        # 多范围歧义 / 库坏 / 文件不是库：图必须限定单一范围，前置错误。
+        print(f"PREFLIGHT ERROR: 读 trace 失败：{e}")
+        print("explore: exit 3")
+        return 3
+
+    # app_id 是图的范围第一段。缺 `--bundle-id` 时从 trace 归一化的值取
+    # （与 `cmd_generate` 的 P1-1 同一条：trace 的 `runs.app_bundle_id` 是
+    # 「这张图属于谁」的权威来源）；两处都没有 → 前置错误（**不猜**）。
+    app_id = args.bundle_id or trace_app_id
+    if not app_id:
+        print("PREFLIGHT ERROR: 拿不到 app_id——给 `--bundle-id`，或先跑一次 "
+              "`mta run`（trace 的 runs.app_bundle_id 是图的权威范围）")
+        print("explore: exit 3")
+        return 3
+
+    # build 是图的范围第二段，**必须与声明面对齐**——不对齐的后果是
+    # `load_graph` 查不到那一面 → frontier 恒空 → 零发现，而输出上它长得像
+    # 「真的探完了」（review_p3_task12 P3-4 的「配置错误表现为功能退化」）。
+    # 所以这里**不做 `_resolve_app_build` 的静默兜底**：`--build` 没给就必须
+    # 读得到 metadata（`mta run` 那边 build 只是个 E7 集合元素，兜底无害；
+    # 这边它是判据）。
+    from source import build_identity as bi
+
+    if args.build:
+        app_build = args.build
+    else:
+        try:
+            app_build = bi.resolve_app_build(bi.read_metadata(_metadata_path(args)))
+        except Exception as e:  # noqa: BLE001 — 读不到/坏 JSON 都是前置
+            print(f"PREFLIGHT ERROR: 读不到 12.3 metadata（它是 `--build` 的"
+                  f"来源，build 决定声明面的范围）：{e}")
+            print("explore: exit 3")
+            return 3
+
+    # trace 的**观测面**必须与本次的声明面同范围。`read_trace_steps` 只在
+    # 「同一个库里混了多个 (app_id, app_build)」时 fail-loud——若库里只有
+    # **一个陈旧的**范围（比如上一版 `v2` 的 trace）而本次 `--build local`，
+    # 那个守卫不会响，运行时图的 `transition_key` 却全来自 `v2`：
+    # `select_frontier` 会把**已经走过的边**当成没走过（novelty 误判、重走
+    # 已知路径）。所以在这里显式对齐（不静默挑一个）。
+    if trace_build and trace_build != app_build:
+        print(f"PREFLIGHT ERROR: trace 的观测范围是 build={trace_build!r}，"
+              f"与本次 build={app_build!r} 不符——观测面与声明面必须同范围")
+        print("explore: exit 3")
+        return 3
+
+    graph_store = GraphStore(args.graph_db)
+    source_graph = graph_store.load_graph(app_id, app_build, SOURCE)
+    runtime_graph = _runtime_graph_for(args.db, app_id=app_id,
+                                       app_build=app_build,
+                                       steps=steps)
+    if source_graph.is_empty:
+        # 声明面为空 → frontier 恒空 → 探索一步都走不了。**说清楚为什么**
+        # （静默的 `FRONTIER_EMPTY` 与「真的探完了」在输出上长得一样）。
+        print(f"note: 声明面为空（{args.graph_db} 的 app={app_id!r} "
+              f"build={app_build!r}）→ 没有可探索的 frontier 项。"
+              f"先 `mta graph build --bundle-id {app_id} --build {app_build}`"
+              f"（或确认发现事件已被人工 ACCEPT 登记）")
+
+    # 4. 任务行（`agent_tasks` 是每步审计的根，F1）。task_id 带随机后缀：
+    #    同一次探索重跑要各自留痕，不能被 upsert 覆盖掉上一轮的 trace。
+    #    ⚠️ `SQLiteAgentStore(...)` **推迟到这里**：它的 `__init__` 会建库 +
+    #    跑迁移（在磁盘上留文件）。放在前面会让「拿不到 app_id」这类**纯前置
+    #    错误**也留下一个新 agent.db——违反本仓「一次失败的读不该产生新文件」
+    #    的纪律（`_trace_has_runs` / `_collect_metrics_if_any` 同款）。
+    import uuid
+
+    agent_db = SQLiteAgentStore(args.agent_db)
+    task_id = f"exp_{uuid.uuid4().hex[:8]}"
+    agent_db.create_task(task_id, agent_type="explorer", goal=args.goal,
+                         constraints={"budget": {
+                             "max_steps": budget.max_steps,
+                             "max_duration_seconds": budget.max_duration_seconds,
+                             "max_llm_calls": budget.max_llm_calls,
+                             "max_repeated_state": budget.max_repeated_state,
+                         }})
+
+    # 5. 设备侧装配（**唯一实现**：`cli.pipeline.wire_device_stack`）。
+    run_id = f"explore_{uuid.uuid4().hex[:8]}"
+    trace_store = TraceStore(args.db)
+    trace_store.start_run(run_id, suite=args.suite or "", env_kind="sandbox",
+                          device_type="simulator", app_build=app_build,
+                          app_bundle_id=app_id)
+    pipeline = SessionPipeline(suites_root=args.suites_root,
+                               secrets=EnvSecretProvider(), app_id=app_id,
+                               app_build=app_build)
+    pipeline.store = trace_store
+    try:
+        stack = wire_device_stack(
+            pipeline, env_kind=_resolve_env_kind(args), run_id=run_id,
+            udid=args.udid, bundle_id=args.bundle_id, repo=repository)
+    except Exception as e:  # noqa: BLE001 — 设备会话建立失败 = 前置配置错误
+        trace_store.end_run(run_id, status="ABORTED", exit_code=3)
+        agent_db.update_task_state(task_id, "ESCALATED",
+                                   outcome="DEVICE_UNAVAILABLE")
+        print(f"PREFLIGHT ERROR: 设备会话建立失败：{e}")
+        print("explore: exit 3")
+        return 3
+
+    # 5b. **把 App 带到前台**（设计 §7.1 的第一步是 Observe，而 Observe 的前提
+    #     是「App 在屏上」）。不做这一步的后果在 M4 Gate 上实测到了：冷模拟器
+    #     上 `activate_app` 之前 `page_source` 是 **springboard**（App 根本没起），
+    #     `current_screen` 恒 `CURRENT_SCREEN_UNKNOWN` → frontier 恒空 →
+    #     输出 `outcome=FRONTIER_EMPTY steps=0`——**与「真的探完了」逐字相同**。
+    #     这是本仓最防的形态（配置错误伪装成功能退化）。
+    #     `AppSession.launch()` 无参走 `activate_app`：已在前台时**幂等**，
+    #     不会把调用方手工导航到的状态重置掉（`-UITestReset` 只在带参时生效）。
+    try:
+        pipeline.deps.app.launch()
+    except Exception as e:  # noqa: BLE001 — 起不来 = 前置配置错误
+        trace_store.end_run(run_id, status="ABORTED", exit_code=3)
+        agent_db.update_task_state(task_id, "ESCALATED",
+                                   outcome="APP_LAUNCH_FAILED")
+        # ⚠️ `stack.close()` **必须在这里显式调**：`finally` 只覆盖它后面的
+        # 主循环（`wire_device_stack` 已经 `connect()` 成功，Appium 会话是
+        # 活的）。漏掉它就是 `wire_device_stack` 刚修过的那个泄漏（P2-3），
+        # 在被抬高一层的调用点上重犯。
+        stack.close()
+        print(f"PREFLIGHT ERROR: App 起不来（{app_id}）：{e}")
+        print("explore: exit 3")
+        return 3
+
+    # 6. 工具层（F12：探索动作的唯一通路）。**只注入它真用得上的依赖**：
+    #    executor 是设备；locator_for / repository 是定位与风险（`tap` 的
+    #    Guard 输入）；wait_engine / assertion_engine 给 `wait` / `assert_*`；
+    #    agent_db + task_id 是 BLOCK 留痕（缺了 `ToolkitAuditError`）。
+    from agents.tools import AgentToolkit
+    from executor.assertion import AssertionEngine
+    from executor.guard import Guard
+    from executor.wait import WaitEngine
+
+    locator_for = pipeline._locator_for(stack.runner)
+    toolkit = AgentToolkit(
+        guard=Guard(_resolve_env_kind(args)), executor=stack.runner.ex,
+        locator_for=locator_for, repository=repository,
+        device_session=stack.device_session,
+        wait_engine=WaitEngine(stack.runner.ex, locator_for),
+        assertion_engine=AssertionEngine(stack.runner.ex, locator_for),
+        agent_db=agent_db, task_id=task_id, build=app_build)
+
+    # 7. 跑（主循环的每一步都落 agent_trace）。
+    decider = make_frontier_decider(source_graph, runtime_graph,
+                                    action_for=_explore_action_for)
+    explorer = Explorer(
+        toolkit=toolkit, graph=source_graph, agent_db=agent_db,
+        task_id=task_id, decider=decider, repository=repository,
+        build=app_build, budget=budget,
+        llm_budget=LLMBudget(max_calls_per_run=budget.max_llm_calls),
+        discovery_enabled=True)
+    try:
+        result = explorer.run()
+        # ⚠️ **成功路径也必须收口 run 行**（review_p3_task35 P3-8 的同一条，
+        # 在 `cmd_generate` 上修过、这里又漏了）：不写这一行，`runs` 里留下的
+        # 是 `status='RUNNING'` / `end_time=NULL`——而 `TraceStore.__init__`
+        # 会把**所有** RUNNING 行扫成 `FAIL`（那是给「进程异常中断」的兜底）。
+        # 于是一次**成功**的探索在库里显示为 FAIL：M4 Gate 现场实测，同库的
+        # explore 行全是 `status='FAIL' exit_code=None`。
+        # 终态词用 `*_BUDGET_EXCEEDED` / `LOOP_DETECTED` 这些**探索结论**：
+        # 它们是 F11/矩阵 #11/#12 的正常收束，落 `PASS` 才是如实的。
+        trace_store.end_run(run_id, status="PASS", exit_code=0)
+    except Exception as e:  # noqa: BLE001 — 探索炸了，run 行必须收口
+        trace_store.end_run(run_id, status="ABORTED", exit_code=3)
+        # `Explorer.run()` 一开始就把 task 置 `EXECUTING`，只在**正常**返回时
+        # 才写 `IDLE`。中途抛错若不在这里收口，`agent_tasks` 会永远停在
+        # `EXECUTING`/`outcome=NULL`——审计根上挂着一个「还在跑」的僵尸任务
+        # （与上面两条前置失败路径同款收口）。
+        agent_db.update_task_state(task_id, "ESCALATED",
+                                   outcome="EXPLORATION_FAILED")
+        print(f"PREFLIGHT ERROR: 探索失败：{type(e).__name__}: {e}")
+        print("explore: exit 3")
+        return 3
+    finally:
+        stack.close()
+
+    # 8. 输出（终态词是 F11/矩阵 #11/#12 的**结论**，退出码不区分它们）。
+    #    ⚠️ **只列本次任务的事件**：`list_discovery_events()` 返回的是**整库**
+    #    （含历史探索的），直接拿它当「本次发现」会让输出在同一个库上重跑时
+    #    报出别人的发现——M4 Gate 现场实测：G4/G5 两轮各自打印了 G3 那条
+    #    `disc_0731f877…`，而它们各自的探索根本没撞见新屏。审计输出必须是
+    #    「这一轮做了什么」，不是「这个库里有什么」。
+    events = [e for e in agent_db.list_discovery_events()
+              if e.get("exploration_task_id") == task_id]
+    for e in events:
+        detail = e.get("detail") or {}
+        print(f"discovery: {e['event_id']}  kind={e['kind']}  "
+              f"screen={detail.get('screen_id')}  review={e['review_status']}")
+    for entry in _explore_audit(agent_db, task_id):
+        print(f"  audit: {entry}")
+    print(f"explore: task={task_id}  outcome={result.outcome.value}  "
+          f"steps={result.steps}  screens={len(result.visited_fingerprints)}  "
+          f"discoveries={len(events)}  budget=steps<={budget.max_steps}")
+    return 0
+
+
+def _budget_problem(budget) -> str | None:
+    """四维预算里**模型层收不下**的取值（当前只有 `max_repeated_state`）。
+
+    `ExplorationPolicy` 对四维都只约束 `ge=0`（负值 / 错型在模型层就 fail-loud），
+    但 `max_repeated_state` 的「必须为正」住在 `explorer.loop_detector.is_loop`
+    ——它**在探索跑到第一步之后**才抛。若不在前置挡住，`--budget` 里写
+    `max_repeated_state: 0` 会先建库、建任务行、起设备、拉起 App，然后才以
+    `探索失败` 收场：正是「坏文件是前置错误、不该留下半张库」要防的形态。
+    这里按 `is_loop` 的**同一口径**（阈值必须为正）在启动期判定，不写第二份
+    语义——两者对同一配置的结论必须一致。
+
+    返回人读的错误串；合法则 `None`。
+    """
+    if budget.max_repeated_state <= 0:
+        return (f"max_repeated_state 必须为正，got {budget.max_repeated_state}"
+                f"（重复状态阈值是 loop detector 的判据，0 让它永不生效）")
+    return None
+
+
+def _runtime_graph_for(trace_db, *, app_id: str, app_build: str, steps):
+    """trace 观测面（**空库也要有图对象**——`select_frontier` 需要两面）。
+
+    `read_trace_steps` 已经在上面读过（前置错误要在装配之前暴露），这里只把
+    行翻成图——**不重复读库**（同一份数据读两遍必漂移）。
+    """
+    from graph.builder import build_runtime_graph
+
+    return build_runtime_graph(steps, app_id=app_id, app_build=app_build)
+
+
+def _explore_audit(agent_db, task_id) -> list[str]:
+    """探索的审计摘要（给人读的几行；原始留痕在 `agent_trace` 里）。"""
+    out: list[str] = []
+    for entry in agent_db.get_trace(task_id):
+        if entry.guard_result == "BLOCK":
+            out.append(f"step {entry.step_index} BLOCK "
+                       f"risk={entry.decision.get('risk')} "
+                       f"target={entry.decision.get('target')}")
+        elif entry.decision.get("discovery") == "RECORDED":
+            out.append(f"step {entry.step_index} DISCOVERY "
+                       f"{entry.decision.get('event_id')}")
+        elif entry.decision.get("reason"):
+            out.append(f"step {entry.step_index} STOP "
+                       f"{entry.decision.get('reason')}")
+    return out
 
 
 def cmd_candidate(args: argparse.Namespace) -> int:
@@ -2302,6 +2723,8 @@ def main(argv: Sequence | None = None) -> int:
         return cmd_plan(args)
     if args.command == "generate":
         return cmd_generate(args)
+    if args.command == "explore":
+        return cmd_explore(args)
     if args.command == "candidate":
         return cmd_candidate(args)
     if args.command == "repo":
