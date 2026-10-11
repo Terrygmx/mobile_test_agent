@@ -14,8 +14,9 @@ import pytest
 
 from agents.policy_config import (ATTRIBUTION_THRESHOLD,
                                   DIAGNOSIS_EVIDENCE_WEIGHTS)
-from diagnosis.evidence import (rank_hypotheses, score_evidence,
-                                suggested_attribution)
+from diagnosis.context import DiagnosisContext
+from diagnosis.evidence import (history_corroboration, rank_hypotheses,
+                                score_evidence, suggested_attribution)
 from diagnosis.models import EvidenceItem, Hypothesis
 
 
@@ -250,3 +251,99 @@ def test_analyzer_hypotheses_rank_by_score():
     scores = [s for _, s in ranked]
     assert scores == sorted(scores, reverse=True)
     assert ranked[0][0].evidence[0].kind == "crash_detected"
+
+
+# --- 4. `same_issue_multiple_tests` 的生产者（M5 Gate 2026-10-11 补上） ----------
+#
+# ⚠️ 这一节存在的理由：权重表里 `same_issue_multiple_tests: 3` 从 M1 建段起
+# 就在，`diagnosis/context.py` 的 docstring 也明写「矩阵 #16 的
+# same_issue_multiple_tests 证据就从这里来」——但**全仓没有任何生产者**。
+# 后果是真机上最常见的失败形态（UI 漂移）分数上限只有
+# `source_change_correlated`(3) + `reproducible_3_times`(5) = 8，
+# **永远过不了阈值 10**：`suggested_attribution` 在真机数据上不可达，
+# F10 的「系统给建议」实际退化成了「系统永远不给建议」。
+
+
+def _ctx(**kw) -> DiagnosisContext:
+    base = dict(run_id="run_1", app_id="app", app_build="1026")
+    base.update(kw)
+    return DiagnosisContext(**base)
+
+
+def _step(testcase_id, failure_type="ELEMENT_NOT_FOUND", status="FAILED",
+          index=0, tc_run=1):
+    from graph.models import TraceStep
+    return TraceStep(testcase_run_id=tc_run, step_index=index,
+                     step_type="tap", target_id="username_field",
+                     status=status, failure_type=failure_type,
+                     testcase_id=testcase_id)
+
+
+def test_the_same_failure_type_in_another_testcase_is_corroboration():
+    """同类失败在**另一个用例**里也出现过 → `same_issue_multiple_tests`。
+
+    形状照真机实测（M5 Gate）：`gate_login` 失败，`gate_drift2` 在历史里
+    命中同一个 `ELEMENT_NOT_FOUND`。
+    """
+    ctx = _ctx(steps=(_step("gate_login"),),
+               history=(_step("gate_drift2", index=2, tc_run=9),))
+    out = history_corroboration(ctx)
+    assert [e.kind for e in out] == ["same_issue_multiple_tests"]
+    assert "gate_login" in out[0].detail and "gate_drift2" in out[0].detail
+
+
+def test_a_single_testcase_alone_is_not_multiple_tests():
+    """反钉子：只失败过一个用例 → **不给**这条证据。
+
+    「多个用例」是这条证据的全部含义；只跑过一次就给 3 分，等于凭空加分。
+    """
+    assert history_corroboration(_ctx(steps=(_step("gate_login"),))) == []
+    # 历史里只有**同一个**用例（重跑）也不算——那是 `reproducible_3_times` 的地盘
+    assert history_corroboration(_ctx(
+        steps=(_step("gate_login"),),
+        history=(_step("gate_login", tc_run=9),))) == []
+
+
+def test_a_different_failure_type_in_history_is_not_the_same_issue():
+    """反钉子：历史里的失败**类型不同** → 不是同一个 issue。
+
+    `ctx.history` 由 `build_context` 按 failure_type 过滤，但 `DiagnosisContext`
+     也能被直接构造（单测/别的调用方）——生产者自己声明前提，不依赖调用方
+     恰好过滤过。否则它会拿「历史里有别的失败」给当前的结论加分。
+    """
+    assert history_corroboration(_ctx(
+        steps=(_step("gate_login"),),
+        history=(_step("other_tc", failure_type="WAIT_TIMEOUT", tc_run=9),
+                 _step("another_tc", failure_type="APP_CRASH",
+                       tc_run=10)))) == []
+
+
+def test_no_failure_step_means_no_corroboration():
+    """没有失败步骤就没有「同一个 issue」可言（全 SUCCESS 的现场）。"""
+    assert history_corroboration(_ctx(
+        steps=(_step("gate_login", status="SUCCESS"),))) == []
+
+
+def test_the_producer_makes_the_drift_path_cross_the_threshold():
+    """**这条生产者的目的**：漂移 + 复现 + 多用例 → 11 分 → 过阈值。
+
+    没有它，真机漂移现场的上限是 8（3+5），`suggested_attribution` 恒为
+    None——`test_above_threshold_maps_direction_from_the_strongest_evidence`
+    里那条 11 分的断言在真机数据上永远走不到。
+    """
+    from diagnosis.models import Hypothesis
+
+    drift = Hypothesis(
+        statement="定位失效由 UI 结构漂移引起（元素改名/移动/删除）",
+        confidence=0.8, origin="rule_based",
+        evidence=[EvidenceItem(kind="source_change_correlated", detail="d",
+                               source="s")])
+    repro = [EvidenceItem(kind="reproducible_3_times", detail="d", source="s")]
+    ctx = _ctx(steps=(_step("gate_login"),),
+               history=(_step("gate_drift2", index=2, tc_run=9),))
+    merged = drift.evidence + repro + history_corroboration(ctx)
+
+    assert score_evidence(merged) == 11
+    assert suggested_attribution(
+        Hypothesis(statement="x", confidence=0.5, origin="rule_based",
+                   evidence=merged)) == "AUTOMATION_DEFECT"

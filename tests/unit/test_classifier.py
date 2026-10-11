@@ -115,6 +115,45 @@ def test_ui_drift_from_the_p2_reconciliation_record():
     assert "recovery_record" in hyps[0].evidence[0].source
 
 
+def test_ui_drift_from_a_failed_recovery_stage_record():
+    """**真漂移现场的形态**（M5 Gate 2026-10-11 实测修正）。
+
+    恢复**失败**时（元素真改名、无 LLM/经验可救——最常见的一种），
+    `cli/pipeline.py` 写的是 `recovery_attempted`，而 `reconcile` 只是其中的
+    一个**阶段**：结论在 `stages` 列表里，不在那段顶层的 `outcome`（后者是
+    整条流水线的结论，如 `"no_llm_engine"`）。
+
+    早先只读 `detail["recovery"]`，于是**真漂移现场规则不命中**——代码与
+    本文件的旧用例都绿（它们造的是恢复**成功**的形状），真机上一检不出来。
+    """
+    drift = _step(1, failure_type="ELEMENT_NOT_FOUND",
+                  detail={"recovery_attempted": {
+                      "recovery": "no_llm_engine",
+                      "stages": [
+                          {"stage": "settle", "outcome": "ElementNotFound"},
+                          {"stage": "screen", "outcome": "FOUND",
+                           "screen": "LoginView"},
+                          {"stage": "reconcile", "outcome": "DRIFT",
+                           "candidates": ["user_field"]},
+                          {"stage": "llm", "outcome": "disabled"}]}})
+    hyps = rule_based_hypotheses(_ctx(steps=(drift,)))
+    assert len(hyps) == 1, hyps
+    assert [e.kind for e in hyps[0].evidence] == ["source_change_correlated"]
+    assert "recovery_record" in hyps[0].evidence[0].source
+
+
+def test_a_non_drift_recovery_outcome_is_not_a_drift_record():
+    """反钉子：流水线结论是别的值（如 `no_llm_engine`）就不算漂移记录——
+    只看顶层 `outcome` 会把**任何**恢复失败都判成漂移。"""
+    not_drift = _step(1, failure_type="ELEMENT_NOT_FOUND",
+                      detail={"recovery_attempted": {
+                          "recovery": "no_llm_engine",
+                          "stages": [{"stage": "reconcile",
+                                      "outcome": "MATCH"}]}})
+    assert not [h for h in rule_based_hypotheses(_ctx(steps=(not_drift,)))
+                if "漂移" in h.statement]
+
+
 def test_ui_drift_from_a_graph_diff_hit():
     """`graph_diff` 命中非 UNKNOWN 差异 → UI_DRIFT（复用 `graph.diff` 判据）。"""
     from graph.diff import ADDED, DiffEntry, GraphDiff

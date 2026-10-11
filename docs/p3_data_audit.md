@@ -4140,3 +4140,145 @@ production/staging 两条测试独立覆盖了「硬编码 sandbox」的变异�
 G6a 只看 **gate 工程**的 `git status`、G6b 只 md5 三个资产目录（主仓整体
 `git status` 不查）——这是有意的收窄（Gate 要保护的正是那三处资产），
 本次收口后主仓状态也逐字复核过。
+
+---
+
+## Task 5.6 / P3-25 — bug 状态机 + `mta diagnose` + M5 Gate 收口
+
+**HEAD**：`2fb0215`（M4 checkpoint 之后）｜**基线**：2135 passed → **收口 2147 passed**
+｜**Gate**：`phase0/verify_p3_m5.py`（G1–G10）
+
+### 5.6.1 先做了两处真缺陷的修复（都是 M5 Gate 实测逼出来的）
+
+这一轮最重要的发现：**离线单测全绿，真机上一条漂移都诊不出来**。两个缺陷都
+属于「看起来正常」那一类——代码与单测都过，只有端到端跑一次真机才暴露。
+
+**缺陷 A：`diagnosis/classifier.py` 只读恢复记录的一处落点。**
+
+`rule_based_hypotheses` 的 UI_DRIFT 规则读 `steps.detail_json["recovery"]`。
+但 P2 恢复**失败**时（元素真改名、无 LLM/经验可救——最常见的一种漂移），
+`cli/pipeline.py` 写的是 `detail["recovery_attempted"]`，而 `reconcile` 只是
+恢复流水线的一个**阶段**：DRIFT 结论在 `stages` 列表里
+（`{"stage": "reconcile", "outcome": "DRIFT"}`），**不在**那段顶层的
+`outcome`（后者是整条流水线的结论，漂移且无 LLM 时是 `"no_llm_engine"`）。
+顶层的 `recovery` 段只在**恢复成功**时写。
+
+后果：真机漂移现场 `rule_based_hypotheses` 返回空 → 规则「无结论」→ 白问一次
+LLM → 仍无假设 → **不落 Bug 候选**。旧的 3 条漂移单测造的是**成功路径**的形状，
+所以它们一直是绿的。
+
+修：`_recovery_detail` 现在看 `recovery` 与 `recovery_attempted` 两处，两处的
+**顶层与 `stages` 列表**都扫。新增 2 条钉子：一条造真机形态（`recovery_attempted`
++ `stages[reconcile].outcome=DRIFT`），一条**反钉**（`stages[reconcile].outcome=MATCH`
+必须**不**算漂移——只看顶层会把任何恢复失败都判成漂移）。
+
+**缺陷 B：复现证据永远进不了归因的证据集。**
+
+`cmd_diagnose` 原来的顺序是「⑥ 算 `suggested_attribution` → ⑦ 跑复现 →
+把 `_repro_score(repro)` 另加进 `evidence_score`」。于是哪怕真的重跑了三次，
+落库的 `attribution_hypothesis` 仍是 `UNTRIAGED`，而 `evidence_score` 是 10——
+**自相矛盾**（分数过线了，归因却说没依据）。这正是 handover §9「5.6 开工前置①」
+预见的坑：崩溃/漂移这类最强规则证据单独都只值 5 / 3 分，低于阈值 10；设计 §8.3
+让它们配 `reproducible_3_times`（5 分）才过线，**前提是复现证据进了同一个证据集**。
+
+修：复现挪到**排序与归因之前**，产出经 `_with_extra_evidence` 并进**每条**假设
+（按 `(kind, detail, source)` 去重），然后才 `rank_hypotheses` +
+`suggested_attribution`。`_repro_score` 删除（它让同一份证据被记两遍）。
+排序键不受影响：给每条假设加同一组证据等于加同一个常数。新增 2 条钉子：
+一条断言 `crash(5)+repro(5)=10 → APP_DEFECT`，一条反钉「不重复记账」。
+
+### 5.6.2 缺口 C：`same_issue_multiple_tests` 有权重、有文档、**没有生产者**
+
+权重表（`agents/policy_config.py::DIAGNOSIS_EVIDENCE_WEIGHTS`，M1 建段）里
+`same_issue_multiple_tests: 3` 一直在；`diagnosis/context.py` 的 docstring 也
+明写「矩阵 #16 的 `same_issue_multiple_tests` 证据就从这里来」。但**全仓 grep
+不到任何产出它的代码**——只在权重表、docstring、和几条手工拼证据列表的单测里
+出现。
+
+后果是真机上最常见的失败形态**永远过不了归因阈值**：漂移现场的证据上限是
+`source_change_correlated`(3) + `reproducible_3_times`(5) = **8** < 阈值 10。
+即 F10 的「系统给建议」在真机数据上**实际不可达**，退化成了「系统永远不给
+建议」。`tests/unit/test_evidence_score.py` 里早就写着
+「漂移 + 复现 + 多用例 = 11 → `AUTOMATION_DEFECT`」的断言——那个 11 分在真机
+数据上永远走不到。
+
+修：新增 `diagnosis/evidence.py::history_corroboration`（+ 拆出
+`tests_hit_by_failure` 作为唯一事实源）。判据是**同一个 `failure_type` 命中了
+≥ 2 个不同的 `testcase_id`**（现场 + 同类历史合起来算）。两道反钉子：
+只失败过一个用例不给；历史里只有**同一个**用例的重跑也不给（那是
+`reproducible_3_times` 的地盘，两条都给会把同一件事记两遍）。
+生产者自己声明 `failure_type` 前提，不依赖 `ctx.history` 恰好被
+`build_context` 过滤过（`DiagnosisContext` 也能被直接构造）。
+
+**连带修的不一致**：`affected_tests` 原来只取 `ctx.steps[0].testcase_id`
+（**第一个**用例），于是证据写「命中 2 个用例」而 bundle 里只列 1 个。改为
+`tests_hit_by_failure(ctx)`——与证据同一个集合，两处不再各算一遍。
+
+### 5.6.2b 缺口 D：`--db` 指向没初始化的库 → traceback 而不是前置错误
+
+Gate 首跑抓到的（**第 4 个**）：G2a 用「run_id 不存在」验前置错误面，但
+`--db` 指向一个还没有表的库时，`KnowledgeSources.trace_history` 抛
+`ValueError`（「trace 库不可读（未初始化或无表？）」）——它**不在**
+`build_context` 外面那个 `except DiagnosisContextError` 里，一路冒到 `main()`：
+用户看到一屏 traceback 和 exit 1。
+
+既有的 `test_unknown_run_id_is_a_preflight_error` 抓不到：它先
+`_seed_crash_run` 把库建好，走的是「库在、run 不在」那条路。
+
+修：`cmd_diagnose` 的上下文装配多捕一个 `ValueError` → `PREFLIGHT ERROR:
+读不到 trace 现场：…` + exit 3。这是「指错了库」/「还没跑过 run」，是用户能
+ corrective action 的前置错误，不该以 traceback 的面目出现。
+
+### 5.6.3 M5 Gate 的设计前提被实测证伪：崩溃注入走不通
+
+plan Task 5.6 写「漂移法失败 + **注入真实逻辑 bug**」，本 Gate 早先版本实现的
+是后半句的一种读法：往 App 里加一个 `fatalError` 按钮 → 点它 → App 崩 →
+WDA 断连 → `crash_detected` 判据成立。
+
+**实测证伪**：点 `fatalError` 按钮，Appium 把这次 tap 记成 **SUCCESS**，用例
+**照常 PASS**。补断言也一样——后续失败是 `ELEMENT_NOT_FOUND` /
+`ASSERTION_TARGET_DRIFT`，`APP_CRASH` 与 `WDA_DEAD` 一个都不出现。根因是
+**P1 根本没有崩溃判定逻辑**（底稿修订 #6：`APP_CRASH` 只是 `FAILURE_TYPES`
+词表里的字符串），`crash_detected` 的第二条判据（infra 事件）在真机上拿不到。
+
+于是 Gate 改用 plan 自己写的**前半句——漂移法**。这也是对的方向：漂移是 M5 在
+真机上**唯一可达**的失败形态，而且正是这条路逼出了 5.6.1/5.6.2 的三个缺陷。
+
+**漂移的形态必须是「元数据旧、App 新」**：`mta run` 的 lint 会拒掉「元数据里
+不存在的 target」（`unknown_target` → exit 3）。所以**不能**先改名再重扫
+metadata——那样用例根本跑不起来，那是配置错误不是漂移。正确顺序：
+**先扫干净源码的 metadata，再改名重编重装，且不重扫**。
+
+### 5.6.4 Gate 判据（`phase0/verify_p3_m5.py`）
+
+| 判据 | 内容 |
+|---|---|
+| G1 | production **启动即拒**（含 `F7`），且**在写任何库之前**（agent.db 文件都不建） |
+| G2a | 未知 run → exit 3（`PREFLIGHT ERROR:` 开头，无 traceback） |
+| G2b | 纯断言失败 → exit 0 且**不落**候选（F10 空证据闸门） |
+| G2c | **矩阵 #16 前半**：漂移单独 3 分且无法复现 → 候选照落但归因保持 `UNTRIAGED` |
+| G3 | 主路径：漂移 run → 候选 `HUMAN_REVIEW`、**审核三列为空**、无 `--base-build` → 无 `dedup_key` |
+| G4 | 矩阵 #14：规则命中 → LLM 零调用 |
+| G5 | 矩阵 #16 前半的**反面**：漂移(3)+复现(5)+多用例(3)=**11** ≥ 10 → `AUTOMATION_DEFECT` |
+| G5b | `affected_tests` 与证据对得上（证据说 2 个用例，bundle 就列 2 个） |
+| G6 | 矩阵 #15：复现**真的重跑**（`attempts>=2`、每次都复现、`reproducible=True`） |
+| G7 | 人工 accept → `CONFIRMED` + 审核三列落库 + Evidence Bundle（`bundle_version=1`） |
+| G8 | 状态机：终态不可再推进（二次决策 fail-loud，状态不被改写） |
+| G9 | 现场卫生：App 源码已还原 + gate 工程 git 干净 + 主仓三处资产逐字节未变 |
+| G10 | 全量回归全绿 |
+
+G5 一条同时钉住三件事：复现证据真进了同一个证据集（缺陷 B 的回归钉子）、
+`same_issue_multiple_tests` 真有生产者（缺口 C 的回归钉子）、方向由
+`source_change_correlated` 映射到 `AUTOMATION_DEFECT`（UI 变了，失效的是脚本
+的定位，不是 App 功能——F10 的「建议」而非「结论」）。
+
+### 5.6.5 测试增量
+
+| 文件 | 变化 |
+|---|---|
+| `tests/unit/test_classifier.py` | 21 → 23（真漂移形态 + 反钉 MATCH 不算漂移） |
+| `tests/unit/test_cli_diagnose.py` | 11 → 16（复现证据过阈值 + 不重复记账 + 多用例佐证 3 条） |
+| `tests/unit/test_evidence_score.py` | +5（`history_corroboration` 生产者 4 条 + 「漂移路径因此过阈值」1 条） |
+| `tests/unit/test_cli_diagnose.py` | 另 +1（trace 库不可读 → 干净 exit 3，缺口 D） |
+
+合计 2135 → **2148 passed**。

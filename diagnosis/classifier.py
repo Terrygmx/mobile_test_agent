@@ -26,9 +26,33 @@
 
 ⚠️ **UI_DRIFT 复用 P2 的 reconciliation 记录，不重算漂移**（plan 明文）：
 `agent/recovery.py` 在恢复流水线里已经跑过 `reconcile_local` 并把结论写进
-`steps.detail_json` 的 `recovery` 段（`{"outcome": "DRIFT", ...}`）。本模块
+`steps.detail_json`（`recovery` 段，`{"outcome": "DRIFT", ...}`）。本模块
 **读那条记录**——重算一遍会引入第二个判据源（而且运行时 page_source 在诊断
 时早已不在）。
+
+## ⚠️ 口径修正：`recovery` 段在**两处**出现，必须都读
+
+M5 Gate（2026-10-11）真机实测：P2 恢复**失败**（最常见的漂移形态——元素真
+改名，且无 LLM/经验可救）时，`cli/pipeline.py` 写的是
+
+```json
+{"recovery_attempted": {"stages": [..., {"stage": "reconcile",
+                                         "outcome": "DRIFT", ...}], ...}}
+```
+
+——`DRIFT` 结论在 `recovery_attempted.stages` 里，**不在**顶层的
+`recovery`（顶层 `recovery` 只在**恢复成功**时写，`_recovered` 的 detail）。
+
+早先本模块只读 `detail["recovery"]`，于是**真漂移现场规则不命中**
+（`rule_based_hypotheses` 返回空 → 规则「无结论」→ 白问一次 LLM → 仍无假设
+→ 不落 Bug 候选）。这是「看起来正常」的一类：代码与单测都绿（单测造的是
+成功路径的形状），真机上一条漂移都检不出来。
+
+故 `_recovery_detail` 现在看三处：`recovery`（恢复成功）与
+`recovery_attempted`（恢复失败），两处的**顶层**与**stages 列表**都扫。
+「扫 stages」是必须的：`reconcile` 只是恢复流水线的一个**阶段**，它的结论
+在 stage 条目里，不在那一层的 `outcome`（后者是整条流水线的结论，如
+`"no_llm_engine"`）。
 
 ⚠️ **断言值不符不进诊断**（设计 §8.2 末条）：`ASSERTION_VALUE_MISMATCH` 是
 P1 的既有结论（H6：直接 FAIL，无 Recovery），本模块**显式返回空列表**——
@@ -52,16 +76,50 @@ _DRIFT_OUTCOME = "DRIFT"
 _SERVER_ERROR_MIN = 500
 
 
-def _recovery_detail(step) -> dict:
-    """步骤的 `detail.recovery` 段（P2 reconciliation 记录的落点）。
+_RECOVERY_SEGMENTS = ("recovery", "recovery_attempted")
+_RECONCILE_STAGE = "reconcile"
 
-    `TraceStep.detail` 是 `detail_json` 的解析产物；`recovery` 段由
-    `cli/pipeline.py` 在恢复成功后写入（`{"outcome": …, "candidates": […],
-    "kind": …}`）。取不到 → 空 dict（不是错误：没有恢复记录本身就是信息）。
+
+def _recovery_detail(step) -> dict:
+    """步骤的恢复记录（P2 reconciliation 结论的落点）。
+
+    `TraceStep.detail` 是 `detail_json` 的解析产物。`recovery` 段由
+    `cli/pipeline.py` 在**恢复成功**时写（`_recovered` 的 detail）；恢复
+    **失败**时写的是 `recovery_attempted`（模块 docstring 的口径修正）。
+
+    返回**第一个**非空段（两处不会同时存在：成功与失败互斥）。
     """
     detail = getattr(step, "detail", None) or {}
-    rec = detail.get("recovery")
-    return rec if isinstance(rec, dict) else {}
+    for key in _RECOVERY_SEGMENTS:
+        seg = detail.get(key)
+        if isinstance(seg, dict):
+            return seg
+    return {}
+
+
+def _has_drift_record(ctx) -> bool:
+    steps = tuple(getattr(ctx, "steps", ())) + tuple(
+        getattr(ctx, "history", ()))
+    return any(_drift_in(_recovery_detail(s)) for s in steps)
+
+
+def _drift_in(segment: dict) -> bool:
+    """一段恢复记录里有没有 `reconcile` 阶段的 `outcome == "DRIFT"`。
+
+    ⚠️ **必须扫 `stages`**：`reconcile` 只是恢复流水线的一个**阶段**，它的
+    结论在 stage 条目里（`{"stage": "reconcile", "outcome": "DRIFT"}`），而
+    该段顶层的 `outcome` 是整条流水线的结论（漂移且无 LLM 时是
+    `"no_llm_engine"` 之类）——只看顶层会漏掉**所有**真漂移现场。
+    """
+    if segment.get("outcome") == _DRIFT_OUTCOME:
+        return True
+    stages = segment.get("stages")
+    if isinstance(stages, (list, tuple)):
+        for st in stages:
+            if isinstance(st, dict) and st.get("stage") == _RECONCILE_STAGE \
+                    and st.get("outcome") == _DRIFT_OUTCOME:
+                return True
+    return False
 
 
 def crash_detected(ctx) -> bool:
@@ -99,13 +157,6 @@ def is_assertion_only_failure(ctx) -> bool:
         return False
     return all(getattr(s, "failure_type", None) == "ASSERTION_VALUE_MISMATCH"
                for s in failed)
-
-
-def _has_drift_record(ctx) -> bool:
-    steps = tuple(getattr(ctx, "steps", ())) + tuple(
-        getattr(ctx, "history", ()))
-    return any(_recovery_detail(s).get("outcome") == _DRIFT_OUTCOME
-               for s in steps)
 
 
 def _has_ui_diff_hit(ctx) -> bool:

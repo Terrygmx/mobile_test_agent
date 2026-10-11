@@ -193,14 +193,22 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
 | 6 | `candidates/fingerprint.py` / `docs/p3_data_audit.md` 称「**每个步骤恰好落入一个分量**」 | **实测为假**：带 `postcondition` 的 `ActionStep` **同时落入 `screens` + `actions` 两个分量**（真语料 2 处）——见 `review/review_p3_task33_2026-10-10.md` P3-2 |
 | 7 | `MEMORY.md` §1 记的「**6 个固定假失败**」 | **已过时**：2026-10-10 实测那两条文件 **11 passed**（当前基线 0 failed）。MEMORY 是自动注入的，**它 §1 那行未同步**（该目录不入库，只能人工改） |
 
-## 9. 当前状态快照（**2026-10-10**，以实测为准）
+## 9. 当前状态快照（**2026-10-11**，以实测为准）
 
-- **分支 / HEAD**：`P3-1010` / **`checkpoint-p3-m3`**（M3 已收口；tag 不可动）
-- **全量基线**：**1866 passed / 0 failed**
-- **最新 tag**：`checkpoint-p3-m3`（**P3 M3 收口**）
+- **分支 / HEAD**：`P4-1011` / **`checkpoint-p3-m5`** = `c7b9185`（M4/M5 均已收口；tag 不可动）
+- **全量基线**：**2148 passed / 0 failed**
+- **最新 tag**：`checkpoint-p3-m5`（**P3 M5 收口**；上一个 `checkpoint-p3-m4` = `2fb0215`）
 - **Gate 状态**：M1 ✅（`checkpoint-p3-m1`）· M2 ✅（`phase0/verify_p3_m2.py` exit 0，8/8 PASS）
   · **M3 ✅**（`phase0/verify_p3_m3.py` exit 0，**11/11 PASS**，`out/p3_m3_gate/summary.json`
   verdict=PASS；G8 内含全量 1866 passed）
+  · **M4 ✅**（`phase0/verify_p3_m4.py` exit 0，**device_half=PASS**，
+  `out/p3_m4_gate/summary.json` verdict=PASS；G7 内含全量 **2108 passed**。
+  G1 三种启动期拒绝 / G2 预算 / G3 discovery 不写图 / G4 HIGH 拦截 /
+  G5 LOOP_DETECTED / G6 卫生 全 PASS）
+  · **M5 ✅**（`phase0/verify_p3_m5.py` exit 0，**device_half=PASS**，
+  `out/p3_m5_gate/summary.json` verdict=PASS；G10 内含全量 **2148 passed**。
+  漂移法真机路径：规则命中 → 复现 3 次 → **11 分过阈值 10** →
+  `AUTOMATION_DEFECT` → 人工 accept → `CONFIRMED` + Evidence Bundle）
 - **已完成**：P0 / P1 / P2 全部；P3 的 **M1、M2、M3 全部**（3.1–3.5）
   - 3.1 Candidate 字段（`72106e1`，评审两轮已清）
   - 3.2 Coverage Gap（`43555e9` + 修订 `0ede83e`）——本体收口，**round 2 核销 P2-1'
@@ -241,14 +249,49 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
       AST 守卫收紧为「无条件执行位置」、`review_status` 读侧收进
       `Literal[*REVIEW_STATUSES]`。修订后：全量 **1866 passed / 0 failed** +
       Gate **exit 0**（11/11）。
-- **下一步**：**M4（Discovery Event 接入 F6 同一入口）**。
-  ⚠️ **M4 开工前置**：
-  1. **翻案通道仍未做**（3.5 拍板不做）：被 SKIP 的候选无库行可 ACCEPT；真语料 2 对
-     同指纹（`reset_logout_001` vs `login_001` 语义不同那对是危险的一对）——**M4+
-     显性登记**；
-  2. `candidates/review.py` 的 `_SUPPORTED_KINDS = ("test",)` 就是 M4 的扩展点；
-  3. `review_status` 的**唯一写路径**是 `agents/storage.py::decide_candidate`
-     （`save_candidate` 连形参都不收）——M4 接入 Discovery 时照此办理。
+- **已完成（M4，2026-10-11，`checkpoint-p3-m4`）**：Bounded Exploration 4.1–4.6
+  - 4.1 `explorer/agent.py` 主循环（observe→frontier→guard→execute→verify，每步落
+    `agent_trace`）+ `explorer/policy.py`（`effective_risk`==LOW 才自动执行，复用 P1）
+  - 4.2 `explorer/frontier.py::select_frontier`（unexplored 优先 + novelty）纯函数
+  - 4.3 `explorer/state.py::ExplorationBudget`（四维；LLM 维就是 P1 `LLMBudget` 实例）
+  - 4.4 `explorer/loop_detector.py::is_loop`（纯计数；`None` 指纹不计入+留痕）
+  - 4.5 迁移 `006_discovery_events.sql` + `candidates/discovery.py`（**只落 PENDING、
+    不写图**，E12；ACCEPT 后经 `register` 幂等登记）
+  - **4.6 `cli/main.py::explore` + `phase0/verify_p3_m4.py`**（M4 收口，`2fb0215`）：
+    F7 **两层**前置（公共 + 探索专属，**staging 也拒**）、`--build` 不做静默兜底、
+    App 激活、run 行成功路径收口。两段对抗性 review 后再补六处**失败路径**收口
+    （僵尸任务行 / 泄漏 Appium 会话 / 半张库 / 陈旧 trace 范围 / 坏库 traceback /
+    模型收不下的预算维）。**未做**：翻案通道（沿 3.5 拍板，M4+ 显性登记）。
+- **已完成（M5，2026-10-11，Task 5.6 / P3-25 收口）**：Failure Diagnosis 出口
+  - `candidates/bug.py` 状态机（`DISCOVERED→ANALYZING→CANDIDATE→HUMAN_REVIEW→
+    {CONFIRMED|REJECTED|DUPLICATE}`，转换表纯函数，非法转换 fail-loud）+
+    `candidates/review.py` 接 `kind="bug"`（F6 同一入口）+ `cli/main.py::diagnose
+    --run-id [--step] [--base-build]` + `phase0/verify_p3_m5.py`。
+  - **Gate 实测抓出四个真缺陷**（全部「离线单测绿、真机上不成立」那一类，详见
+    `docs/p3_data_audit.md` §5.6）：① `classifier` 只读 `detail["recovery"]`，
+    漏掉恢复**失败**时的 `recovery_attempted.stages[reconcile].outcome=DRIFT`
+    → 真机漂移一条假设都产不出；② `cmd_diagnose` **先算归因、后跑复现** →
+    复现证据进不了归因的证据集（分数 8 但归因空）；③
+    `same_issue_multiple_tests`（权重 3）**全仓没有生产者** → 漂移现场分数上限
+    8 < 阈值 10，F10 的「建议」在真机上不可达；④ `--db` 指向未初始化的库 →
+    `ValueError` 冒成 traceback 而不是 exit 3。
+  - **Gate 的设计前提被证伪并改写**：早先的「注入 `fatalError` 崩溃按钮」走不通
+    （点它 Appium 记 SUCCESS、用例照常 PASS；P1 根本没有 APP_CRASH 判定），
+    改用 plan 自己写的**漂移法**。⚠️ **漂移的形态必须是「元数据旧、App 新」**：
+    `mta run` 的 lint 会拒掉「元数据里不存在的 target」，先改名再重扫 metadata
+    会让用例根本跑不起来（那是配置错误不是漂移）。
+  - Gate 结果：`out/p3_m5_gate/summary.json` verdict=PASS、**device_half=PASS**
+    （漂移 run → 规则命中 → 真机复现 3 次 → **11 分过阈值 10** →
+    `AUTOMATION_DEFECT` → `HUMAN_REVIEW` → 人工 accept → `CONFIRMED` +
+    Evidence Bundle；G10 内含全量 **2148 passed**）。
+- **下一步**：**M6 全部超出本批范围**（agent 状态机 / Subagent 基类 / manager /
+  benchmark / 闭环演示）。M4+M5 均已收口，plan 的「M6 收口必须在两者全过之后」
+  这一前置已满足。
+  ⚠️ **开工前置（M6）**：① `reproduce` 的 `runner` 回调目前是 `_run_reproduction`
+  在 `cli/main.py` 里**手工注入**的（toolkit 通路在 M6 前是 `NOT_WIRED`）——
+  Subagent 基类落地后应改走 `AgentToolkit.run_testcase`；② testcase 的
+  `postcondition` 声明要并进 `StepProbe`；③ 翻案通道仍**显性登记不做**
+  （沿 3.5 拍板）。
 - **待拍板的三项**（沿用）：`screen_id` 过滤的数据源缺口（`docs/p3_data_audit.md` Task 2.2）、
   「坏引用用例」的处置口径（同文件 Task 2.3）、`priority_score` / Evidence Score 的
   权重校准所需数据量（`docs/phase3-plan.md` §2 open questions）

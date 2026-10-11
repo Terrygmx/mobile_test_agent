@@ -40,6 +40,7 @@ Discovery Event 与 M5 的 Bug Candidate 复用同一入口（`kind` 判别，�
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import yaml
@@ -50,10 +51,11 @@ from source.vcs import run_git
 from testcase.lint import Severity, lint, max_severity
 from testcase.schema import parse_testcase_dict
 
-__all__ = ["CandidateReviewError", "decide_candidate", "export_candidate_patch"]
+__all__ = ["CandidateReviewError", "decide_candidate",
+           "export_candidate_patch", "export_evidence_bundle"]
 
 # Task 3.5 只接 test；Task 4.5 扩 discovery（M4）；Task 5.6 扩 bug（M5）。
-_SUPPORTED_KINDS = ("test", "discovery")
+_SUPPORTED_KINDS = ("test", "discovery", "bug")
 
 
 class CandidateReviewError(RuntimeError):
@@ -68,7 +70,7 @@ def _require_kind(kind: str) -> None:
     if kind not in _SUPPORTED_KINDS:
         raise CandidateReviewError(
             f"未知的候选类型 {kind!r}——目前只接 "
-            f"{'/'.join(_SUPPORTED_KINDS)}（Bug 候选归 Task 5.6 接入）")
+            f"{'/'.join(_SUPPORTED_KINDS)}")
 
 
 def decide_candidate(store, kind: str, candidate_id: str, decision: str,
@@ -77,7 +79,8 @@ def decide_candidate(store, kind: str, candidate_id: str, decision: str,
                      suites_root: str | Path = "suites",
                      existing_case_ids: frozenset[str] = frozenset(),
                      repository=None, secrets=None,
-                     graph_store=None) -> tuple[dict, str | None]:
+                     graph_store=None, bundle_dir: str | Path | None = None
+                     ) -> tuple[dict, str | None]:
     """PENDING → ACCEPT/REJECT（F6 的统一入口）。返回 `(候选行, commit sha)`。
 
     ⚠️ **`repo_root` / `repository` / `secrets` 变成可选**（Task 4.5）：它们的
@@ -103,6 +106,9 @@ def decide_candidate(store, kind: str, candidate_id: str, decision: str,
     if kind == "discovery":
         return _decide_discovery(store, candidate_id, decision, reviewer, note,
                                  graph_store=graph_store)
+    if kind == "bug":
+        return _decide_bug(store, candidate_id, decision, reviewer, note,
+                           bundle_dir=bundle_dir)
 
     row = store.get_candidate(candidate_id)
     if row is None:
@@ -194,6 +200,88 @@ def decide_candidate(store, kind: str, candidate_id: str, decision: str,
     decided = store.get_candidate(candidate_id)
     assert decided is not None
     return decided, sha
+
+
+def _decide_bug(store, candidate_id: str, decision: str, reviewer: str,
+                note: str | None, *, bundle_dir=None) -> tuple[dict, None]:
+    """`kind="bug"` 的 ACCEPT/REJECT（设计 §8.5 / F6；Task 5.6）。
+
+    与 test / discovery 的**形状差异**：
+
+    | | test | discovery | bug |
+    |---|---|---|---|
+    | 决策前的状态 | `PENDING` | `PENDING` | **`HUMAN_REVIEW`** |
+    | ACCEPT 副作用 | 写用例 + commit | 登记图 | 落 Evidence Bundle JSON |
+    | 结果状态 | `ACCEPT` | `ACCEPT` | **`CONFIRMED`** |
+    | sha | commit | `None` | `None` |
+
+    ⚠️ **只能在 `HUMAN_REVIEW` 上决策**（不是 `DISCOVERED`）：设计 §8.5 的
+    `…→ CANDIDATE → HUMAN_REVIEW → {CONFIRMED|REJECTED|DUPLICATE}` 里，人工
+    审核是 `HUMAN_REVIEW` 这一跳。诊断把候选推进到 `HUMAN_REVIEW` 才算「送上
+    审核台」——若允许在 `DISCOVERED` 上直接 ACCEPT，就等于**跳过了诊断的
+    分析与证据装配**，产出一条 `CONFIRMED` 但证据未成形的行（F10 要防的
+    「看起来已确认、实则没走过分析」）。状态推进的合法性由
+    `candidates.bug.advance` 校验（纯函数），这里只负责编排与落库。
+    """
+    from candidates.bug import BugStateError, advance
+
+    row = store.get_bug_candidate(candidate_id)
+    if row is None:
+        raise CandidateReviewError(f"bug 候选 {candidate_id} 不存在")
+    target = "CONFIRMED" if decision == "ACCEPT" else "REJECTED"
+    if row["status"] != "HUMAN_REVIEW":
+        raise CandidateReviewError(
+            f"bug 候选 {candidate_id} 当前是 {row['status']}——人工审核只能在 "
+            f"HUMAN_REVIEW 上决策（设计 §8.5；DISCOVERED 直接 ACCEPT 会跳过"
+            f"诊断与证据装配）。诊断先把它推进到 HUMAN_REVIEW。")
+    try:
+        advance(row["status"], target)
+    except BugStateError as e:      # 理论不可达（上面已钉 HUMAN_REVIEW），belt
+        raise CandidateReviewError(str(e)) from e
+
+    store.decide_bug_candidate(candidate_id, status=target, reviewer=reviewer,
+                               decision=decision)
+    decided = store.get_bug_candidate(candidate_id)
+    assert decided is not None
+    if decision == "ACCEPT" and bundle_dir is not None:
+        bundle = export_evidence_bundle(decided)
+        out = Path(bundle_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / f"{candidate_id}.json").write_text(
+            json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
+    return decided, None
+
+
+def export_evidence_bundle(row: dict) -> dict:
+    """已确认 Bug 的 Evidence Bundle（设计 §8.5 末段；落 `out/`）。
+
+    **自包含**：不引用 agent.db 的内部行号/时间戳之外的库结构——一个
+    `CONFIRMED` 的 Bug 连同它的证据、分数、复现次数、影响用例一起交付给
+    下游（人工/工单系统），`bundle_version` 给未来的格式演进留锚点。
+
+    ⚠️ 不接外部系统（Jira 等）：设计 open question #1 未决，本任务只落
+    JSON 文件（`out/<candidate_id>.json`），对接留给后续。
+    """
+    return {
+        "bundle_version": 1,
+        "kind": "bug",
+        "candidate_id": row["candidate_id"],
+        "title": row["title"],
+        "severity": row["severity"],
+        "status": row["status"],
+        "failure_type": row["failure_type"],
+        "attribution_hypothesis": row["attribution_hypothesis"],
+        "evidence_score": row["evidence_score"],
+        "evidence": row["evidence"],
+        "reproducible": row["reproducible"],
+        "reproduction_count": row["reproduction_count"],
+        "affected_tests": row["affected_tests"],
+        "dedup_key": row["dedup_key"],
+        "reviewer": row["reviewer"],
+        "review_decision": row["review_decision"],
+        "reviewed_at": row["reviewed_at"],
+        "created_at": row["created_at"],
+    }
 
 
 def _decide_discovery(store, event_id: str, decision: str, reviewer: str,
@@ -364,6 +452,11 @@ def export_candidate_patch(store, kind: str, candidate_id: str, *,
     「候选的文本读不出来」在两条命令下不该一条 exit 3、一条 traceback。
     """
     _require_kind(kind)
+    if kind != "test":
+        # 只有 test 候选有可落盘的用例 YAML；bug/discovery 没有「patch」这个
+        # 概念（bug 的产物是 Evidence Bundle，discovery 的是图登记）。
+        raise CandidateReviewError(
+            f"kind={kind!r} 没有可导出的 patch（只有 test 候选有落盘用例 YAML）")
     row = store.get_candidate(candidate_id)
     if row is None:
         raise CandidateReviewError(f"候选 {candidate_id} 不存在")

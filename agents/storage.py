@@ -560,6 +560,40 @@ class SQLiteAgentStore:
                 "reviewed_at": row["reviewed_at"],
                 "created_at": row["created_at"]}
 
+    def decide_bug_candidate(self, candidate_id: str, *, status: str,
+                             reviewer: str | None = None,
+                             decision: str | None = None,
+                             note: str | None = None) -> None:
+        """Bug 候选的**状态落库**（Task 5.6 / P3-25；F6）。
+
+        与 `decide_candidate`（test 候选）的分工同款：**这里只管写**——状态机
+        的合法性校验在领域层（`candidates/bug.py::advance`，由
+        `advance_bug_candidate` 编排）。本方法是 bug 状态列的**唯一写路径**：
+        `save_bug_candidate` 只写 `'DISCOVERED'`（连 `status=` 形参都不收）。
+
+        `reviewer` / `review_decision` / `reviewed_at` **只在给 `decision`
+        时**落（`decision` 非空 = 这是人工审核那一笔）：`ANALYZING` /
+        `CANDIDATE` 这类系统推进不写审核三列——把系统推进也盖上 `reviewed_at`
+        会让「人判的」与「系统走的」在库里无法区分（F10 要防的正是这个）。
+        `note` 落在**状态机之外**（没有独立的 note 列）：它拼进
+        `review_decision` 之外的审计由调用方决定——这里只保留决定词本身。
+
+        `COALESCE`：`reviewer` / `review_decision` 为 `None` 时不覆盖既有值
+        （与 `update_task_state` 的 `outcome` 同款）。
+        """
+        with self._write_tx() as conn:
+            cur = conn.execute(
+                "UPDATE bug_candidates SET status=?,"
+                " reviewer=COALESCE(?, reviewer),"
+                " review_decision=COALESCE(?, review_decision),"
+                " reviewed_at=COALESCE(?, reviewed_at)"
+                " WHERE candidate_id=?",
+                (status, reviewer, decision,
+                 _now() if decision is not None else None,
+                 candidate_id))
+            if cur.rowcount == 0:
+                raise ValueError(f"no such bug candidate: {candidate_id}")
+
     # --- discovery_events（迁移 006；Task 4.5 / P3-18） ------------------------
 
     def save_discovery_event(self, event_id: str, *, kind: str,

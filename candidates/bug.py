@@ -29,7 +29,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from diagnosis.models import (ATTRIBUTIONS, BUG_SEVERITIES, BUG_STATUSES,
                               DEFAULT_SEVERITY, EvidenceItem)
 
-__all__ = ["BugCandidate"]
+__all__ = ["BUG_TERMINAL_STATUSES", "BUG_TRANSITIONS", "BugCandidate",
+           "BugStateError", "advance", "can_transition", "is_terminal"]
 
 # 迁移 005 的 CHECK 词表与 `diagnosis.models` 的常量是**两处字面量**，
 # 一致性由 `tests/unit/test_bug_store.py` 钉住（手法同 001 的
@@ -37,6 +38,68 @@ __all__ = ["BugCandidate"]
 BUG_STATUS_VALUES = BUG_STATUSES
 BUG_SEVERITY_VALUES = BUG_SEVERITIES
 BUG_ATTRIBUTION_VALUES = ATTRIBUTIONS
+
+
+# --- §8.5 状态机（Task 5.6 / P3-25；F6） -------------------------------------
+#
+# 设计 §8.5 原文：
+#     DISCOVERED → ANALYZING → CANDIDATE → HUMAN_REVIEW → {CONFIRMED | REJECTED | DUPLICATE}
+#
+# 转换表是**纯数据**（F13）：不碰库、不碰设备，`advance()` 只是拿它查一次。
+# 键集必须与 `diagnosis.models.BUG_STATUSES` 一致（有测试钉），末三态无出边
+# （终态不可再推进——`CONFIRMED` 之后没有「更确认」）。
+BUG_TRANSITIONS: dict[str, tuple[str, ...]] = {
+    "DISCOVERED": ("ANALYZING",),
+    "ANALYZING": ("CANDIDATE",),
+    "CANDIDATE": ("HUMAN_REVIEW",),
+    "HUMAN_REVIEW": ("CONFIRMED", "REJECTED", "DUPLICATE"),
+    "CONFIRMED": (),
+    "REJECTED": (),
+    "DUPLICATE": (),
+}
+
+# 终态（人已决 / 已并入别的 Bug）：不可再推进，也不该出现在待审队列里。
+BUG_TERMINAL_STATUSES: tuple[str, ...] = ("CONFIRMED", "REJECTED", "DUPLICATE")
+
+
+class BugStateError(ValueError):
+    """非法的状态推进（fail-loud）。
+
+    为什么是异常而不是「返回 False 让调用方自己判断」：状态机的每一跳都对应
+    一次**有副作用的落库**（`decide_bug_candidate`），静默拒绝一跳会让调用方
+    以为「已经推进了」而继续往下走（比如把 Bug 报成 CONFIRMED 却没写
+    `reviewer`）——那正是本仓最防的「看起来正常」。
+    """
+
+
+def can_transition(from_status: str, to_status: str) -> bool:
+    """`from → to` 是否合法（未知的 from 也返回 `False`，不抛）。"""
+    return to_status in BUG_TRANSITIONS.get(from_status, ())
+
+
+def is_terminal(status: str) -> bool:
+    """是不是终态（`CONFIRMED` / `REJECTED` / `DUPLICATE`）。"""
+    return status in BUG_TERMINAL_STATUSES
+
+
+def advance(from_status: str, to_status: str) -> str:
+    """校验并返回 `to_status`（非法跳 fail-loud）。
+
+    只做**校验 + 归一**，不改状态（状态的落库在
+    `agents/storage.py::decide_bug_candidate`——单写者，E9）。分开的理由与
+    `candidates/review.py` 把校验放在领域层同款：状态机可以脱离库单测。
+    """
+    if from_status not in BUG_TRANSITIONS:
+        raise BugStateError(
+            f"未知的 bug 状态 {from_status!r}——必须是 "
+            f"{sorted(BUG_TRANSITIONS)} 之一")
+    if not can_transition(from_status, to_status):
+        allowed = BUG_TRANSITIONS[from_status]
+        hint = "（终态不可再推进）" if is_terminal(from_status) else ""
+        raise BugStateError(
+            f"非法状态推进 {from_status} → {to_status}{hint}——"
+            f"{from_status} 只允许去 {list(allowed) or '（无，终态）'}")
+    return to_status
 
 
 class _Strict(BaseModel):

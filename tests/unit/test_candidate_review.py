@@ -277,10 +277,10 @@ def test_unknown_decision_and_kind_are_refused(store, repo_root, repository):
         decide_candidate(store, "test", cid, "MAYBE", "op",
                          repo_root=repo_root, suites_root=repo_root / "suites",
                          repository=repository, secrets=EnvSecretProvider())
-    # ⚠️ Task 4.5 起 "discovery" **是**受支持的 kind（`_SUPPORTED_KINDS` 扩了）
-    # ——这里换一个真正未知的 kind（bug 归 Task 5.6，此刻仍未接）。
+    # ⚠️ Task 4.5 起 "discovery"、Task 5.6 起 "bug" **都是**受支持的 kind
+    # （`_SUPPORTED_KINDS` 两次扩过）——这里换一个真正未知的 kind。
     with pytest.raises(CandidateReviewError, match="候选类型"):
-        decide_candidate(store, "bug", cid, "ACCEPT", "op",
+        decide_candidate(store, "galaxy", cid, "ACCEPT", "op",
                          repo_root=repo_root, suites_root=repo_root / "suites",
                          repository=repository, secrets=EnvSecretProvider())
 

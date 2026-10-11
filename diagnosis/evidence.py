@@ -36,8 +36,10 @@ from __future__ import annotations
 
 from agents.policy_config import (ATTRIBUTION_THRESHOLD,
                                   DIAGNOSIS_EVIDENCE_WEIGHTS)
+from diagnosis.models import EvidenceItem
 
-__all__ = ["rank_hypotheses", "score_evidence", "suggested_attribution"]
+__all__ = ["history_corroboration", "rank_hypotheses", "score_evidence",
+           "suggested_attribution", "tests_hit_by_failure"]
 
 # 证据类别 → 归因方向。**只有指向明确的类别才在表里**：其余三类说的是
 # 「这个失败有多值得追」，不是「谁的责任」，映射不出来就不猜（F10）。
@@ -53,6 +55,70 @@ _KIND_TO_ATTRIBUTION: dict[str, str] = {
     "backend_evidence": "ENVIRONMENT_DEFECT",
 }
 
+
+
+def tests_hit_by_failure(ctx) -> list[str]:
+    """撞上**本次失败类型**的所有 `testcase_id`（现场 + 同类历史，去重排序）。
+
+    这一个集合同时喂两处，它们是同一件事的两种说法（**不各算一遍**）：
+    `affected_tests`（这个 Bug 影响哪些用例）与
+    `history_corroboration` 的 `same_issue_multiple_tests`（这个 issue 命中
+    了几个用例）。早先 `affected_tests` 只取 `ctx.steps[0].testcase_id`
+    （**第一个**用例），于是证据说「命中 2 个用例」而 bundle 里只列 1 个——
+    人工看 bundle 时对不上。
+    """
+    own = tuple(getattr(ctx, "steps", ()))
+    failure_types = {getattr(s, "failure_type", None) for s in own
+                     if getattr(s, "status", None) == "FAILED"
+                     and getattr(s, "failure_type", None)}
+    if not failure_types:
+        return []
+    tests = {getattr(s, "testcase_id", "") for s in own
+             if getattr(s, "testcase_id", "")}
+    for step in tuple(getattr(ctx, "history", ())):
+        if getattr(step, "failure_type", None) in failure_types:
+            tc = getattr(step, "testcase_id", "")
+            if tc:
+                tests.add(tc)
+    return sorted(tests)
+
+
+def history_corroboration(ctx) -> list[EvidenceItem]:
+    """`same_issue_multiple_tests`（权重 3）的**唯一生产者**。
+
+    ⚠️ **M5 Gate 2026-10-11 补上**：这个权重从 M1 建段起就在
+    `DIAGNOSIS_EVIDENCE_WEIGHTS` 里，`diagnosis/context.py` 的 docstring 也
+    明写「矩阵 #16 的 `same_issue_multiple_tests` 证据就从这里来」——但**全仓
+    没有任何代码产出它**。后果是真机上最常见的失败形态（UI 漂移）分数上限
+    只有 `source_change_correlated`(3) + `reproducible_3_times`(5) = **8**，
+    永远过不了 `ATTRIBUTION_THRESHOLD`(10)：`suggested_attribution` 在真机
+    数据上**不可达**，F10 的「系统给建议」退化成了「系统永远不给建议」。
+    这是一条「看起来正常」的缺口——单测全绿（它们手工拼证据列表），只有
+    端到端跑一次真机才发现没有生产者。
+
+    判据：**同一个 `failure_type`** 命中了 ≥ 2 个不同的 `testcase_id`
+    （现场 + 历史合起来算）。「同一个 issue」由 failure_type 定义，不用
+    `ctx.history` 已经过滤过当作前提——`DiagnosisContext` 也能被直接构造
+    （单测/别的调用方），生产者自己声明前提才不会拿「历史里有别的失败」
+    给当前结论加分。
+
+    「多个用例」是这条证据的全部含义，故两道反钉子都钉住**不给**的情形：
+    只失败过一个用例、以及历史里只有同一个用例的重跑（后者是
+    `reproducible_3_times` 的地盘，两个都给会重复记同一件事）。
+    """
+    tests = tests_hit_by_failure(ctx)
+    if len(tests) < 2:
+        return []
+    own = tuple(getattr(ctx, "steps", ()))
+    failure_type = next(
+        (getattr(s, "failure_type", None) for s in own
+         if getattr(s, "status", None) == "FAILED"
+         and getattr(s, "failure_type", None)), None)
+    return [EvidenceItem(
+        kind="same_issue_multiple_tests",
+        detail=f"同一失败类型 {failure_type} 命中 {len(tests)} 个用例："
+               f"{', '.join(tests)}",
+        source=f"trace_history:{getattr(ctx, 'run_id', '')}")]
 
 def score_evidence(evidence, *, weights=None) -> int:
     """证据分：**按类别**求和（每类最多计一次，见模块 docstring 的口径登记）。

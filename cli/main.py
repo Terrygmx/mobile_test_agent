@@ -493,6 +493,59 @@ def build_parser() -> argparse.ArgumentParser:
                        help="设备端别（**探索只接受 simulator**——真机只跑"
                             "已审核用例）")
 
+    # --- mta diagnose（Task 5.6 / P3-25：Failure Diagnosis，设计 8 节）---
+    diag_p = sub.add_parser(
+        "diagnose", help="Failure Diagnosis（设计 8 节；自主命令——读 trace、"
+                         "产出带证据的 Bug 候选，不自动归因）")
+    diag_p.add_argument("--run-id", metavar="ID", required=True,
+                        help="要诊断的失败 run（`runs.run_id`，如 `run_ab12cd34`）")
+    diag_p.add_argument("--step", metavar="N", type=int, default=None,
+                        help="只诊断该 step_index（缺省 = 该 run 的第一条失败步）")
+    diag_p.add_argument("--base-build", metavar="ID", default=None,
+                        help="基线 build（给则算 build-to-build 的图 diff，喂 "
+                             "UI_DRIFT 规则；**不给则不算 dedup_key**——那三元组"
+                             "里的 source_change 来自 diff）")
+    diag_p.add_argument("--db", metavar="PATH", default="out/trace.db",
+                        help="trace 库（失败现场与历史）")
+    diag_p.add_argument("--graph-db", metavar="PATH",
+                        default=str(DEFAULT_GRAPH_DB),
+                        help="Graph SQLite 路径（运行时图 + 基线图）")
+    diag_p.add_argument("--agent-db", metavar="PATH",
+                        default=str(DEFAULT_AGENT_DB),
+                        help="agent 库（Bug 候选落 `bug_candidates`）")
+    diag_p.add_argument("--exp-db", metavar="PATH",
+                        default=str(DEFAULT_EXPERIENCE_DB),
+                        help="经验库（诊断只读：相关历史经验）")
+    diag_p.add_argument("--generated", metavar="DIR", default=None,
+                        help="generated 根目录（缺省 repository/generated/local）")
+    diag_p.add_argument("--overrides", metavar="DIR", default=None,
+                        help="overrides 根目录（缺省 repository/overrides）")
+    diag_p.add_argument("--suites-root", metavar="DIR", default="suites",
+                        help="用例 YAML 根目录（复现重跑要按 id 找到用例）")
+    diag_p.add_argument("--bundle-id", metavar="ID", default=None,
+                        help="App bundle id（图的范围第一段；缺省取 trace 的）")
+    diag_p.add_argument("--build", metavar="ID", default=None,
+                        help="本次 build id（缺省取 metadata 的 build）")
+    diag_p.add_argument("--udid", metavar="UDID", default=None,
+                        help="模拟器 UDID（复现重跑用；缺省取第一个 booted 设备）")
+    diag_p.add_argument("--bundle-dir", metavar="DIR", default="out",
+                        help="Evidence Bundle JSON 的落盘目录（缺省 out/；"
+                             "只在人工 ACCEPT 后写）")
+    diag_p.add_argument("--repo-root", metavar="DIR", default=".",
+                        help="git 仓库根（`--base-build` 的 source_change 取"
+                             "它上面的 git diff）")
+    diag_p.add_argument("--no-llm", action="store_true",
+                        help="禁用 LLM（规则无结论时不补假设，确定性半边照常）")
+    diag_p.add_argument("--policy", metavar="PATH", default=None,
+                        help="policy.yaml 路径（缺省读默认路径）")
+    diag_p.add_argument("--env-kind", choices=["sandbox", "staging",
+                                               "production"],
+                        default="sandbox",
+                        help="环境（F7：production 下自主命令不可用）")
+    diag_p.add_argument("--device-type", choices=["simulator", "real_device"],
+                        default="simulator",
+                        help="设备端别（诊断只读 trace，复现重跑在模拟器）")
+
     # ⚠️ **不是**自主命令（不在 `AUTONOMOUS_COMMANDS`）：审核是人工命令，
     # 不过 F7 的启动环境闸（与 `mta review` 同款）。
     cand_p = sub.add_parser(
@@ -512,7 +565,12 @@ def build_parser() -> argparse.ArgumentParser:
     cr_acc = cand_rev_sub.add_parser(
         "accept", help="接受候选 → 落盘 suites/<suite>/<id>.yaml + git commit")
     cr_acc.add_argument("candidate_id")
-    cr_acc.add_argument("--kind", default="test", help="候选类型（本任务只接 test）")
+    cr_acc.add_argument("--kind", default="test",
+                        choices=["test", "discovery", "bug"],
+                        help="候选类型（test 落盘用例 / discovery 登记图 / "
+                             "bug 确认并落 Evidence Bundle）")
+    cr_acc.add_argument("--bundle-dir", metavar="DIR", default="out",
+                        help="kind=bug 的 Evidence Bundle JSON 落盘目录")
     cr_acc.add_argument("--note", metavar="TEXT", default=None)
     cr_acc.add_argument("--reviewer", metavar="NAME", default=None,
                         help="审核人（缺省取 $USER）")
@@ -527,7 +585,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="只导出将写入的 YAML 文本（不落盘、不 commit，H15）")
     cr_rej = cand_rev_sub.add_parser("reject", help="拒绝候选（--note 必填）")
     cr_rej.add_argument("candidate_id")
-    cr_rej.add_argument("--kind", default="test")
+    cr_rej.add_argument("--kind", default="test",
+                        choices=["test", "discovery", "bug"])
     cr_rej.add_argument("--note", metavar="TEXT", required=True,
                         help="拒绝理由必填（triage 数据）")
     cr_rej.add_argument("--reviewer", metavar="NAME", default=None)
@@ -1828,6 +1887,411 @@ def _explore_audit(agent_db, task_id) -> list[str]:
     return out
 
 
+def cmd_diagnose(args: argparse.Namespace) -> int:
+    """`mta diagnose` —— Failure Diagnosis（设计 §8；Task 5.6 / P3-25）。
+
+    退出码：0 成功（**含「规则无结论 / 没复现出来」**——那些是**结论**，
+    与矩阵 #11/#12 的预算停止同款：没有 Bug 候选也是一种诊断结果，不是失败）；
+    3 前置错误（env/政策/输入读不到/run_id 不存在/设备装配失败）。
+
+    **调用顺序照 F7**：第一行过前置（`load_policy` → `_check_autonomous_env`），
+    过了才做别的事。
+
+    产出：一条 `bug_candidates` 行，状态推进到 **`HUMAN_REVIEW`**（送上审核台；
+    人工 ACCEPT 经 `mta candidate review --kind bug accept` → `CONFIRMED`）。
+    **系统不自动归因**（F10）：`attribution_hypothesis` 只装分数过阈值的
+    **建议**，真正的 `failure_attribution` 只经人工 triage 写。
+    """
+    from agents.policy_config import load_policy
+
+    # 1. F7 前置（**第一行**）。env_kind 走唯一解析点（守卫钉「不许字面量」）。
+    policy = (load_policy(args.policy) if args.policy is not None
+              else load_policy())
+    _check_autonomous_env(policy, env_kind=_resolve_env_kind(args),
+                          command="diagnose")
+
+    import uuid
+
+    from agents.storage import SQLiteAgentStore
+    from diagnosis.analyzer import analyze
+    from diagnosis.context import DiagnosisContextError, build_context
+    from diagnosis.deduplicator import dedup_key as compute_dedup_key
+    from diagnosis.evidence import suggested_attribution
+    from diagnosis.models import BugCandidateDraft, EvidenceItem
+    from cli.pipeline import SessionPipeline
+    from diagnosis.reproducer import reproduce
+    from experience import SQLiteExperienceStore
+    from graph import SOURCE, GraphStore
+    from knowledge import build_knowledge
+    from source import build_identity as bi
+
+    # 2. 范围装配（app_id / build）。app_id 缺省取 trace 的权威范围（不猜）。
+    app_id = args.bundle_id or _trace_app_id(args.db)
+    if not app_id:
+        print("PREFLIGHT ERROR: 拿不到 app_id——给 `--bundle-id`，或先跑一次 "
+              "`mta run`（trace 的 runs.app_bundle_id 是权威范围）")
+        print("diagnose: exit 3")
+        return 3
+    if args.build:
+        app_build = args.build
+    else:
+        try:
+            app_build = bi.resolve_app_build(bi.read_metadata(_metadata_path(args)))
+        except Exception as e:  # noqa: BLE001 — 读不到 metadata 是前置错误
+            print(f"PREFLIGHT ERROR: 读不到 12.3 metadata（build 的来源）：{e}")
+            print("diagnose: exit 3")
+            return 3
+
+    repository = _load_repository(args)
+    pipeline = SessionPipeline(suites_root=args.suites_root,
+                               secrets=EnvSecretProvider(), app_id=app_id,
+                               app_build=app_build)
+    # 诊断**不消费** `impact_of`（那是 planner 的），故 knowledge 先以空 cases
+    # 建——用例只在**复现重跑**时才需要（按 id 找到用例）。这样「suites 目录
+    # 为空」不会挡住诊断（主输入是 trace），而**前置错误（run_id 不存在）仍然
+    # 排在所有 note 之前**（错误面在前，note 在后）。
+    knowledge = build_knowledge(
+        experience_store=SQLiteExperienceStore(args.exp_db),
+        trace_db=args.db, cases=[], app_build=app_build)
+
+    # 3. 基线图（`--base-build`）→ build-to-build 的图 diff（喂 UI_DRIFT 规则
+    #    与 dedup_key 的 source_change）。**不给就没有 diff**（不是空 diff）——
+    #    没有 diff 就没有 source_change，dedup_key 也就算不出来（见下）。
+    base_graph = None
+    if args.base_build:
+        base_graph = GraphStore(args.graph_db).load_graph(
+            app_id, args.base_build, SOURCE)
+
+    # 4. 装配诊断上下文（F3：全部经 knowledge）。
+    try:
+        ctx = build_context(
+            knowledge=knowledge, run_id=args.run_id, app_id=app_id,
+            app_build=app_build, base_graph=base_graph)
+    except DiagnosisContextError as e:
+        print(f"PREFLIGHT ERROR: 建不了诊断上下文：{e}")
+        print("diagnose: exit 3")
+        return 3
+    except ValueError as e:
+        # ⚠️ M5 Gate 的 G2a 实测抓到：`--db` 指向一个还没有表的库时，
+        # `KnowledgeSources.trace_history` 抛 `ValueError`（「trace 库不可读」），
+        # 它不在上面那个 `except` 里 → 一路冒到 `main()`，用户看到一屏
+        # traceback 和 exit 1。这是「指错了库」/「还没跑过 run」，是**前置
+        # 错误**（用户能给 corrective action），该走 exit 3 的干净通道。
+        print(f"PREFLIGHT ERROR: 读不到 trace 现场：{e}")
+        print("diagnose: exit 3")
+        return 3
+
+    # 4b. `--step`：把现场收窄到那一步（缺省 = 整个 run）。给了但该步不存在
+    #     → 前置错误（不静默退化成「整个 run」——那会诊断出别的东西）。
+    if args.step is not None:
+        import dataclasses
+        picked = [s for s in ctx.steps if s.step_index == args.step]
+        if not picked:
+            print(f"PREFLIGHT ERROR: run {args.run_id} 里没有 step_index="
+                  f"{args.step}（可用：{sorted(s.step_index for s in ctx.steps)}）")
+            print("diagnose: exit 3")
+            return 3
+        ctx = dataclasses.replace(ctx, steps=tuple(picked))
+
+    # 5. 规则优先（F10；crash 场景 LLM 零调用）→ 空则 LLM。
+    llm = budget = None
+    if not args.no_llm and os.environ.get("LLM_API_KEY"):
+        from llm.provider import LLMProvider
+        llm, budget = LLMProvider(), LLMBudget()
+    analysis = analyze(ctx, llm=llm, budget=budget)
+    for note in analysis.notes:
+        print(f"  note: {note}")
+
+    if not analysis.hypotheses:
+        # **没有假设也是一种结论**（规则无结论且 LLM 未启用/未产出）——exit 0，
+        # 不落一条空候选（空证据的候选在 `Hypothesis` 层就被拒了，F10）。
+        print(f"diagnose: run={args.run_id} 无假设产出（规则无结论）→ 不落 Bug 候选")
+        print("diagnose: exit 0")
+        return 0
+
+    # 6. 复现判定（设计 §8.4）——**在排序与归因之前**（见下面 6b 的口径登记）。
+    #    设备可用才真重跑；否则如实记「无法确认」（**不**伪装成「复现不了」
+    #    ——reproducer 自己区分两者）。
+    #    ⚠️ suites **不是**诊断的必需输入：主输入是 trace，用例只在重跑时要。
+    #    目录不存在/为空 → 照常诊断（复现那步如实记「无法重跑」）；**但**目录
+    #    在、内容坏（坏 YAML）是真配置错误，仍然 fail-loud。
+    cases_by_id: dict = {}
+    if Path(args.suites_root).is_dir() and any(
+            Path(args.suites_root).rglob("*.yaml")):
+        try:
+            cases_by_id = {c.id: c for c in pipeline.discover()}
+        except SessionPipeline.PreflightError as e:
+            print(f"PREFLIGHT ERROR: 读 suites 失败：{e}")
+            print("diagnose: exit 3")
+            return 3
+    else:
+        print(f"  note: suites 目录为空/不存在（{args.suites_root}）→ 只诊断"
+              f"不复现（没有可重跑的用例）")
+    repro = _run_reproduction(
+        ctx, args=args, pipeline=pipeline, repository=repository,
+        cases_by_id=cases_by_id, app_build=app_build, policy=policy)
+    print(f"diagnose: 复现 reproducible={repro.reproducible} "
+          f"count={repro.reproduction_count} attempts={repro.attempts}")
+    for note in repro.notes:
+        print(f"  note: {note}")
+
+    # 6b. **复现证据并进每条假设**，然后才排序与归因。
+    #
+    # ⚠️ handover §9 的「5.6 开工前置①」在这一步真正闭合：崩溃/漂移这类**最强**
+    # 的规则证据单独都只值 5 / 3 分，低于阈值 10（`suggested_attribution`
+    # 的两道闸门之一）。设计 §8.3 让它们配 `reproducible_3_times`（5 分）才
+    # 过线——**前提是复现证据真的进了同一个证据集**。早先本函数先算归因、
+    # 后跑复现，于是哪怕真的重跑了三次，落库的 `attribution_hypothesis`
+    # 仍是 `UNTRIAGED`（M5 Gate 实测：分数 10 但归因空，自相矛盾）。
+    #
+    # 排序键不受影响：给每条假设**加同一组**证据等于加同一个常数，次序不变
+    # （`rank_hypotheses` 的键是 `(-score, statement)`）。
+    # `same_issue_multiple_tests`（权重 3）从 `ctx.history` 来——**唯一生产者**
+    # 是 `diagnosis/evidence.py::history_corroboration`（M5 Gate 补上：此前
+    # 权重表里有这一项、没有任何代码产出它，真机漂移现场分数上限只有 8）。
+    from diagnosis.evidence import (history_corroboration, rank_hypotheses,
+                                    tests_hit_by_failure)
+    corroboration = tuple(history_corroboration(ctx))
+    for item in corroboration:
+        print(f"  note: 多用例佐证 {item.kind}：{item.detail}")
+    augmented = [_with_extra_evidence(h, repro.evidence + corroboration)
+                 for h in analysis.hypotheses]
+    ranked = rank_hypotheses(augmented,
+                             weights=policy.diagnosis_evidence_weights)
+    top_hypothesis, top_score = ranked[0]
+    attribution = suggested_attribution(
+        top_hypothesis, weights=policy.diagnosis_evidence_weights,
+        threshold=policy.evidence.attribution_threshold)
+    print(f"diagnose: {len(ranked)} 条假设，最高分 {top_score}"
+          f"（阈值 {policy.evidence.attribution_threshold}）"
+          f" → 归因建议 {attribution or '（不达标，保持 UNTRIAGED）'}")
+
+    # 7. 证据装配与 dedup_key（`top_hypothesis` 已含复现证据，不再加第二遍）。
+    evidence = list(top_hypothesis.evidence)
+    failure_type = _failure_type_of(ctx)
+    screen, runtime_diff, source_change = _dedup_components(ctx, args=args)
+    draft = BugCandidateDraft(
+        title=_diagnosis_title(ctx, failure_type),
+        failure_type=failure_type or "",
+        severity=_severity_for(top_hypothesis, repro),
+        attribution_hypothesis=attribution or "UNTRIAGED",
+        evidence=evidence, evidence_score=top_score,
+        reproducible=repro.reproducible,
+        reproduction_count=repro.reproduction_count,
+        affected_tests=tests_hit_by_failure(ctx),
+        screen=screen, runtime_diff=runtime_diff, source_change=source_change)
+    # ⚠️ **没有 `--base-build` 就不写 `dedup_key`**（口径登记）：三元组里的
+    #    `source_change` 来自 build-to-build 的图 diff，没有基线就没有它——
+    #    此时算出的 key 是「半个三元组」，把两次**无关**的失败判成同根因
+    #    （错误合并比漏合并更贵：它会把两个 Bug 悄悄并成一个）。
+    if args.base_build:
+        draft = draft.model_copy(
+            update={"dedup_key": compute_dedup_key(draft)})
+
+    # 9. 落库（DISCOVERED）→ 推进到 HUMAN_REVIEW（送上审核台）。
+    agent_db = SQLiteAgentStore(args.agent_db)
+    candidate_id = f"bug_{uuid.uuid4().hex[:8]}"
+    _persist_bug_candidate(agent_db, candidate_id, draft, args=args)
+    row = agent_db.get_bug_candidate(candidate_id)
+    assert row is not None
+    print(f"diagnose: bug 候选 {candidate_id} status={row['status']} "
+          f"score={row['evidence_score']} dedup_key={row['dedup_key']}")
+    print(f"  title: {row['title']}")
+    print(f"  下一步：`mta candidate review --kind bug accept {candidate_id} "
+          f"--bundle-dir {args.bundle_dir}`（人工确认后才落 Evidence Bundle）")
+    print("diagnose: exit 0")
+    return 0
+
+
+def _run_reproduction(ctx, *, args, pipeline, repository, cases_by_id,
+                      app_build, policy):
+    """复现判定（设计 §8.4）。设备可用才真重跑，否则如实记「无法确认」。
+
+    三处注入（口径登记）：① `runner` 回调——toolkit 的 `run_testcase` 通路
+    **M6 才接线**（现在 `NOT_WIRED`），故这里注入一个基于 `SessionPipeline`
+    的真回调；② `postcondition_checker`——复用
+    `cli/pipeline.py::make_postcondition_checker`；③ `probe_for`——把**用例
+    声明**的 `postcondition` 并进 trace 三列（trace 里没有声明，见
+    `reproducer._probe_from_step`）。
+    """
+    from diagnosis.reproducer import ReproResult, reproduce
+    from llm.budget import LLMBudget
+
+    llm_budget = LLMBudget()   # 重跑预算（F4：就是 P1 的计数器，不新写）
+    try:
+        from agents.tools import AgentToolkit
+        from cli.pipeline import wire_device_stack
+        from executor.assertion import AssertionEngine
+        from executor.guard import Guard
+        from executor.wait import WaitEngine
+
+        stack = wire_device_stack(
+            pipeline, env_kind=_resolve_env_kind(args), run_id=args.run_id,
+            udid=args.udid, bundle_id=args.bundle_id or ctx.app_id,
+            repo=repository)
+    except Exception as e:  # noqa: BLE001 — 设备不可用 → 不声称复现结论
+        return ReproResult(
+            reproducible=None, attempts=0,
+            notes=(f"设备会话不可用（{type(e).__name__}: {e}）→ 记「无法确认"
+                   f"复现」（不声称「复现不了」）",))
+
+    try:
+        locator_for = pipeline._locator_for(stack.runner)
+        toolkit = AgentToolkit(
+            guard=Guard(_resolve_env_kind(args)), executor=stack.runner.ex,
+            locator_for=locator_for, repository=repository,
+            device_session=stack.device_session,
+            wait_engine=WaitEngine(stack.runner.ex, locator_for),
+            assertion_engine=AssertionEngine(stack.runner.ex, locator_for),
+            build=app_build)
+
+        def _runner(testcase_id):
+            tc = cases_by_id.get(testcase_id)
+            if tc is None:
+                raise ValueError(f"用例 {testcase_id} 不在 suites 里，无法重跑")
+            return pipeline.run_case(stack.runner, stack.lifecycle, tc,
+                                     run_id=args.run_id, manage_env=True)
+
+        def _probe_for(step):
+            from diagnosis.reproducer import _probe_from_step
+            tc = cases_by_id.get(getattr(step, "testcase_id", "") or "")
+            post = None
+            if tc is not None:
+                idx = getattr(step, "step_index", 0)
+                if 0 <= idx < len(tc.steps):
+                    post = getattr(tc.steps[idx], "postcondition", None)
+            return _probe_from_step(step, postcondition=post)
+
+        from cli.pipeline import make_postcondition_checker
+        return reproduce(ctx, toolkit=toolkit, llm_budget=llm_budget,
+                         runner=_runner,
+                         postcondition_checker=make_postcondition_checker(
+                             pipeline, stack.runner),
+                         probe_for=_probe_for)
+    finally:
+        stack.close()
+
+
+def _persist_bug_candidate(agent_db, candidate_id, draft, *, args) -> None:
+    """落 `bug_candidates`（`save_bug_candidate` 只写 DISCOVERED）→ 推进到
+    `HUMAN_REVIEW`（`decide_bug_candidate`，状态机校验）。
+
+    推进走 `candidates/bug.advance` 的**同一张转换表**（不写第二份）：
+    DISCOVERED → ANALYZING → CANDIDATE → HUMAN_REVIEW 是诊断流水线的三个内部
+    跳（系统推进，不写审核三列），HUMAN_REVIEW 才是「送上审核台」。
+    """
+    from candidates.bug import advance
+
+    agent_db.save_bug_candidate(
+        candidate_id, title=draft.title,
+        evidence=[e.model_dump(mode="json") for e in draft.evidence],
+        failure_type=draft.failure_type or "",
+        severity=draft.severity,
+        attribution_hypothesis=draft.attribution_hypothesis,
+        evidence_score=draft.evidence_score, reproducible=draft.reproducible,
+        reproduction_count=draft.reproduction_count, dedup_key=draft.dedup_key,
+        affected_tests=draft.affected_tests)
+    status = "DISCOVERED"
+    for nxt in ("ANALYZING", "CANDIDATE", "HUMAN_REVIEW"):
+        status = advance(status, nxt)
+        agent_db.decide_bug_candidate(candidate_id, status=status)
+
+
+def _failure_type_of(ctx) -> str | None:
+    first = ctx.first_failure
+    return getattr(first, "failure_type", None) if first else None
+
+
+def _diagnosis_title(ctx, failure_type) -> str:
+    """候选标题：失败类型 + 用例 id（审核队列里要能一眼辨认）。"""
+    first = ctx.first_failure
+    tc = getattr(first, "testcase_id", "") or "?"
+    ft = failure_type or "FAILED"
+    return f"{ft} in {tc}（run={ctx.run_id}）"
+
+
+def _severity_for(hypothesis, repro) -> str:
+    """严重度初版：崩溃 → HIGH，其余 → MEDIUM（复现成功再抬一档留给校准）。"""
+    kinds = {e.kind for e in hypothesis.evidence}
+    if "crash_detected" in kinds:
+        return "HIGH"
+    return "MEDIUM"
+
+
+def _with_extra_evidence(hypothesis, extra):
+    """`hypothesis` + `extra` 证据（复现产出的那些）→ 新假设。
+
+    ⚠️ **不改原对象**（`Hypothesis` 是 pydantic 模型，可变；原地加证据会让
+    `analysis.hypotheses` 里的那条也被改，于是「排序前的分数」与「落库的
+    分数」是同一个对象上的两个时刻——审计里看不出谁加了什么）。
+
+    ⚠️ **去重**：复现证据与假设自带的证据可能是同一类（`score_evidence`
+    按类别求和，重复不影响分），但**条目**重复会让 `evidence` 列表里出现
+    两条一模一样的证据（人工看 bundle 时会以为有两个独立来源）。
+    """
+    if not extra:
+        return hypothesis
+    merged = list(hypothesis.evidence)
+    seen = {(e.kind, e.detail, e.source) for e in merged}
+    for e in extra:
+        key = (e.kind, e.detail, e.source)
+        if key not in seen:
+            seen.add(key)
+            merged.append(e)
+    return hypothesis.model_copy(update={"evidence": merged})
+
+
+def _dedup_components(ctx, *, args) -> tuple[str, list[str], str]:
+    """`dedup_key` 三元组 `(screen, runtime_diff, source_change)`（设计 §8.5）。
+
+    - `screen`：失败步所在的屏（`detail.screen` / `screen_id` 推不出就空）；
+    - `runtime_diff`：build-to-build 的**图** diff token（`--base-build` 才有）；
+    - `source_change`：**源码**改动（`--base-build` 时取 metadata 的
+      `git_commit` 与当前 HEAD 之间的 `git diff --name-status`，与 `plan` 的
+      范围算法同源）。
+
+    三者缺一时对应分量留空（`dedup_key` 的规范化会把空分量稳定处理）。
+    """
+    from diagnosis.deduplicator import diff_tokens
+
+    first = ctx.first_failure
+    detail = getattr(first, "detail", None) or {}
+    screen = detail.get("screen") or detail.get("screen_id") or ""
+    tokens: list[str] = []
+    source_change = ""
+    if args.base_build:
+        if ctx.graph_diff is not None:
+            tokens = diff_tokens(ctx.graph_diff)
+        source_change = _source_change(args)
+    return screen, tokens, source_change
+
+
+def _source_change(args) -> str:
+    """`--base-build` 的源码改动（`git diff --name-status base..HEAD`，只取文件名）。
+
+    读不到 git（非仓库 / 坏 ref）→ 空串（**不 fail-loud**）：`source_change`
+    只是 dedup 三元组的一个分量，缺它不该让整场诊断失败——诊断的**主产物**
+    （假设 + 证据 + 复现）与 git 无关。空分量在 `dedup_key` 里是稳定值。
+    """
+    from source import build_identity as bi
+    from source.git_diff import changed_files
+
+    try:
+        base_meta = bi.read_metadata(_base_metadata_path(args))
+        base = base_meta.get("git_commit") or "HEAD~1"
+        return ",".join(sorted(changed_files(args.repo_root, base=base)
+                               .changed_files))
+    except Exception:  # noqa: BLE001 — git 读不到 → 空分量（不阻断诊断）
+        return ""
+
+
+def _base_metadata_path(args) -> Path:
+    """`--base-build` 的 metadata 路径（12.4 布局，与 `plan` 同源）。"""
+    root = (Path(args.generated).parent if getattr(args, "generated", None)
+            else Path("repository/generated"))
+    return root / args.base_build / "source_metadata.json"
+
+
 def cmd_candidate(args: argparse.Namespace) -> int:
     """`mta candidate review …` —— 统一候选审核（Task 3.5 / F6 首个消费者）。
 
@@ -1919,12 +2383,19 @@ def cmd_candidate(args: argparse.Namespace) -> int:
                 store, args.kind, args.candidate_id, "ACCEPT", reviewer,
                 args.note, repo_root=Path(args.repo_root),
                 suites_root=args.suites_root, existing_case_ids=existing,
-                repository=repository, secrets=EnvSecretProvider())
+                repository=repository, secrets=EnvSecretProvider(),
+                bundle_dir=getattr(args, "bundle_dir", None))
         except (CandidateReviewError, RuntimeError, sqlite3.Error) as e:
             print(f"CANDIDATE ERROR: {e}")
             return 3
         print(f"candidate: {row['candidate_id']} ACCEPT（reviewer={reviewer}）")
-        print(f"  suites 已写 + commit {sha}；撤销 = git revert {sha}")
+        if args.kind == "bug":
+            print(f"  status={row['status']}；Evidence Bundle 已落 "
+                  f"{args.bundle_dir}/{row['candidate_id']}.json")
+        elif args.kind == "discovery":
+            print(f"  status={row['status']}；发现已登记进 Source Graph")
+        else:
+            print(f"  suites 已写 + commit {sha}；撤销 = git revert {sha}")
         return 0
 
     # reject
@@ -2725,6 +3196,8 @@ def main(argv: Sequence | None = None) -> int:
         return cmd_generate(args)
     if args.command == "explore":
         return cmd_explore(args)
+    if args.command == "diagnose":
+        return cmd_diagnose(args)
     if args.command == "candidate":
         return cmd_candidate(args)
     if args.command == "repo":
