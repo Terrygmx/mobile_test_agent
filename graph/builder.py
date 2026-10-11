@@ -377,6 +377,8 @@ def read_trace_steps(trace_db: str | Path, *,
             "SELECT s.testcase_run_id, s.step_index, s.step_type, s.target_id,"
             " s.status, s.detail_json, s.failure_type, t.testcase_id,"
             " s.screenshot_path, s.ui_tree_path,"
+            # Task 5.4（P3-23）：复现判定的三列（见 graph/models.TraceStep）。
+            " s.failure_phase, s.effective_idempotency, s.effective_risk,"
             " COALESCE(t.end_time, t.start_time) AS observed_at"
             " FROM steps s JOIN testcase_runs t"
             " ON t.id = s.testcase_run_id"
@@ -400,5 +402,9 @@ def read_trace_steps(trace_db: str | Path, *,
         failure_type=r["failure_type"],
         # Task 5.1（P3-20）：失败证据路径（诊断的「截图/UI 树」入口）。
         screenshot_path=r["screenshot_path"],
-        ui_tree_path=r["ui_tree_path"]) for r in rows]
+        ui_tree_path=r["ui_tree_path"],
+        # Task 5.4（P3-23）：复现判定的阶段/幂等性/风险（三列，P1 起在库里）。
+        failure_phase=r["failure_phase"],
+        effective_idempotency=r["effective_idempotency"],
+        effective_risk=r["effective_risk"]) for r in rows]
     return steps, app_id, build

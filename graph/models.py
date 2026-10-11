@@ -178,3 +178,13 @@ class TraceStep:
     # 既有构造点（全是关键字实参）与消费方不受影响。
     screenshot_path: str | None = None
     ui_tree_path: str | None = None
+    # Task 5.4（P3-23）：复现判定需要的**三列**（`steps.failure_phase` /
+    # `effective_idempotency` / `effective_risk`）。它们 P1 起就在库里
+    # （`runner/lifecycle.py::record_step` 一直在写），只是 `read_trace_steps`
+    # 早先没读出来——于是「动作发没发出」这个判据在诊断侧恒为「不知道」，
+    # §8.4 的 PRE/POST_DISPATCH 分支永远走不到（探针实测：不补这三列，
+    # `reproduce` 对任何真 trace 都落进「缺字段 → 按 PRE_DISPATCH 保守处理」）。
+    # 与上面两组同款处置：**追加而非重排**、都带默认值、放在末尾。
+    failure_phase: str | None = None
+    effective_idempotency: str | None = None
+    effective_risk: str | None = None

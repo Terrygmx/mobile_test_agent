@@ -10,9 +10,11 @@ APP_DEFECT」）。归因默认 `UNTRIAGED`，证据分过阈值才给 `suggeste
 - `context.py`   `DiagnosisContext` 装配（**只经 `KnowledgeSources`**，F3）；
 - `classifier.py` 规则优先的假设引擎（§8.2；崩溃/环境/漂移三条规则）；
 - `analyzer.py`  规则空结果才调 LLM 的编排（§8.2 末段）；
-- `evidence.py`  Evidence Score（§8.3）——排序由分数而非 LLM confidence 决定。
+- `evidence.py`  Evidence Score（§8.3）——排序由分数而非 LLM confidence 决定；
+- `reproducer.py` 复现引擎（§8.4）——**复用 `executor/policy` 的阶段判定本体**
+  （`FailurePhase` / `retry_decision`），不重新推断「动作是否已发出」（F9）。
 
-复现 / 去重随各自任务落地（5.4–5.5）。
+去重随 Task 5.5 落地。
 
 F3：本包**不直连数据源**（`sqlite3` / `tracer` / `graph.storage` /
 `experience.store` / `source.sqlite_tx`）——检索一律经

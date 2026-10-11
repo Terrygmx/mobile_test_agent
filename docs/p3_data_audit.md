@@ -3727,3 +3727,111 @@ git 2.54 实测，其他版本可能不同。
   受支持 kind → 换用 `bug` 作未知 kind 的例子）。
 - `test_repo_hygiene` 的 `_MIN_WRITE_STATEMENTS` 27 → **29**（用守卫自己的判据
   重新数：experience 13 + agents 10 + graph 6）。
+
+## Task 5.4 完成记录（P3-23 Reproducibility Engine，2026-10-11）
+
+### 交付
+
+| 文件 | 变化 |
+|---|---|
+| `diagnosis/reproducer.py` | **新增**（`StepProbe` / `ReproResult` / `reproduce` / `MAX_REPRO_ATTEMPTS=3`） |
+| `graph/models.py` | +10：`TraceStep` 追加 `failure_phase` / `effective_idempotency` / `effective_risk` 三字段（末尾，带默认值） |
+| `graph/builder.py` | +8/−1：`read_trace_steps` 的 SELECT 与行构造带上这三列 |
+| `diagnosis/__init__.py` | 模块图登记 `reproducer.py`（「复现 / 去重随各自任务落地」→ 只留去重） |
+| `tests/unit/test_reproducer.py` | **新增** 34 例 |
+| `tests/fault_injection/test_p3_matrix_m5.py` | **新增** 7 例（矩阵 #15） |
+
+### 口径登记（五条，都写进了模块 docstring）
+
+1. **风险闸是本引擎自己的，不在 `retry_decision` 里**。设计 §8.4 第一行的条件是
+   `idempotent` **且** `effective_risk == LOW`；而 `retry_decision(phase,
+   idempotency, has_postcondition)` **没有 risk 形参**——所以「POST_DISPATCH +
+   幂等 + 非 LOW」这一格在 P1 本体里是 `allowed=True`。本引擎**再收一道**：不自动
+   重跑，记「无法确认」。理由：「幂等」说的是重复不改变结果，不是重复没有代价
+   （`pay` 幂等与否是**声明**，不是我们能验证的事实），而 `effective_risk` 是 P1
+   对「这一步有多危险」的确定性推导（F1 的同一个函数）。自主**重复**一个 HIGH
+   动作，与探索侧「LOW-only 才自动执行」（`explorer/policy.py::pre_judge`）是同
+   一道闸。**与 Guard 不重叠**：重跑走的仍是同一条 Guard 通路（F12），执行层面
+   HIGH 依然由 P1 Guard 判；本闸管的是「要不要主动再来一次」这个选择权。缺 risk
+   时**按非 LOW 处理**（fail-closed，与 `experience/runtime_guard.py` 的
+   「`None` 按最高风险处理」同款）。
+2. **缺字段一律往「不重发」的方向兜（fail-closed）**。`steps` 表可能缺
+   `failure_phase` / `effective_idempotency`（旧 run，或失败发生在 find 之前）。
+   替换规则：缺幂等性 → `Idempotency.UNKNOWN`（7.4-3：「UNKNOWN 一律按
+   NON_IDEMPOTENT 处理」——「我们不知道」正是 UNKNOWN 的语义）；缺阶段 →
+   `FailurePhase.POST_DISPATCH`（H7 是硬约束，不知道动作发没发出时**假定已
+   发出**才是不重发的方向）。
+   > ⚠️ **这是本任务自我纠正的一处**：初版写的是「缺 phase → 当 PRE_DISPATCH
+   > （动作未发出，重跑安全）」——那是 **fail-open** 的。它假定「动作从未发出」
+   > 从而放行重跑，而真正的最坏情形（非幂等动作其实已经发出、结果未知）恰好
+   > 会因此被重发一次。H7 的保守方向是「不重发」，缺字段不是放宽它的理由。
+   > 替换后**照常走本体**（不新增分支 / mode），`assumed` 字段一路带进 `audit`
+   > ——审计要能区分「真判据」与「保守替换」（探针 9/10 各钉住一侧）。
+3. **`reproducible` 是三态，「不重跑」≠「复现不了」**。三类记 `None`：主动不重跑
+   （H7 / 风险闸）、postcondition 不成立或无法判断、一次都没跑成。把它记成
+   `False` 是**过度声称**——`bug_candidates.reproducible` 是三态列（迁移 005），
+   `None` 正是为「不知道」留的。
+4. **`llm_budget.try_acquire()` 是重跑的许可费**，与重跑内部自身的扣减是**两笔**
+   ——本模块看不到内层计数，只保证「没有名额就不发起重跑」。本模块**不**调
+   `record_success/record_failure`：熔断的连续失败计数归恢复流程（10.5「一次 LLM
+   恢复尝试未以 RECOVERED 收尾」），复现引擎不知道重跑内部每次调用的收尾，代它
+   记分只会污染熔断判据。
+5. **`read_trace_steps` 补读三列**（本任务新增的**读取端**改动）。这三列 P1 起就
+   在 `steps` 表里、`Lifecycle.record_step` 一直在写，只是读取端早先没 select
+   ——**不补这一条，`reproduce` 对任何真 trace 都落进「缺字段 → 按 PRE_DISPATCH
+   保守处理」，POST_DISPATCH 的两条分支在真实数据上永不可达**（单测的 `StepProbe`
+   会掩盖这件事，故矩阵文件刻意走真 `TraceStore`）。与 Task 2.2 / 5.1 的两次追加
+   同款处置：**追加而非重排**、都带默认值、放在末尾。
+6. **`run_testcase` 目前 `NOT_WIRED`**（归 M6 的驱动设备工具循环，Task 3.4 决定 1）
+   → 缺省通路必然得到「通道不可用」。故 `ToolError`（未接线 / 依赖没注入）**上抛**
+   并转成 `_RerunChannelUnavailable`，中止重跑并记「无法确认」——若当普通异常吞掉，
+   一次都没跑成的调用会得到 `reproducible=False`，**「没接线」伪装成「跑不出来」**。
+   生产装配由 `mta diagnose`（Task 5.6）注入 `runner` 回调；toolkit 通路在 M6 接线后
+   自动生效，本模块无需改动。
+
+### 两处与 plan 不同的判断（都写进了代码注释）
+
+1. **证据 `reproducible_3_times` 只在「每次重跑都复现」时给**。类别名就是它的字面
+   意思（设计 §8.3 权重表，5 分）。判据取「没有观察到任何一次通过」而不是
+   「`attempts == MAX_REPRO_ATTEMPTS`」——后者会让一个**与证据无关的配置项**
+   （预算把上界掐到 2）静默清零最强的一档证据。`>= 2` 次是因为一次重跑只是一个
+   数据点，构不成「复现模式」。flaky（有通过）仍记 `reproducible=True` +
+   `reproduction_count=<失败次数>`，但**不领**这份证据（另有 note 说明）。
+2. **跑满上界，不提前收工**。设计 §8.4 只说「最多重跑 3 次」，没说「一旦通过就停」。
+   提前收工会让「fail/pass/fail」这种 flaky 形态与稳定复现在结果上**完全一样**
+   （都是 `count=1` 的干净复现）——而区分这两者正是复现引擎存在的理由。
+
+### 实测
+
+- 全量 `pytest tests`（macOS）：**2048 passed / 0 failed**（exit 0；父提交 2007，
+  +41 = 34 单测 + 7 矩阵）。
+- A/B 探针（十轮，逐个红、逐个还原 md5 一致、`__pycache__` 已清）：
+  | # | 变异 | 红数 |
+  |---|---|---|
+  | 1 | 去掉风险闸（POST_DISPATCH 幂等一律重跑） | **3** |
+  | 2 | 阶段判定改成幂等性驱动（不调 `retry_decision`） | **4** |
+  | 3 | postcondition 不成立也记 `False` | **5** |
+  | 4 | `no_retry` / 风险闸记成「复现不了」 | **3** |
+  | 5 | 一次通过就提前收工 | **2** |
+  | 6 | flaky 也领 `reproducible_3_times` | **3** |
+  | 7 | `read_trace_steps` 不读三列 | **7** |
+  | 8 | 通道不可用当普通异常吞掉 | **1** |
+  | 9 | 缺字段当 PRE_DISPATCH（fail-open 回归） | **4** |
+  | 10 | `assumed` 不进审计 | **3** |
+- 探针 2 的变异写法（手搓 `RetryDecision` 顶掉本体调用）刻意做成「幂等性驱动」，
+  这正是 plan 修正 #9 要防的形态：**它同时红了 `test_the_plan_is_a_decision_not_a_
+  re_derivation` 与矩阵的 PRE_DISPATCH 两行**——判据不是「结果看起来一致」。
+- 探针 4 第一次跑时**没有红**（5 红全是探针 3 的残留）——`cp` 还原后立刻确认
+  `md5` 与锚点计数（anchor count: 1），重做一次才拿到真红数 3。教训沿用 Task 4.5：
+  **还原后先验状态再下结论**。
+- 存量钉子的链尾更新：无（本任务不新增迁移，`AGENT_SCHEMA_VERSION` 不变）。
+  `graph/models.TraceStep` 的字段追加是纯新增，无既有测试断言其字段全集。
+- **两处自我纠正**（都由「写完之后自己再读一遍判据」发现，不是测试发现的）：
+  ① 证据 `reproducible_3_times` 的判据从「跑满 3 次」改成「没有观察到任何一次
+  通过」（见上）；② 缺字段的保守方向从 PRE_DISPATCH 改成 POST_DISPATCH
+  （fail-open → fail-closed，见口径登记 2）。两者都补了探针（6 / 9）。
+- **边界登记**：`SECURITY_BLOCKED` + LOW 风险（`blocked_targets` 命中一个低风险
+  元素）的计划是 `rerun`——本引擎刻意不读 `failure_type`（只许一个判定来源），
+  该重跑**无害**（Guard 确定性，会在动作发出之前再拦一次），且如实计为「确定性
+  复现」。`test_a_low_risk_guard_block_reruns_harmlessly_and_is_documented` 把
+  这个形态钉在明处，免得将来被误读成漏判。
