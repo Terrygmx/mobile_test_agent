@@ -361,13 +361,14 @@ steps:
     row = store.conn.execute(
         "SELECT failure_type FROM testcase_runs").fetchone()
     assert row["failure_type"] == "ASSERTION_VALUE_MISMATCH"
-    # ⚠️ 这里**不断言** `steps` 行：断言值不符的出口**一行都不落**
-    # （`cli/pipeline.py` 把 `AssertionValueMismatch` 原样 re-raise 给外层
-    # `except Exception`，那条分支不落步骤行）。这是**本批新发现的既存缺口**
-    # （与 §9.3 同款：单测看不见——它只断言用例行），登记在
-    # `docs/p3_data_audit.md` §10.4，不在本批修（改的是 P1 的落库路径）。
-    assert store.conn.execute(
-        "SELECT COUNT(*) FROM steps WHERE status='FAILED'").fetchone()[0] == 0
+    # 步骤行也要落（§10.4 第 1 条已收口）：断言值不符的出口此前**一行都不落**
+    # ——`cli/pipeline.py` 把它 re-raise 给外层 `except Exception`，那条分支
+    # 只落用例行。现由 `_record_failed_step_once` 兜底补上，且**仍是**
+    # `ASSERTION_VALUE_MISMATCH`（没被崩溃报告改判）。
+    row = store.conn.execute(
+        "SELECT failure_type FROM steps WHERE status='FAILED'").fetchone()
+    assert row is not None, "断言失败的步骤行必须落（§10.4 第 1 条）"
+    assert row["failure_type"] == "ASSERTION_VALUE_MISMATCH"
 
 
 def test_the_whole_chain_closes_from_trace_to_the_rule_engine(tmp_path):

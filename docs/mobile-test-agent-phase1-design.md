@@ -425,6 +425,17 @@ def run_step(step) -> StepResult:
 - `failure_type`：**症状**，可自动判定。
   `ELEMENT_NOT_FOUND, AMBIGUOUS_ELEMENT, WAIT_TIMEOUT, ASSERTION_VALUE_MISMATCH, ACTION_OUTCOME_UNKNOWN, CURRENT_SCREEN_UNKNOWN, SCREEN_AMBIGUOUS, APP_CRASH, WDA_FAILURE, APPIUM_FAILURE, DEVICE_UNAVAILABLE, ENV_RESET_FAILED, CLEANUP_FAILED, UNSUPPORTED_RESET, SECRET_NOT_FOUND, BUILD_METADATA_MISMATCH, SECURITY_BLOCKED, LLM_DISABLED, LLM_BUDGET_EXCEEDED, LLM_TIMEOUT, LLM_PROVIDER_ERROR, LLM_INVALID_OUTPUT, LLM_LOW_CONFIDENCE, LLM_TARGET_NOT_FOUND, LLM_TARGET_AMBIGUOUS, LLM_TARGET_TYPE_MISMATCH, LLM_TARGET_SCREEN_MISMATCH, LLM_RISK_BLOCKED, LLM_REDISPATCH_FAILED`
 
+**修订记录（P3 §10.4 收口后回填，2026-10-11）**：新增 `ACTION_FAILED` 与
+`PREPARE_FAILED`。两者**早已被管线产出**（分别是 app 级动作
+launch/terminate/back/swipe 执行失败、用例前置 precondition reset 失败），
+但从未进过本列表——`tracer/storage.py::FAILURE_TYPES` 与本节此前是逐字一致的
+（29/29），所以它们是**代码自造**的值，属于「词表是口径」这句话的静默例外
+（写入不做词表校验，故不报错）。用户 2026-10-11 拍板**扩词表**而非归并到
+语义相近的既有值（`APPIUM_FAILURE` / `ENV_RESET_FAILED` 都不贴切，理由见
+`docs/p3_data_audit.md` §11）。⚠️ 教训：**词表与生产者之间原本没有任何机械
+联系**，这个漏了整整一个 P1/P2/P3 周期；现由
+`tests/unit/test_trace_completeness.py` 的守卫钉住（管线故意产出的类型 ⊆ 词表）。
+
 **修订记录（Task 4.3 实现后回填）**：新增 `LLM_REDISPATCH_FAILED`——恢复
 链全部通过后的重发（redispatch）本身失败。真机 Gate 实锤：重发异常若
 逃出 recover()，会被管线外层映射成无 steps 行的用例级 ELEMENT_NOT_FOUND

@@ -54,6 +54,20 @@ FAILURE_TYPES = {
     "LLM_TARGET_AMBIGUOUS", "LLM_TARGET_TYPE_MISMATCH",
     "LLM_TARGET_SCREEN_MISMATCH", "LLM_RISK_BLOCKED",
     "LLM_REDISPATCH_FAILED",
+    # P3 §10.4 收口（2026-10-11）：下面两个**管线一直在产出**、却不在本词表里。
+    # 词表与设计 §8.2 逐字一致（29/29），所以它们是**代码自造**的值——此前
+    # 「词表是口径」这句话对它们不成立（写入不做词表校验，故不报错、静默漏过）。
+    # 处置：**扩词表**而不是把它们归到语义相近的既有值（用户 2026-10-11 拍板），
+    # 设计 §8.2 同步补「修订记录」，见 `docs/p3_data_audit.md` §11。
+    #
+    # 两者的语义都**不**能被既有值覆盖：
+    # - `ACTION_FAILED`：app 级动作（launch/terminate/back/swipe）执行失败。
+    #   归 `APPIUM_FAILURE`（驱动层）不贴切——失败的是**被测 App 的动作**，
+    #   而且 M2 真机首跑引入它正是为了「不伪装成 ELEMENT_NOT_FOUND」。
+    # - `PREPARE_FAILED`：用例前置（precondition reset）失败（11.2 环境问题）。
+    #   归 `ENV_RESET_FAILED` 会与 `UNSUPPORTED_RESET`（复位**方式**不支持）
+    #   挤在一起，而这是「复位**执行**失败」，两者排障方向不同。
+    "ACTION_FAILED", "PREPARE_FAILED",
 }
 
 ATTRIBUTIONS = {
@@ -485,6 +499,21 @@ class TraceStore:
             (attribution, json.dumps(redact(d), ensure_ascii=False),
              tc_run_id))
         self.conn.commit()
+
+    def step_row_exists(self, tc_run_id: int, step_index: int) -> bool:
+        """该用例的该步骤是否已经落过 `steps` 行。
+
+        给管线的**外层失败 handler** 用（`docs/p3_data_audit.md` §10.4 第 1
+        条的收口）：多个内部分支是「**先落行再 raise**」的（wait/assert 的
+        恢复失败路径要拿行 id 写 4.7 样本），外层若无条件补写，那些路径就会
+        一个步骤两行——trace 上看起来像「跑了两遍」。
+
+        按 `(tc_run_id, step_index)` 判：一次用例尝试（= 一个 `tc_run_id`）
+        里每个步骤至多一行（attempt 各自是独立的 `testcase_run`）。
+        """
+        return self.conn.execute(
+            "SELECT 1 FROM steps WHERE testcase_run_id=? AND step_index=?"
+            " LIMIT 1", (tc_run_id, step_index)).fetchone() is not None
 
     def mark_steps_app_crash(self, tc_run_id: int, *,
                              exclude: tuple[str, ...] = (),

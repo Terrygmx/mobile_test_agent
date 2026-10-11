@@ -4842,12 +4842,13 @@ LoginDemo-2026-10-11-204403.ips   {'type': 'EXC_CRASH', 'signal': 'SIGSEGV'}
 1. **断言值不符的出口一行步骤都不落**：`cli/pipeline.py` 把
    `AssertionValueMismatch` 原样 re-raise 给外层 `except Exception`，那条分支
    不落步骤行。P3-1「失败步骤也落库」的纪律没覆盖到这个出口。
-   **本批未修**（改的是落库路径，独立立项）；已用一条**钉住现状**的断言登记
-   （`test_pipeline_crash_reclassify.py`，明写「这是既存缺口」）。
+   **§10 批未修**（改的是崩溃判据，不是落库路径）；**§11 批已修**
+   （`_record_failed_step_once` 外层兜底 + 查重，见 §11.1）。
 2. **`ACTION_FAILED` 不在 `FAILURE_TYPES` 词表里**：`cli/pipeline.py` 的
    App 级动作失败写的是 `"ACTION_FAILED"`，而 `tracer/storage.py::FAILURE_TYPES`
    没有这个值（词表里有的是 `APPIUM_FAILURE`）。写入未做词表校验所以不报错，
-   但「词表是口径」这句话对它不成立。**登记，不在本批修。**
+   但「词表是口径」这句话对它不成立。**§11 批已修**：用户拍板**扩词表**，
+   且守卫还抓出第二个漏网值 `PREPARE_FAILED`（见 §11.2）。
 3. **套件路径的 precondition 崩在窗外**：`manage_env=False` 时 prepare 由
    `SuiteRunner` 在 `run_one` 之前做完，落在用例级时间窗之外。那条路径上
    prepare 抛异常根本不会变成 `TestcaseResult`，**没有行可改判**——所以是
@@ -4914,3 +4915,135 @@ $ mta diagnose … → bug 候选 status=HUMAN_REVIEW score=5
 | A/B 探针 | 14 条，补 3 条断言后 **14/14 红**（R4 已证等价，不在此列） |
 | 真机复验 | `FAIL (APP_CRASH)` + 步骤行同步改判 + 诊断链闭合 |
 | `NOT_WIRED` | **3**（不变——本批修的是判据覆盖面，不是工具接线） |
+
+## 11. §10.4 第 1、2 条的收口 —— 步骤行兜底 + 扩词表（2026-10-11）
+
+用户 2026-10-11 拍板「清掉 3、4」，处置方式选定为 **扩词表 + 设计加修订记录**
+（而不是把两个值归并到语义相近的既有值）。本节记录两个缺口怎么修、为什么
+这么修、以及补做的 A/B 探针。第 3 条（套件路径 precondition 崩在窗外）
+**仍未闭**——它是「本来就无从归因」，不是本批能修的形态。
+
+### 11.1 缺口 1：断言出口不落步骤行（已修）
+
+**缺陷**：`cli/pipeline.py` 的 assert 分支对 `AssertionValueMismatch` 直接
+re-raise 给外层 `except Exception`，那条分支**只落用例行、不落步骤行**。而
+其余失败出口（wait 超时 / assert 漂移 / `InfraError`）都在**内部**落了行再
+raise——所以这是**唯一**漏掉的外层出口，而且它对应的正是最常见的断言失败形态。
+
+**后果**：报告按**步骤**渲染，trace 的 `steps` 表一行没有 → 排障时看不到是哪个
+target 断的、expected/actual 也只在**用例**行的 detail 里。P3-1「失败步骤也落库」
+的纪律对这条出口不成立。
+
+**修法**（`_record_failed_step_once`，外层 handler 内调用）：
+
+1. **先查重再落行**（`TraceStore.step_row_exists(tc_run_id, step_index)`）——
+   内部已落行的分支若被外层再写一次，一个步骤会有**两行**，trace 上看起来像
+   跑了两遍。判据是「**每个 `testcase_run`** 每个 step_index 至多一行」，不是
+   「全库一行」：`InfraError` 会触发 WDA 重跑，attempt=2 是**另一条**
+   `testcase_run`，各自该有一行（那正是「跑了两遍」的如实记录）。
+2. `step_type` **按步骤形态取**（动作步用 `step.action`，wait/assert 用固定名
+   `wait_for` / `assert`）——与内部各分支落行时的写法一致，否则同一个步骤在
+   不同出口会有不同的 `step_type`，报告按它分组时会分裂。
+3. 目标标签走 `_target_label`（`screen:HomeView` / `HomeView.login_button`）
+   同款；拿不到 target 的形态（如 App 级动作）如实留空。
+
+**与崩溃改判的交互**（§10 的判据依赖步骤行）：断言出口此前**没有步骤行可改判**，
+所以那条路径上「App 崩了」只能改判用例行，规则引擎（读 `ctx.steps`）依旧瞎。
+本修法把这个洞一并堵上——现在断言出口也有行可改判。
+
+### 11.2 缺口 2：词表缺两个值（已修，**扩词表**）
+
+**缺陷**：`tracer/storage.py::FAILURE_TYPES` 与设计 §8.2 此前是**逐字一致**的
+（29/29），但管线**故意**产出两个不在其中的值：
+
+| 值 | 生产者 | 语义 |
+|---|---|---|
+| `ACTION_FAILED` | `_run_app_level_action`（launch / terminate / back / swipe 执行失败） | 被测 **App 的动作**失败 |
+| `PREPARE_FAILED` | 用例前置 precondition reset 失败（§11.2 环境问题） | 复位**执行**失败 |
+
+写入不做词表校验，所以**不报错、静默漏过**——「词表是口径」这句话对它们不成立。
+
+⚠️ `PREPARE_FAILED` **不在** §10.4 的登记清单里（那里只登记了
+`ACTION_FAILED`）。它是**守卫抓出来的**：`test_trace_completeness.py` 的
+「故意生产者 ⊆ 词表」断言第一次跑就红了，报的正是它。这条正好说明守卫的价值
+——**靠人肉清点登记，本来就会漏**（漏了整整一个 P1/P2/P3 周期）。
+
+**处置：扩词表，不归并**（用户 2026-10-11 拍板）。两个值都不能被既有值覆盖：
+
+- `ACTION_FAILED` 归 `APPIUM_FAILURE`（驱动层故障）不贴切——失败的是**被测
+  App 的动作**，且 M2 真机首跑引入它正是为了「不伪装成 `ELEMENT_NOT_FOUND`」；
+- `PREPARE_FAILED` 归 `ENV_RESET_FAILED` 会与 `UNSUPPORTED_RESET`
+  （复位**方式**不支持）挤在一起，而这是「复位**执行**失败」，两者排障方向不同。
+
+**为什么不加运行时 CHECK 约束**：词表尾部**是开放的**——`_map_exception`
+故意用 `type(e).__name__` 兜底（fail-loud，绝不静默归类成 `ELEMENT_NOT_FOUND`）。
+加了 CHECK 会让未知异常在**落库**时炸掉，把「症状如实记录」换成「写不进去」。
+所以只能把「**故意**生产的那些」钉进词表（见 11.3 的守卫），不能把词表当栅栏。
+
+**设计同步**：`docs/mobile-test-agent-phase1-design.md` §8.2 已补「修订记录」，
+明写这两个值**早已被管线产出**、以及「词表与生产者之间原本没有任何机械联系」
+这条教训。
+
+### 11.3 两处新守卫：把「词表 ↔ 生产者」的联系建起来
+
+`tests/unit/test_trace_completeness.py`（新增 9 条）：
+
+1. **正向守卫** `test_every_pipeline_produced_failure_type_is_in_the_vocabulary`
+   ——显式的 `PIPELINE_PRODUCED` 清单（14 个值，**不含** `_map_exception` 的
+   兜底）必须 ⊆ `FAILURE_TYPES`。新增一处故意产出就加进清单，漏进词表当场红。
+   这条就是抓 `ACTION_FAILED` / `PREPARE_FAILED` 的那条。
+2. **反向守卫** `test_the_crash_exclude_list_only_names_real_vocabulary_values`
+   ——§10 的 `_CRASH_UNEXPLAINABLE` 排除表的**键**必须是真词表值。若里面出现
+   一个词表里没有的名字（拼错 / 写了已废弃的值），它**永远匹配不上任何
+   `failure_type`**，于是**该被排除的类型会静默落到「可改判」一侧**——这是
+   `ACTION_FAILED` 那种漂移的**镜像形态**，后果更隐蔽（不是少一个值，而是多
+   一次误判）。
+3. **拼写唯一性** `test_the_vocabulary_has_no_duplicate_spellings`——近义并存
+   （`ACTION_FAILED` vs `APPIUM_FAILURE`）是**允许**的（语义确实不同），但拼写
+   层面（大小写、下划线）必须唯一，且全大写。
+
+### 11.4 A/B 探针：9 条；**T3 第一版是假红**
+
+| 探针 | 改坏什么 | 结果 |
+|---|---|---|
+| T1 | 外层 handler 不再补步骤行 | 红（断言出口回到零行） |
+| T2 | 兜底不查重 | 红（一个步骤两行） |
+| T3 | 兜底的 `step_type` 不按形态取 | 红 |
+| T4 | 兜底不传 target | 红 |
+| T5 | 兜底不传 `failure_type` | 红 |
+| T6 | 词表删掉 `ACTION_FAILED` | 红 |
+| T7 | `step_row_exists` 恒 `False` | 红 |
+| T8 | 排除表混进词表里没有的名字 | 红 |
+| T9 | 词表混进一个小写值 | 红 |
+
+**9/9 红，还原后 md5 校验一致**（`cli/pipeline.py` / `tracer/storage.py`）。
+
+**T2 逼出了一条新测试**：第一版 `_run` 的默认 executor 走的是**断言**路径
+（外层唯一该补行的出口），而「内部已落行再 raise」的出口**一个都没被覆盖**
+——把查重去掉（T2）时全绿。据此补了
+`test_a_branch_that_already_wrote_a_row_does_not_get_a_second_one`
+（形态：wait 超时 → 恢复管线 → 恢复失败 → 内部落行 → raise 到外层）。
+**全量回归只告诉你「没红」，A/B 探针才告诉你「断言够不够」。**
+
+**⚠️ T3 的教训：假红比绿更坏。** T3 第一版把 `elif isinstance(step,
+AssertionStep):` 连同其分支体一起改坏，留下一个悬空 `else` → **`SyntaxError`**，
+pytest 报的是**收集错误**而不是断言失败。那条「红」**什么也没证明**——它只是
+证明代码编译不过。第二版把锚点收窄成单行 `step_type = "assert"` 才成为真变异。
+**判定探针是否有效，要看它是「断言失败」还是「收集/导入错误」**；只看红绿会把
+无效探针当成证据（这正是 §9.4 / §10.6 那两次「第一版没变红」的反面：一次是
+漏覆盖，一次是假装覆盖）。
+
+### 11.5 数字
+
+| 项 | 值 |
+|---|---|
+| 新增测试 | 1 个文件 / **9 条**（`test_trace_completeness.py`） |
+| 改动测试 | `test_pipeline_crash_reclassify.py` **1 条**（原钉「断言出口零行」的那条——它钉的正是本次修掉的缺口，改为钉「行必须落且类型正确」） |
+| 词表 | 29 → **31**（`ACTION_FAILED` / `PREPARE_FAILED`），设计 §8.2 同步补修订记录 |
+| A/B 探针 | 9 条，**9/9 红**（T3 第一版无效，已重做） |
+| 全量回归 | 2311 → **2320 passed / 0 failed**（新增恰为 9 条：2261 → 2311 → 2320） |
+| `NOT_WIRED` | **3**（不变——本批修的是落库完整性与词表口径，不是工具接线） |
+
+**仍未闭**（沿 §10.4 第 3 条）：套件路径（`manage_env=False`）的 precondition
+崩在用例级时间窗之外，那条路径上 prepare 抛异常根本不会变成 `TestcaseResult`，
+**没有行可改判**——「本来就无从归因」，登记不动。

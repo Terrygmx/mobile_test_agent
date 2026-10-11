@@ -704,6 +704,16 @@ class SessionPipeline:
                             "expected": _jsonable(result.expected),
                             "actual": _jsonable(result.actual),
                         }
+                    # 失败步骤也要落 steps 行（P3-1 的纪律）。此前**只有**这条
+                    # 外层出口漏了：断言值不符（H6 终态，最常见的断言失败形态）
+                    # 直接 re-raise 到这里，而其余分支（wait / assert 漂移 /
+                    # InfraError）都在**内部**落了行再 raise。
+                    #
+                    # ⚠️ 必须先问一句「这行落过没」：内部已落行的分支若被这里
+                    # 再写一次，一个步骤会有两行，trace 上看起来像跑了两遍。
+                    # （`docs/p3_data_audit.md` §10.4 第 1 条）
+                    self._record_failed_step_once(
+                        lifecycle, idx, step, failure_type, detail)
                     break
 
         # H10：cleanup 必须执行；失败升级 ENVIRONMENT_FAILURE 而非吞掉。
@@ -1004,6 +1014,43 @@ class SessionPipeline:
             expected_type=getattr(eff, "type", None),
             step_index=idx)
         return ctx, runner.run_step(ctx)
+
+    def _record_failed_step_once(self, lifecycle: Lifecycle, idx: int, step,
+                                 failure_type: str | None,
+                                 detail: dict) -> None:
+        """外层失败 handler 的步骤行兜底：**没落过才落**。
+
+        `step_type` 按步骤形态取（动作步用 `step.action`，wait/assert 用固定
+        名）——与内部各分支落行时的写法一致，不然同一个步骤在不同出口会有
+        不同的 `step_type`，报告按它分组时会分裂。
+
+        目标标签用 `_target_label`（`screen:HomeView` / `HomeView.login_button`）
+        同款；拿不到 target 的形态（如 App 级动作）如实留空。
+        """
+        if self.store is None:
+            return
+        tc_run_id = getattr(lifecycle, "tc_run_id", None)
+        if not tc_run_id:
+            return
+        if self.store.step_row_exists(tc_run_id, idx):
+            return
+        if isinstance(step, ActionStep):
+            step_type = step.action
+        elif isinstance(step, WaitStep):
+            step_type = "wait_for"
+        elif isinstance(step, AssertionStep):
+            step_type = "assert"
+        else:  # pragma: no cover — TestCase.steps 只有这三种形态
+            step_type = type(step).__name__
+        target = getattr(step, "target", None) \
+            or getattr(getattr(step, "wait_for", None), "target", None) \
+            or getattr(getattr(step, "assertion", None), "target", None)
+        self._record_aux_step(
+            lifecycle, idx, step_type,
+            _target_label(target) if target is not None else "",
+            latency_ms=0, ok=False, failure_type=failure_type,
+            detail=dict(detail))
+
     def _record_aux_step(self, lifecycle: Lifecycle, idx: int, step_type: str,
                          target_id: str, *, ok: bool = True,
                          failure_type: str | None = None,

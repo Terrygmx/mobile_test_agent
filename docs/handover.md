@@ -195,17 +195,29 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
 
 ## 9. 当前状态快照（**2026-10-11**，以实测为准）
 
-- **分支 / HEAD**：`P4-1011` / **`961952b`**（**M1–M6 全部收口**，其上又叠了 Task 6.7
-  「工具层接线补齐」与 Batch B「设备侧证据采集 + `APP_CRASH` 判定」共 6 个 commit；
+- **分支 / HEAD**：`P4-1011` / **`04b4c4a`**（**M1–M6 全部收口**，其上又叠了 Task 6.7
+  「工具层接线补齐」、Batch B「设备侧证据采集 + `APP_CRASH` 判定」、Batch B 修正
+  （§10 崩溃判定覆盖所有失败出口）、以及 §11「步骤行兜底 + 扩词表」；
   里程碑 tag `checkpoint-p3-m6` = `f63b381` **不可动**）
-- **全量基线**：**2311 passed / 0 failed**（M6 收口 2207 → Task 6.7 的 2219 →
-  Batch B 的 2261 → Batch B 修正的 2311）
+- **全量基线**：**2320 passed / 0 failed**（M6 收口 2207 → Task 6.7 的 2219 →
+  Batch B 的 2261 → Batch B 修正的 2311 → §11 收口的 2320）
 - ⚠️ **Batch B 的教训（P3 收口后仍抓到真缺陷）**：§9 曾声称「崩溃链在真机上是通的」，
   那是**函数级**实测；`mta run` 真机端到端实测当场推翻——App 崩了记的是
   `CURRENT_SCREEN_UNKNOWN`（崩溃判定只挂在 `except InfraError` 上，而 App 死了
   最常见的表现是普通步骤失败）。**函数级 E2E ≠ 端到端 E2E**，详见
   `docs/p3_data_audit.md` §10。修正后真机复验：`FAIL (APP_CRASH)`，
   用例行与**步骤**行同步改判（规则引擎读的是步骤行），诊断链闭合。
+- ⚠️ **紧接着又清掉两处既存缺口**（`docs/p3_data_audit.md` §11，用户拍板「清掉 3、4」）：
+  ① **断言值不符的出口一行步骤都不落**（外层 `except Exception` 唯一漏掉的出口，
+  而它是最常见的断言失败形态）→ `_record_failed_step_once` 兜底 + 按
+  `(tc_run_id, step_index)` **查重**（内部已落行的分支不能被补写第二行）；
+  ② **`ACTION_FAILED` 不在 `FAILURE_TYPES`** → 用户拍板**扩词表**而非归并，
+  设计 §8.2 补「修订记录」。守卫还**抓出第二个漏网值** `PREPARE_FAILED`
+  （不在登记清单里——靠人肉清点本来就会漏）。新增守卫
+  `tests/unit/test_trace_completeness.py` 把「**故意生产者 ⊆ 词表**」钉住。
+  ⚠️ **A/B 探针的 T3 第一版是「假红」**：变异留下悬空 `else` → `SyntaxError`，
+  pytest 报的是**收集错误**而不是断言失败——那条「红」什么也没证明。**判定探针
+  是否有效，要看它是断言失败还是收集/导入错误。**
 - **最新 tag**：`checkpoint-p3-m6` = `f63b381`（**P3 收口**；里程碑 tag `v0.3-p3-complete`；
   上一个 `checkpoint-p3-m5` = `233ab1e`）
 - **Gate 状态**：M1 ✅（`checkpoint-p3-m1`）· M2 ✅（`phase0/verify_p3_m2.py` exit 0，8/8 PASS）
