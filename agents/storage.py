@@ -729,7 +729,15 @@ class SQLiteAgentStore:
 
     def save_benchmark_run(self, run_id: str, *, label: str,
                            metrics) -> None:
-        """Benchmark 快照落库（`metrics_json` 整份存，不列展开——见 007 头注）。"""
+        """Benchmark 快照落库（`metrics_json` 整份存，不列展开——见 007 头注）。
+
+        **upsert**（同 `run_id` 重存覆盖），与 `save_candidate` / `save_plan` /
+        `save_discovery_event` 同款：`run_id` 是主键，同一个 run 重记一次就是
+        覆盖同一行，不是新事实。`run_benchmark` 自己发 uuid（正常路径不会撞），
+        但 Gate 之类固定 `run_id` 的调用方**重跑一次就崩**——把「重跑」做成
+        崩溃是 gate 自己的可用性缺陷。审计要保的是**历史**（不同的 run_id），
+        不是同一次 run 的重复行。
+        """
         payload = {
             "cases": [vars(c) for c in metrics.cases],
             "diagnosis_accuracy": metrics.diagnosis_accuracy,
@@ -740,7 +748,10 @@ class SQLiteAgentStore:
         with self._write_tx() as conn:
             conn.execute(
                 "INSERT INTO benchmark_runs (run_id, label, metrics_json,"
-                " created_at) VALUES (?,?,?,?)",
+                " created_at) VALUES (?,?,?,?)"
+                " ON CONFLICT(run_id) DO UPDATE SET label=excluded.label,"
+                " metrics_json=excluded.metrics_json,"
+                " created_at=excluded.created_at",
                 (run_id, label, json.dumps(payload, ensure_ascii=False),
                  _now()))
 

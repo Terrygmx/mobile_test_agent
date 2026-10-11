@@ -70,6 +70,28 @@ def test_run_benchmark_persists_a_row(tmp_path):
     assert "diagnosis_accuracy" in rows[0][1]
 
 
+def test_rerunning_the_gate_does_not_crash_on_the_same_run_id(tmp_path):
+    """**Gate 可重入**：固定 `run_id` 的调用方重跑一次必须覆盖，不是崩。
+
+    第一版 `save_benchmark_run` 是裸 INSERT，第二次跑同一 Gate 直接
+    `IntegrityError: UNIQUE constraint failed`——而那条 FAIL 与真实缺陷
+    长得一模一样，白查一轮。`run_benchmark` 自己发 uuid 撞不上，撞得上的是
+    「显式指定 run_id 留一个可寻址的槽位」这种正当用法。
+    """
+    store = SQLiteAgentStore(tmp_path / "agent.db")
+    result = run_benchmark()
+    store.save_benchmark_run("bench_fixed", label="v1", metrics=result)
+    store.save_benchmark_run("bench_fixed", label="v1", metrics=result)
+    import sqlite3
+    conn = sqlite3.connect(str(tmp_path / "agent.db"))
+    try:
+        rows = conn.execute(
+            "SELECT run_id, label FROM benchmark_runs").fetchall()
+    finally:
+        conn.close()
+    assert rows == [("bench_fixed", "v1")]
+
+
 # --- 2. compare 与 AGENT_REGRESSION ----------------------------------------------
 
 

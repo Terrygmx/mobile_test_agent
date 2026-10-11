@@ -4282,3 +4282,221 @@ G5 一条同时钉住三件事：复现证据真进了同一个证据集（缺�
 | `tests/unit/test_cli_diagnose.py` | 另 +1（trace 库不可读 → 干净 exit 3，缺口 D） |
 
 合计 2135 → **2148 passed**。
+
+---
+
+## Task 6.1–6.5 完成记录（P3-26 … P3-30，2026-10-11）
+
+M5 收口（`checkpoint-p3-m5` = `233ab1e`，2148 passed）之后开 M6。本段记录
+**做出来的东西**、**登记的口径/偏离**，以及实测逼出来的真缺陷。
+
+### 6.1.1 状态机是「形式化散文」，不是新发明（Task 6.1 / P3-26）
+
+设计 §9.2 是一段线性草图（「PLANNING → EXECUTING → OBSERVING → …」）。
+M6 把它落成一张转换表，**判据是既有三处写点必须零改动即合法**：
+
+| 既有写点 | 转换 | 靠哪条边成立 |
+|---|---|---|
+| `explorer/agent.py::run()` 末尾写 IDLE | IDLE→EXECUTING→…→IDLE | `COMPLETE→IDLE`（从所有工作态可达）+ `EXECUTE` 从 IDLE |
+| `cmd_explore` 的两条错误路径 | IDLE→ESCALATED | `ESCALATE` 从**任何非终态**可达 |
+| `tests/unit/test_agent_store.py` | IDLE→PLANNING | `PLAN` 从 IDLE |
+
+改完这三处仍然是 0 行 diff——这是转换表选型的**验收条件**，不是巧合。
+
+**ESCALATED 是终态**（无出边，fail-loud）：它是设计明文的「系统认为需要人
+介入」的正常退出路径，不是错误态；给它出边等于允许「升级完继续自己跑」，
+与 §9.1 的「不重试不放宽」直接冲突。
+
+**升级优先级钉死**（`should_escalate`，纯函数）：
+`LLM_POLICY > CRITICAL_ACTION > GUARD_BLOCK_STREAK > LLM_INVALID_STREAK >
+BUDGET_EXHAUSTED`。顺序不是实现自由——安全类（LLM 判 CRITICAL、§9.4 的
+Security/Financial/Destructive/Ambiguous）必须在计数类之前，否则「已经
+拦了 2 次、第 3 次才升级」会先消耗掉一次危险动作的机会。
+
+### 6.1.2 `update_task_state` 强制走表（不写第二份判据）
+
+`agents/storage.py` 只做**词表校验**，M6 加了**转换合法性**校验，判据直接
+`from agents.state import successors`——两处各写一份转换规则是状态机项目里
+最大的静默漂移源（改了一处、另一处还在放行，测试两边都绿）。
+
+### 6.1.3 `EscalationPolicy` 增 `llm_invalid_before_escalate: 2`（登记）
+
+设计只点名了「连续 Guard 拦截的 N 来自 policy」。LLM_INVALID_OUTPUT 的
+连续阈值同为「初版值待校准」，放进同一段（校准只改 policy.yaml 一处）而不是
+写死在代码里。
+
+### 6.2.1 「同一个 Executor + Guard」的准确口径（Task 6.2 / P3-27）
+
+F12 说的「三个 Subagent 落到同一个 Executor + Guard」= **依赖对象同一**
+（`guard is guard` / `executor is executor`）；而 **toolkit 实例每个 Subagent
+一个**——`task_id` 烤在 toolkit 里，共享一个 toolkit 会把三方的
+`agent_trace` 全记到同一个 `task_id` 下，按任务归因直接失效（F12 的目的是
+「统一工具层」，不是「统一审计行」）。
+
+`Subagent.__init__` **没有** `executor` / `driver` / `device_session` 形参：
+「直接注入执行器」在**构造层**不可达，不靠调用方自觉。
+
+### 6.3.1 设计的 `(task, knowledge)` 两参签名不可实现（偏离 #3）
+
+`graph_query` 的真签名要 `app_id`（范围第一段，fail-loud 不猜）、
+`experience_lookup` 要 `screen_id` / `target_id`——设计的两参签名把它们藏进
+`task` 里，可 `AgentTask` 没有这些字段。改为显式 kwargs 传入，**不从 goal
+字符串里解析**。
+
+### 6.3.2 `relevant_history` 不做屏级过滤（偏离 #2，**用户拍板 2026-10-11**）
+
+trace 的 `steps` 表**不记 screen**（P1 schema 如此），而
+`P2KnowledgeSources.trace_history` 对 `screen_id` 过滤键是**显式 fail-loud**
+的——它自己的注释写着「静默接受一个过滤不了的键，等于把『想过滤没过滤』
+伪装成『结果恰好都对』」。所以这不是「忘了实现」，是数据源缺那一列。
+
+处置：用可用键（`app_build` + `limit`）取最近 N 步；测试钉住 builder
+**绝不**把 `screen_id` 塞进 filters（塞进去当场 ValueError）。屏级收窄等
+`steps` 补齐屏列——handover「待拍板三项」之一**保持登记，不闭**。
+
+### 6.4.1 薄封装落在**中立包** `subagents/`，不是 `agents/`（偏离 #6）
+
+plan 的 Files 段写 `agents/planner_agent.py`，本仓两条 import 级守卫把两个
+方向都封死，且都不开豁免：
+
+| 守卫 | 钉住什么 |
+|---|---|
+| `test_planner_models.py::test_agents_package_does_not_import_planner` | `agents/**` 不 import `planner.*`（反了就成包级环） |
+| `test_knowledge_retrieval.py::test_planner_package_does_not_touch_data_sources_directly` | `planner/**` 不 import `agents`（`agents` 是数据源前缀之一，F3） |
+
+薄封装同时要 import 两边（`agents.base.Subagent` + `planner.plan`），两个家
+都不是它的，只能落中立层 `subagents/`。`TestManager` 仍在 `agents/manager.py`
+且**不 import `subagents`**——`spawn(agent_cls, ...)` 由调用方给类，组装发生
+在中立层。
+
+处置原则：**让结构说话，不给守卫开后门**（放宽任何一条都要写理由进审计，
+而这里没有正当需要）。
+
+### 6.4.2 连续拦截的测试用真 Guard 的 `blocked_targets`，不是替身
+
+第一版测试拿「SANDBOX + HIGH 元素」当连续拦截，实测**不拦**——
+`Guard.check` 的规则 1 只拦 CRITICAL，HIGH 只在 PRODUCTION 拦（这条差异
+在 M5 的 `test_explorer_guard` 里被 `_PageScriptExec` 的断言掩盖了）。
+改用规则 3（`blocked_targets` 显式黑名单，任意环境生效）：造出的是**确定的**
+连续 BLOCK，而不是赌一个 sandbox 例外。替身 guard 演出来的「拦截」测不到
+真实闸门。
+
+### 6.5.1 分母是指标的全部语义（Task 6.5 / P3-30）
+
+| 指标 | 分母 | 为什么不是别的 |
+|---|---|---|
+| Duplicate Rate | 入库候选 + `SEMANTIC_REJECTED` + `DUPLICATE` | `SCHEMA_INVALID` 连候选形状都没解析出来，算成「生成了」会让重复率被 schema 噪声稀释 |
+| Reproduction Rate | `reproducible IS NOT NULL` | 「还没跑复现」既不是真也不是假，进分母会把「没判」算成「复现不了」 |
+| Duplicate Bug Rate | **全部** bug | 刻意与上面不同：dedup 合并是**判定后**的事，全量分母才反映重复占比 |
+
+**Selection Precision / Diagnosis Accuracy 不在 `AgentMetrics` 上**——
+依赖人工标注真值，库里没有。collect 假装能算就是自欺；它们只在 Benchmark
+的标注集内计算（`agents/benchmark.py`，每类 case 自带预期）。测试用
+`not hasattr` 钉住「字段不存在」。
+
+### 6.5.2 迁移编号 007（偏离 #1）
+
+plan 写 `005_benchmark_runs.sql`，005/006 已被 M5/M4 占用，迁移只能向后追加
+→ **007_benchmark_runs.sql**。两处幂等测试原本**钉死链尾**
+`== "006_discovery_events"`，按其自身注释（「版本串从链尾派生，加脚本后这里
+跟着变——这正是它该有的行为」）更新为 007。plan 预测的「用 `>=` 断言不需改」
+不成立。
+
+### 6.5.3 CLI：`mta agent benchmark run|compare`
+
+`"agent"` 早在 M1 就进了 `AUTONOMOUS_COMMANDS`，F7 启动期拒绝自动生效——
+本任务只加 parser，不加第二道闸。`compare` 判回归 → **exit 1** +
+`AGENT_REGRESSION` 供 CI。
+
+### 6.6.1 本轮修掉的**真缺陷**（都是全量回归 / A/B 探针逼出来的）
+
+| # | 缺陷 | 怎么发现的 | 修法 |
+|---|---|---|---|
+| E1 | `compute_agent_metrics` 用 `reproducible is True` 判复现 | 6.5 端到端测试：sqlite 没有布尔类型，回来是 **int 0/1**，「真复现」被判成「没复现」 | 改真值判断（纯 dict 喂进来的 bool 同样命中） |
+| E2 | `AgentContext` 的空子集断言写成 `== []` | 6.3 单测 | dataclass 字段默认 `()`，断言改 `()` |
+| E3 | `test_benchmark` 把两条回归判定用 `or` 合并断言 | **A/B 探针**：分别改坏两条分支，各跑都是 7 passed | 拆成两条独立断言 |
+| E4 | 薄封装落点违反两条分层守卫 | 全量回归（`test_agents_package_does_not_import_planner` / `test_planner_package_does_not_touch_data_sources_directly`） | 移到中立包 `subagents/`（见 6.4.1） |
+| E5 | 连续拦截测试的前提（SANDBOX 拦 HIGH）**实测证伪** | 6.4 单测 | 改用 `blocked_targets` 规则 3（见 6.4.2） |
+| E6 | `verify_p3_final.py` f-string 引号不配对 → SyntaxError | Gate 首次运行 | 修正引号 |
+
+E1 与 E3 属同一类：**测试全绿但断言比声称的弱**（sqlite 的类型、布尔合并
+断言）。A/B 探针是唯一能把这类问题逼出来的手段——全量回归只告诉你「没红」。
+
+### 6.6.2 A/B 探针：19 条，全部如实变红
+
+因 Bash 分类器故障，M6 全程**没能先红后绿**（首轮 pytest 直到任务 6.6 才跑
+得起来）。补做逐条变异探针：改坏一个语义 → 对应测试必须当场红 → 还原 →
+md5 校验。**19/19 变红**，其中 3 条第一版**没变红**（探针本身无效或断言太
+弱），据此补了 E3 的断言拆分与 `relevant_source` 的空子集断言。
+
+| 任务 | 探针 |
+|---|---|
+| 6.1 | ESCALATED 变非终态 / COMPLETE→IDLE 撤边 / `update_task_state` 不校验转换 / llm_invalid 阈值不参与升级 |
+| 6.2 | toolkit 不做类型断言 / 工具调用不留痕 / llm_budget 不做类型断言 |
+| 6.3 | `trace_history` 传 screen_id / source 子集不按屏切 / current_screen 不按屏切 / history limit 写死 |
+| 6.4 | 连续 Guard 拦截不计数 / 已升级任务可重跑 |
+| 6.5 | SCHEMA_INVALID 进分母 / 未判定进复现率分母 / 造出依赖真值的字段 / benchmark 三条判定各改坏一条 |
+
+### 6.6.3 测试增量
+
+| 文件 | 用例数 |
+|---|---|
+| `tests/unit/test_agent_state.py` | 18 |
+| `tests/unit/test_subagent_binding.py` | 7 |
+| `tests/unit/test_agent_context.py` | 9 |
+| `tests/integration/test_subagent_coordination.py` | 8 |
+| `tests/unit/test_agent_metrics.py` | 9 |
+| `tests/unit/test_benchmark.py` | 7 |
+
+合计 2148 → **2206 passed / 0 failed**。
+
+---
+
+## Task 6.6 完成记录（P3-31 端到端自主回归闭环，2026-10-11）
+
+Gate：`phase0/verify_p3_final.py` → **33/33 PASS，exit 0，78.2s**，
+全量回归 **2207 passed / 0 failed**。演示留证见 `docs/p3_demo_record.md`。
+
+### 6.6.1 Gate 的四段与两道矩阵
+
+| 段 | 检查 | 环境 |
+|---|---|---|
+| OFF | G1 F7 production 拒绝（且不写库）/ G2 Benchmark 三段闭环 / G3 矩阵 #18 manager 级 | 无设备 |
+| CHAIN | G4 plan → G5 generate（LLM 桩）→ G6 人工 accept → G7 run `--fake-driver` | gate 自足工程 A |
+| DEV | G8 explore（真机 sandbox）→ 漂移注入 → G9 run 失败 → diagnose → 人工 accept → Evidence Bundle | gate 自足工程 B + 模拟器 |
+| 收尾 | G10 矩阵 #17 资产零改动 / G11 全量回归 | — |
+
+两个工程都在 `out/p3_final_gate/gate_env/` 下**自建 git 仓库**，并在建仓后
+断言 `rev-parse --show-toplevel` == 工程根（M2 的 M4 事故：仓库根穿透到主仓库）。
+
+### 6.6.2 Gate 自己被实测推翻的**六处**（全在「测试全绿但判据站不住」这一类）
+
+| # | 症状 | 真相 | 修法 |
+|---|---|---|---|
+| G-F1 | 首次运行直接 `SyntaxError` | f-string 引号不配对（`f"…'`） | 修正 |
+| G-F2 | 第二次运行 `IntegrityError: UNIQUE constraint failed: benchmark_runs.run_id` | Gate 固定 `run_id` 留可寻址槽位，`save_benchmark_run` 是裸 INSERT → **Gate 不可重入** | 改成 upsert（与 `save_candidate` 同款，附理由）+ 跑前清 `gate_env`；补单测 `test_rerunning_the_gate_does_not_crash_on_the_same_run_id` |
+| G-F3 | G3c FAIL：planner/diagnosis 的 trace 是 0 行 | 断言写成了「三个 agent 都得有 trace 行」，但它们是**纯计算薄封装**，没有工具调用就没有痕 | 断言改成**归因**：每行记在自己名下 + 没有串号 + 只调过工具的那个有痕 |
+| G-F4 | G8a PASS 但 `outcome=LLM_BUDGET_EXCEEDED steps=0 screens=0` | Gate 自己把 `max_llm_calls` 写成 **0** → 第 0 步熔断，而 `explore` 仍 exit 0 | 改 20（M4 Gate 同值）+ 判据从「exit 0」改成「**steps ≥ 1 且终态是有界停止**」 |
+| G-F5 | 收紧后的 G8a FAIL：`outcome=FRONTIER_EMPTY steps=0 screens=1` | App 冷启动停在 **LoginView**，而声明面只播种了 `HomeView→ProfileView`——从 LoginView 出发 frontier 就是空的 | 补播 `LoginView→HomeView (tap:LoginView.login_button)`；结果 `LOOP_DETECTED steps=3 screens=2` |
+| G-F6 | G10b FAIL：`git status = ''` | `mta candidate review accept` **自己会 git commit**，所以正常情况就是干净的；断言写成 `status_a and …`（要求非空），把「干净」判成 FAIL | 允许空（或只允许 `?? suites/`） |
+
+**G-F4/G-F5 是 M4 Gate 那次 `FRONTIER_EMPTY steps=0` 假绿的同款复发**——
+上一轮的教训没有落成断言，这次由 Gate 自己的预算配置重新演示了一遍。
+处置：判据不写成「exit 0」，而写成「真的动过 + 终态在设计 §7.2/7.3 的
+词表内，且唯独排除 `LLM_BUDGET_EXCEEDED`（那是配置错，不是有界停止）」。
+
+### 6.6.3 两条**测试侧**的假绿（与 Gate 无关，A/B 探针逼出来的）
+
+见 6.6.1 的 E1（sqlite 的 `reproducible` 是 int 不是 bool）与 E3
+（`compare` 的两条判定被 `or` 合并断言）。两者都属于「全量回归只告诉你没红，
+A/B 探针才告诉你断言够不够」。
+
+### 6.6.4 M6 收口数字
+
+| 项 | 值 |
+|---|---|
+| Gate | 33/33 PASS，exit 0，78.2s |
+| 全量回归 | 2148 → **2207 passed**（M6 新增 59） |
+| A/B 探针 | 19/19 如实变红 |
+| 新增文件 | `agents/{state,base,context,manager,benchmark}.py`、`subagents/`（3 个薄封装）、`report/agent_metrics.py`、`agents/migrations/007_benchmark_runs.sql`、`phase0/verify_p3_final.py`、`docs/p3_demo_record.md` |
+| 新增测试 | 6 个文件 / 59 条 |
