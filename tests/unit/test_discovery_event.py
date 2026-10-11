@@ -39,7 +39,9 @@ def test_migration_006_lands_and_version_follows_the_chain(tmp_path):
     db = tmp_path / "agent.db"
     SQLiteAgentStore(db)
     SQLiteAgentStore(db)            # 幂等重放
-    assert AGENT_SCHEMA_VERSION == "006_discovery_events"
+    # 006 之后 M6 Task 6.5 接了 007（benchmark_runs），链尾随之前移——
+    # 本条断言钉的是「版本跟链尾走」，不是「链停在 006」。
+    assert AGENT_SCHEMA_VERSION == "007_benchmark_runs"
     conn = SQLiteAgentStore(db)._connect()
     try:
         tables = {r[0] for r in conn.execute(

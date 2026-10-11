@@ -47,6 +47,7 @@ def render_run_report(
     abort_reason: str | None = None,
     llm_broken: bool = False,
     experience_metrics=None,
+    agent_metrics=None,
 ) -> str:
     """14.5 首页。字段：Total / PASS / RECOVERED / FAIL / INFRA / ENV /
     BLOCKED、LLM 调用数、耗时、LLM Invocation Rate、WDA 重启次数。
@@ -56,6 +57,9 @@ def render_run_report(
     `experience_metrics`（Task 4.3 / 设计 17）：`report.experience_metrics`
     的 `ExperienceMetrics`，由调用方采集后注入——本模块保持「纯函数、不读库」
     （H18），采集归 `collect_experience_metrics`。
+
+    `agent_metrics`（Task 6.5 / 设计 §13.1）同款：`report.agent_metrics` 的
+    `AgentMetrics`，采集归 `collect_agent_metrics`；不给就不渲染该段。
     """
     s = run.summary
     counts = s.counts
@@ -121,6 +125,9 @@ def render_run_report(
             render_experience_metrics_section,
         )
         metrics_html = render_experience_metrics_section(experience_metrics)
+    if agent_metrics is not None:
+        from report.agent_metrics import render_agent_metrics_section
+        metrics_html += render_agent_metrics_section(agent_metrics)
 
     title = f"mta run 报告 — {run.run_id}"
     return f"""<!doctype html>

@@ -724,3 +724,44 @@ class SQLiteAgentStore:
                 "reviewed_at": row["reviewed_at"],
                 "review_note": row["review_note"],
                 "created_at": row["created_at"]}
+
+    # --- benchmark_runs（迁移 007；Task 6.5 / P3-30） ---------------------------
+
+    def save_benchmark_run(self, run_id: str, *, label: str,
+                           metrics) -> None:
+        """Benchmark 快照落库（`metrics_json` 整份存，不列展开——见 007 头注）。"""
+        payload = {
+            "cases": [vars(c) for c in metrics.cases],
+            "diagnosis_accuracy": metrics.diagnosis_accuracy,
+            "llm_path_ok": metrics.llm_path_ok,
+            "llm_calls": metrics.llm_calls,
+            "duration_ms": metrics.duration_ms,
+        }
+        with self._write_tx() as conn:
+            conn.execute(
+                "INSERT INTO benchmark_runs (run_id, label, metrics_json,"
+                " created_at) VALUES (?,?,?,?)",
+                (run_id, label, json.dumps(payload, ensure_ascii=False),
+                 _now()))
+
+    def latest_benchmark_run(self, label: str):
+        """某标签**最近一次**的 Benchmark 快照（compare 的寻行口径）；
+        没跑过 → None。返回 `agents.benchmark.BenchmarkResult`。"""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT metrics_json FROM benchmark_runs WHERE label=?"
+                " ORDER BY created_at DESC LIMIT 1", (label,)).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        from agents.benchmark import BenchmarkResult, CaseResult
+
+        payload = json.loads(row["metrics_json"])
+        return BenchmarkResult(
+            cases=tuple(CaseResult(**c) for c in payload["cases"]),
+            diagnosis_accuracy=payload["diagnosis_accuracy"],
+            llm_path_ok=payload["llm_path_ok"],
+            llm_calls=payload["llm_calls"],
+            duration_ms=payload["duration_ms"])

@@ -546,6 +546,47 @@ def build_parser() -> argparse.ArgumentParser:
                         default="simulator",
                         help="设备端别（诊断只读 trace，复现重跑在模拟器）")
 
+    # --- mta agent（Task 6.5 / P3-30：Agent Evaluation，设计 12/13 节）---
+    # `"agent"` 已在 AUTONOMOUS_COMMANDS（M1 预登记）——F7 启动期拒绝在
+    # `cmd_agent` 的第一行生效，与 plan/generate/explore/diagnose 同款。
+    agent_p = sub.add_parser(
+        "agent", help="Agent 自身评估（设计 13.2：benchmark run/compare；"
+                      "Agent 的质量回归检测，与 App 回归并列）")
+    agent_sub = agent_p.add_subparsers(dest="agent_cmd", required=True)
+    bench_p = agent_sub.add_parser("benchmark", help="Agent Benchmark 子命令")
+    bench_sub = bench_p.add_subparsers(dest="bench_cmd", required=True)
+    bench_run_p = bench_sub.add_parser(
+        "run", help="跑固定 7 类 case（离设备，F13）并存一行快照")
+    bench_run_p.add_argument("--label", metavar="TAG", default="bench",
+                             help="版本标签（compare 用它寻行；如 v1）")
+    bench_run_p.add_argument("--agent-db", metavar="PATH",
+                             default=str(DEFAULT_AGENT_DB),
+                             help="agent 库（benchmark_runs 表）")
+    bench_run_p.add_argument("--policy", metavar="PATH", default=None,
+                             help="policy.yaml 路径（缺省读默认路径）")
+    bench_run_p.add_argument("--env-kind", choices=["sandbox", "staging",
+                                                    "production"],
+                             default="sandbox",
+                             help="环境（F7：production 下自主命令不可用）")
+    bench_cmp_p = bench_sub.add_parser(
+        "compare", help="两版对比：关键指标下降超阈值 → AGENT_REGRESSION（exit 1）")
+    bench_cmp_p.add_argument("baseline", metavar="V1",
+                             help="基线版本标签")
+    bench_cmp_p.add_argument("candidate", metavar="V2",
+                             help="候选版本标签")
+    bench_cmp_p.add_argument("--threshold", metavar="F", type=float,
+                             default=0.05,
+                             help="关键指标下降阈值（初版 0.05）")
+    bench_cmp_p.add_argument("--agent-db", metavar="PATH",
+                             default=str(DEFAULT_AGENT_DB),
+                             help="agent 库（benchmark_runs 表）")
+    bench_cmp_p.add_argument("--policy", metavar="PATH", default=None,
+                             help="policy.yaml 路径（缺省读默认路径）")
+    bench_cmp_p.add_argument("--env-kind", choices=["sandbox", "staging",
+                                                    "production"],
+                             default="sandbox",
+                             help="环境（F7：production 下自主命令不可用）")
+
     # ⚠️ **不是**自主命令（不在 `AUTONOMOUS_COMMANDS`）：审核是人工命令，
     # 不过 F7 的启动环境闸（与 `mta review` 同款）。
     cand_p = sub.add_parser(
@@ -3167,6 +3208,69 @@ def _graph_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_agent(args: argparse.Namespace) -> int:
+    """`mta agent benchmark run|compare`（设计 §12/§13.2；Task 6.5 / P3-30）。
+
+    F7 前置在第一行（`"agent"` 在 `AUTONOMOUS_COMMANDS` 里，M1 预登记）。
+    退出码：run → 0（benchmark 是评估不是验收，跑完即成）；compare →
+    无回归 0 / **AGENT_REGRESSION 1**（供 CI 判定，设计原文）。
+    """
+    from agents.policy_config import load_policy
+
+    policy = (load_policy(args.policy) if args.policy is not None
+              else load_policy())
+    _check_autonomous_env(policy, env_kind=_resolve_env_kind(args),
+                          command="agent")
+
+    from agents.storage import SQLiteAgentStore
+
+    if args.agent_cmd != "benchmark":
+        print(f"agent: unknown subcommand {args.agent_cmd!r}")
+        return 2
+    if args.bench_cmd == "run":
+        from agents.benchmark import run_benchmark
+
+        store = SQLiteAgentStore(args.agent_db)
+        result = run_benchmark(store=store, label=args.label)
+        print(f"benchmark: {len(result.cases)} 类 case，"
+              f"diagnosis_accuracy={result.diagnosis_accuracy:.3f} "
+              f"llm_path_ok={result.llm_path_ok} "
+              f"llm_calls={result.llm_calls} "
+              f"duration={result.duration_ms:.1f}ms")
+        for c in result.cases:
+            mark = "PASS" if c.correct else "FAIL"
+            print(f"  {mark} {c.case_id}: expected={c.expected} got={c.got}")
+        print(f"snapshot: label={args.label} → {args.agent_db}"
+              f"（benchmark_runs）")
+        return 0
+    if args.bench_cmd == "compare":
+        store = SQLiteAgentStore(args.agent_db)
+        baseline = store.latest_benchmark_run(args.baseline)
+        candidate = store.latest_benchmark_run(args.candidate)
+        if baseline is None or candidate is None:
+            missing = (args.baseline if baseline is None
+                       else args.candidate)
+            print(f"AGENT BENCHMARK ERROR: 标签 {missing!r} 没有快照——"
+                  f"先 `mta agent benchmark run --label {missing}`")
+            return 3
+        from agents.benchmark import compare_benchmarks
+
+        regressions = compare_benchmarks(baseline, candidate,
+                                         threshold=args.threshold)
+        print(f"compare: {args.baseline} → {args.candidate} "
+              f"accuracy {baseline.diagnosis_accuracy:.3f} → "
+              f"{candidate.diagnosis_accuracy:.3f}（阈值 {args.threshold}）")
+        if regressions:
+            print("AGENT_REGRESSION")
+            for r in regressions:
+                print(f"  - {r}")
+            return 1
+        print("无回归")
+        return 0
+    print(f"agent: unknown benchmark subcommand {args.bench_cmd!r}")
+    return 2
+
+
 def cmd_graph(args: argparse.Namespace) -> int:
     """设计 13 节的 `mta graph` 子命令组（Task 5.3）。
 
@@ -3198,6 +3302,8 @@ def main(argv: Sequence | None = None) -> int:
         return cmd_explore(args)
     if args.command == "diagnose":
         return cmd_diagnose(args)
+    if args.command == "agent":
+        return cmd_agent(args)
     if args.command == "candidate":
         return cmd_candidate(args)
     if args.command == "repo":
