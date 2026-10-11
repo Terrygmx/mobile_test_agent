@@ -155,9 +155,10 @@ NOT_WIRED: dict[str, str] = {
     # 代理/埋点——三者都要**新写采集与落库**，本批不做（决策②：单独一批）。
     # 不给它们编一个「读本地文件假装有日志」的实现：返回空结果会让诊断把
     # 「没采到」读成「App 没报错」。
-    "get_logs": "缺设备侧日志采集器（WDA syslog / idevicesyslog → 落盘 → 索引）",
-    "get_network_summary": "缺网络观测层（无代理/埋点，backend_evidence 至今没有真实生产者）",
-    "get_crash_info": "缺崩溃报告取回通路（.ips/.crash 落盘与索引，与 syslog 同一批做）",
+    "get_network_summary": "**本技术栈不可实现**（用户拍板登记为设计缺口，"
+                           "2026-10-11）：没有代理层、WDA 不暴露网络端点、"
+                           "宿主级 MITM 会改被测环境的运行方式（与 F2/F7 冲突）。"
+                           "勘察见 docs/p3_data_audit.md §8.4——这是缺口不是欠账",
     # 执行类入口：⚠️ **不是**「没人接线」，而是**工具本体没有默认实现**。
     # 生产路径由调用方注入回调绕开本体——`diagnosis/reproducer.py::_run_once`
     # 优先用注入的 `runner`（`cli/main.py::_run_reproduction` 注入基于
@@ -268,6 +269,8 @@ class AgentToolkit:
     | `knowledge` | `get_relevant_experience` / `get_graph_neighbors`（F3） |
     | `source_metadata` | `get_relevant_source`（注入的映射，非检索口） |
     | `secrets` + `repository` | `create_test_candidate`（F5 的 lint 需要） |
+    | `log_collector` | `get_logs`（`telemetry.SyslogCollector`） |
+    | `crash_collector` + `app_id` | `get_crash_info`（`telemetry.CrashCollector`） |
 
     ⚠️ `screenshot_dir` 默认 `"out/screenshots"` 是**相对 CWD**——与
     `DEFAULT_POLICY_PATH` / `suites` / `out/trace.db` 同款（本项目 P1 起的约定）。
@@ -278,6 +281,7 @@ class AgentToolkit:
                  assertion_engine=None, experience_store=None,
                  agent_db=None, task_id: str | None = None,
                  knowledge=None, source_metadata=None, secrets=None,
+                 log_collector=None, crash_collector=None, app_id: str = "",
                  build: str = "local",
                  screenshot_dir: str | Path = "out/screenshots") -> None:
         self.guard = guard
@@ -298,6 +302,11 @@ class AgentToolkit:
         self.knowledge = knowledge
         self.source_metadata = source_metadata
         self.secrets = secrets
+        # Batch B：设备侧证据的两个采集器（`telemetry/`）。工具层**不碰
+        # subprocess**（F13）——采集器是注入的，测试喂替身。
+        self.log_collector = log_collector
+        self.crash_collector = crash_collector
+        self.app_id = app_id
         self.build = build
         self.screenshot_dir = Path(screenshot_dir)
 
@@ -519,14 +528,41 @@ class AgentToolkit:
         return {"screen": screen, "direction": direction,
                 "trigger": transition.trigger, "count": transition.count}
 
-    def _tool_get_logs(self, **kw):
-        raise ToolNotWired(NOT_WIRED["get_logs"])
+    def _tool_get_logs(self, *, seconds: int = 300, **kw) -> dict:
+        """App 日志（经注入的 `SyslogCollector`）。
+
+        ⚠️ 缺采集器 → `ToolDependencyError`，**不是空列表**：「没注入采集器」
+        与「App 没打日志」是两件事，而后者是**证据性结论**（诊断据此说
+        「日志干净」）——空列表会让两者长得一模一样。
+        """
+        self._need(log_collector=self.log_collector)
+        lines = self.log_collector.since(seconds=seconds)
+        return {"seconds": seconds, "count": len(lines),
+                "logs": [ln.as_dict() if hasattr(ln, "as_dict") else ln
+                         for ln in lines]}
 
     def _tool_get_network_summary(self, **kw):
         raise ToolNotWired(NOT_WIRED["get_network_summary"])
 
-    def _tool_get_crash_info(self, **kw):
-        raise ToolNotWired(NOT_WIRED["get_crash_info"])
+    def _tool_get_crash_info(self, *, since=None, **kw) -> dict:
+        """App 崩溃报告（经注入的 `CrashCollector`）。
+
+        **`crashed=False` 是结论不是失败**：返回 `ok=True` + `report=None`，
+        而不是 `ok=False`——后者会让诊断把它读成「采集失败」而不敢下结论。
+        `crash_detected`（权重 5）的否定证据正是这个 False。
+        """
+        self._need(crash_collector=self.crash_collector)
+        # ⚠️ `app_id` 走**单独一句**而不是并进 `_need`：`_need` 的判据是
+        # `is None`，而 `app_id` 的「没给」是**空串**（构造缺省）——并进去
+        # 会让空串静默通过，然后 `latest("")` 恒 None，表现成「App 从没崩过」。
+        if not self.app_id:
+            raise ToolDependencyError(
+                "get_crash_info 需要 app_id（崩溃报告按 bundle 过滤）——"
+                "构造 AgentToolkit 时给 `app_id=`。**不静默返回「没崩」**："
+                "那会把「不知道查哪个 App」伪装成一个证据性结论。")
+        rep = self.crash_collector.latest(self.app_id, since=since)
+        return {"crashed": rep is not None, "bundle_id": self.app_id,
+                "report": rep.as_dict() if rep is not None else None}
 
     # ======================================================================
     # 执行（10）—— 经 Guard（GUARDED_TOOLS）

@@ -174,11 +174,13 @@ def test_wired_and_not_wired_partition_the_allowlist():
     assert wired | set(NOT_WIRED) == set(ALLOWED_TOOLS)
     assert not (wired & set(NOT_WIRED))
     # Task 4.5 接线 create_discovery_event（M4）→ 12/10；
-    # Task 6.7 接线 3 知识 + 2 提案（P3-32）→ 17/5。剩的 5 个是 3 个
-    # **没有数据源**的诊断读取 + 2 个**无默认执行上下文**的重跑入口
+    # Task 6.7 接线 3 知识 + 2 提案（P3-32）→ 17/5；
+    # Batch B 接线 2 个**有数据源**的诊断读取（get_logs / get_crash_info）
+    # → 19/3。剩的 3 个：1 个本技术栈不可实现（get_network_summary，
+    # 设计缺口，用户拍板登记）+ 2 个无默认执行上下文的重跑入口
     # （逐条说明见 NOT_WIRED）。每次接线一个工具都要改这一行
     # （这正是它该有的行为：数字是手抄的，改不动就说明有人悄悄动了工具表）。
-    assert len(wired) == 17 and len(NOT_WIRED) == 5
+    assert len(wired) == 19 and len(NOT_WIRED) == 3
 
 
 def test_guarded_tools_are_a_subset_of_the_allowlist():

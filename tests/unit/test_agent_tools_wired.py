@@ -21,6 +21,7 @@ import pytest
 
 from agents.tools import (NOT_WIRED, AgentToolkit, ToolDependencyError,
                           ToolNotWired)
+from telemetry.collectors import LogLine
 from executor.guard import EnvKind, Guard
 from tests.fault_injection.fi_support import FakeExecutor, drift_repo
 
@@ -293,10 +294,12 @@ def test_create_bug_candidate_is_reproducible_evidence_not_a_verdict(store):
 # ======================================================================
 
 
-def test_not_wired_shrinks_to_the_five_with_no_data_source():
+def test_not_wired_shrinks_to_the_three_with_no_data_source():
+    """Batch B 之后只剩 3 个：1 个**本技术栈不可实现** + 2 个**无默认执行
+    上下文**。两者都不是「还没做」，所以 `NOT_WIRED` 的语义从「欠账清单」
+    变成了「**为什么不该接**的说明」——这正是决策③「列出不猜」要的形态。"""
     assert set(NOT_WIRED) == {
-        "get_logs", "get_network_summary", "get_crash_info",
-        "run_testcase", "run_candidate_test"}
+        "get_network_summary", "run_testcase", "run_candidate_test"}
 
 
 def test_every_not_wired_entry_names_a_real_remaining_debt():
@@ -324,3 +327,85 @@ def test_the_three_five_now_really_run_and_the_rest_still_refuse(repo):
     for tool in sorted(NOT_WIRED):
         with pytest.raises(ToolNotWired):
             tk.call(tool)
+
+
+# ======================================================================
+# 5. Batch B：两个**有数据源**的诊断读取接线
+# ======================================================================
+
+
+def test_get_logs_goes_through_the_injected_collector():
+    """`get_logs` 经注入的采集器（F13：工具层不碰 subprocess）。
+
+    ⚠️ 缺依赖 → `ToolDependencyError`，**不是空列表**：「没注入采集器」与
+    「App 没打日志」是两件事，后者是**证据性结论**（诊断据此说「日志干净」）。
+    """
+    class _Col:
+        def __init__(self):
+            self.calls = []
+
+        def since(self, *, seconds):
+            self.calls.append(seconds)
+            return [LogLine(timestamp="t", level="Error", subsystem="s",
+                            category="c", message="boom")]
+
+    from telemetry.collectors import LogLine
+    col = _Col()
+    tk = _tk(log_collector=col)
+    res = tk.call("get_logs", seconds=120)
+    assert res.ok is True and res.guard is None       # 只读组不经 Guard
+    assert res.value["logs"][0]["message"] == "boom"
+    assert col.calls == [120]
+
+
+def test_get_logs_fails_loud_without_a_collector():
+    from agents.tools import ToolDependencyError
+    with pytest.raises(ToolDependencyError):
+        _tk().call("get_logs", seconds=60)
+
+
+def test_get_crash_info_returns_the_report_since_a_time():
+    from datetime import datetime, timezone
+    from telemetry.collectors import CrashReport
+
+    class _Col:
+        def __init__(self):
+            self.calls = []
+
+        def latest(self, bundle_id, *, since=None):
+            self.calls.append((bundle_id, since))
+            return CrashReport(path="/x/a.ips", bundle_id=bundle_id,
+                               timestamp="t", incident_id="I", 
+                               exception_type="EXC_CRASH", signal="SIGSEGV",
+                               termination="Segfault", faulting_thread=0,
+                               top_frame="main")
+
+    col = _Col()
+    tk = _tk(crash_collector=col, app_id="com.demo")
+    res = tk.call("get_crash_info")
+    assert res.value["crashed"] is True
+    assert res.value["report"]["signal"] == "SIGSEGV"
+    assert col.calls[0][0] == "com.demo"
+
+
+def test_get_crash_info_says_not_crashed_rather_than_failing():
+    """**没崩是结论不是错误**——`crashed=False` 是 `crash_detected` 的否定
+    证据（返回 `ok=False` 会让诊断把它读成「采集失败」而不敢下结论）。"""
+    class _Col:
+        def latest(self, bundle_id, *, since=None):
+            return None
+
+    res = _tk(crash_collector=_Col(), app_id="com.demo").call("get_crash_info")
+    assert res.ok is True and res.value["crashed"] is False
+    assert res.value["report"] is None
+
+
+def test_get_crash_info_fails_loud_without_a_collector_or_app_id():
+    from agents.tools import ToolDependencyError
+    with pytest.raises(ToolDependencyError):
+        _tk(app_id="com.demo").call("get_crash_info")     # 缺 collector
+    class _Col:
+        def latest(self, bundle_id, *, since=None):
+            return None
+    with pytest.raises(ToolDependencyError):
+        _tk(crash_collector=_Col()).call("get_crash_info")  # 缺 app_id
