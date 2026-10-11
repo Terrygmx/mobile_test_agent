@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -534,6 +535,14 @@ def build_parser() -> argparse.ArgumentParser:
     diag_p.add_argument("--repo-root", metavar="DIR", default=".",
                         help="git 仓库根（`--base-build` 的 source_change 取"
                              "它上面的 git diff）")
+    # Batch B（设计 §8.1 的「App/Crash/Network Logs」）：**调用方取好的原始
+    # 材料**（与 `build_context` 的形参口径一致）。**不自动采集**——`diagnose`
+    # 是离线命令，自动采会让它隐式连设备；采集由 `mta run` 侧或人工给。
+    diag_p.add_argument("--logs", metavar="FILE", default=None,
+                        help="App 日志文件（每行一条；采集见 telemetry/"
+                             "collectors.py 的 SyslogCollector）")
+    diag_p.add_argument("--crash-report", metavar="FILE", default=None,
+                        help="崩溃报告 .ips 文件（App 崩溃的判定证据）")
     diag_p.add_argument("--no-llm", action="store_true",
                         help="禁用 LLM（规则无结论时不补假设，确定性半边照常）")
     diag_p.add_argument("--policy", metavar="PATH", default=None,
@@ -798,6 +807,68 @@ def _metadata_path(args: argparse.Namespace) -> Path:
         return Path(explicit)
     return Path(getattr(args, "generated", None)
                 or "repository/generated/local") / "source_metadata.json"
+
+
+def _read_infra_events(trace_db: str | Path, run_id: str) -> tuple:
+    """该 run 的 `infra_events` 行（dict 元组）——诊断的输入材料之一。
+
+    **库不存在 / 读不到 → 空元组**（不是错误）：`diagnose` 的前置错误已经由
+    「该 run 取不到任何步骤」那条给出，这里再炸一次只会把同一个前置问题报两遍。
+    空元组是**如实的**：「没有 infra 事件」。
+    """
+    import sqlite3
+
+    if not Path(trace_db).exists():
+        return ()
+    try:
+        conn = sqlite3.connect(str(trace_db))
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT event_type, step_index, timestamp, detail_json"
+                " FROM infra_events WHERE run_id=?", (run_id,)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError:
+        # 库在但没初始化（没有 infra_events 表）→ 如实空，前置错误由别处报
+        return ()
+    out = []
+    for r in rows:
+        item = {"event_type": r["event_type"], "step_index": r["step_index"],
+                "timestamp": r["timestamp"]}
+        if r["detail_json"]:
+            try:
+                item["detail"] = json.loads(r["detail_json"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        out.append(item)
+    return tuple(out)
+
+
+def _read_log_file(path: str | Path | None) -> tuple:
+    """`--logs`：每行一条（原样保留，不解析——`LogLine` 的解析留给需要结构化
+    的调用方；诊断规则读的是文本）。
+
+    文件不存在 / 没给 → 空元组。**给了但读不到 → 前置错误**（`PreflightError`
+    的调用方语义）：用户明确指了一个文件，读不到就是配置错，不该静默变空。
+    """
+    if path is None:
+        return ()
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"--logs 指的文件不存在：{p}")
+    return tuple(p.read_text(encoding="utf-8", errors="replace").splitlines())
+
+
+def _read_crash_report_file(path: str | Path | None) -> dict:
+    """`--crash-report`：解析一份 `.ips`（两段式，`telemetry.collectors`）。"""
+    if path is None:
+        return {}
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"--crash-report 指的文件不存在：{p}")
+    from telemetry.collectors import parse_crash_report
+    return parse_crash_report(p.read_text(encoding="utf-8")).as_dict()
 
 
 def _trace_app_id(trace_db: str | Path) -> str:
@@ -1107,6 +1178,19 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"PREFLIGHT ERROR: 设备会话建立失败：{e}")
         print("run: exit 3")
         return 3
+
+    # 1b. Batch B（设计 P1 §8.2 的第三条信号）：崩溃探测。
+    #     ⚠️ **只真机注入**——fake-driver 没有设备也没有 bundle，注入一个
+    #     探不到东西的探针只会白等 12 秒且恒 None（等于没接线却看起来接了）。
+    #     注入后，`except InfraError` 处多问一句「App 崩了吗」，是则记
+    #     `APP_CRASH`（否则 `crash_detected` 权重 5 恒 False，App 崩溃被记成
+    #     基础设施故障——缺陷见 `docs/p3_data_audit.md` §8.3）。
+    if not args.fake_driver and args.bundle_id:
+        from telemetry.collectors import CrashCollector
+        from telemetry.probe import CrashProbe
+
+        pipeline.crash_probe = CrashProbe(
+            collector=CrashCollector(), bundle_id=args.bundle_id)
 
     # 2. 跑（P3-5：统一走 run_all——H10 中止语义/未执行清单只在套件层可达）
     try:
@@ -2003,11 +2087,29 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
         base_graph = GraphStore(args.graph_db).load_graph(
             app_id, args.base_build, SOURCE)
 
+    # 3b. Batch B（设计 §8.1 的「App/Crash/Network Logs」）：三条**原始材料**。
+    #     ⚠️ `infra_events` 一直是 `build_context` 的形参，但**这个调用点从来
+    #     没传过它**——于是 `crash_detected` 的第二条判据（infra 崩溃事件）
+    #     在真机上永远拿不到输入。这类「形参存在、调用点漏了」的缺口单测
+    #     看不见（单测自己传参当然绿），故有 `test_cli_diagnose.py` 的
+    #     调用点级钉子。
+    infra_events = _read_infra_events(args.db, args.run_id)
+    try:
+        logs = _read_log_file(args.logs)
+        crash_info = _read_crash_report_file(args.crash_report)
+    except FileNotFoundError as e:
+        # 用户**明确指了**一个文件却读不到 = 前置配置错（exit 3 的干净通道，
+        # 与 `--db` 指向坏库同款处置）；与「没给这个旗标」（如实空）严格区分。
+        print(f"PREFLIGHT ERROR: {e}")
+        print("diagnose: exit 3")
+        return 3
+
     # 4. 装配诊断上下文（F3：全部经 knowledge）。
     try:
         ctx = build_context(
             knowledge=knowledge, run_id=args.run_id, app_id=app_id,
-            app_build=app_build, base_graph=base_graph)
+            app_build=app_build, base_graph=base_graph,
+            infra_events=infra_events, logs=logs, crash_info=crash_info)
     except DiagnosisContextError as e:
         print(f"PREFLIGHT ERROR: 建不了诊断上下文：{e}")
         print("diagnose: exit 3")

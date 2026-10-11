@@ -415,3 +415,80 @@ def test_human_reject_needs_a_note(proj, capsys):
     with pytest.raises(SystemExit):
         main(["candidate", "review", "reject", cid, "--kind", "bug",
               "--db", str(proj["agent_db"])])
+
+
+# --- 6. Batch B：证据进得了诊断上下文 -----------------------------------------
+
+
+def test_diagnose_feeds_infra_events_into_the_context(proj, monkeypatch):
+    """**Batch B 的接线**：`crash_detected` 的第二条判据要 `infra_events`，
+    而 `cmd_diagnose` 从来**没传过**它（`build_context` 的形参一直存在，
+    调用点漏了）。
+
+    这条走**真 CLI**（不是 `build_context` 单测）——单测传了参数当然绿，
+    漏的是调用点。**判据钉在调用点上**（`test_diagnosis_models.py` 那批
+    单测对此完全无感）。
+    """
+    _seed_crash_run(proj["trace_db"])
+    store = TraceStore(str(proj["trace_db"]))
+    store.record_infra_event("run_crash", None, "WDA_DEAD")
+    captured = {}
+    import diagnosis.context as dctx
+    real = dctx.build_context
+
+    def _spy(**kw):
+        captured.update(kw)
+        return real(**kw)
+
+    monkeypatch.setattr(dctx, "build_context", _spy)
+    import cli.main as m
+    monkeypatch.setattr(m, "build_context", _spy, raising=False)
+    main(_argv(proj))
+    assert captured.get("infra_events"), (
+        "cmd_diagnose 必须把该 run 的 infra_events 喂给 build_context"
+        "——crash_detected 的第二条判据靠它")
+
+
+def test_diagnose_reports_the_logs_and_crash_it_collected(proj, monkeypatch):
+    """`--logs` 与 `--crash-report`：调用方取好的原始材料（`build_context`
+    的形参口径）。给了就进上下文，不给就是空——**不自动去采**（采集要设备，
+    `diagnose` 是离线命令；自动采会让离线命令隐式连设备）。
+    """
+    _seed_crash_run(proj["trace_db"])
+    captured = {}
+    import diagnosis.context as dctx
+    real = dctx.build_context
+
+    def _spy(**kw):
+        captured.update(kw)
+        return real(**kw)
+
+    import cli.main as m
+    monkeypatch.setattr(m, "build_context", _spy, raising=False)
+    monkeypatch.setattr(dctx, "build_context", _spy)
+    log_file = proj["tmp"] / "app.log"
+    log_file.write_text('{"message": "boom"}\n', encoding="utf-8")
+    ips = proj["tmp"] / "LoginDemo-2026-10-11-200000.ips"
+    from tests.unit.test_telemetry_collectors import _ips
+    ips.write_text(_ips(), encoding="utf-8")
+    assert main(_argv(proj, "--logs", str(log_file),
+                      "--crash-report", str(ips))) == 0
+    assert captured.get("logs"), "给了 --logs 就必须进上下文"
+    assert captured.get("crash_info", {}).get("signal") == "SIGSEGV"
+
+
+def test_a_missing_logs_file_is_a_clean_preflight_error(proj, capsys):
+    """用户**明确指了**一个文件却读不到 = 配置错，该走 exit 3 的干净通道
+    （不是 traceback）。与「没给 `--logs`」（如实空）严格区分。"""
+    _seed_crash_run(proj["trace_db"])
+    code = main(_argv(proj, "--logs", str(proj["tmp"] / "nope.log")))
+    out = capsys.readouterr().out
+    assert code == 3 and "Traceback" not in out, out
+    assert out.startswith("PREFLIGHT ERROR:")
+
+
+def test_a_missing_crash_report_is_a_clean_preflight_error(proj, capsys):
+    _seed_crash_run(proj["trace_db"])
+    code = main(_argv(proj, "--crash-report", str(proj["tmp"] / "nope.ips")))
+    out = capsys.readouterr().out
+    assert code == 3 and "Traceback" not in out, out
