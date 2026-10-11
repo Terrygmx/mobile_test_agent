@@ -1,0 +1,51 @@
+.venv/
+__pycache__/
+*.pyc
+out/
+.idea/
+*.xcodeproj/project.xcworkspace/
+*.xcodeproj/xcuserdata/
+.DS_Store
+.codegraph/
+
+# 助手工作区数据（项目记忆/日志）——非工程产物，不入库
+.workbuddy-ai/
+
+# M3 generated 产物：local build 不入库（时间戳/git_commit 每次生成必变，
+# 常驻 dirty——review P3-4 拍板）。release/staging build 的 generated/
+# 仍可入库；CI 自行 regenerate local。
+repository/generated/local/
+
+# 12.5 p1-build 产物（LoginDemo 注入构建；verify_p1_task33 可重跑再生）
+build/
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+node_modules/
+bower_components/
+jspm_packages/
+site-packages/
+venv/
+coverage/
+htmlcov/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.egg-info/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）
