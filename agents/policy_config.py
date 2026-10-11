@@ -171,10 +171,17 @@ class ExplorationPolicy(_Frozen):
 
 
 class EscalationPolicy(_Frozen):
-    """设计 §9.2：连续 N 次决策被 Guard 拦截 → `ESCALATED`。"""
+    """设计 §9.2：ESCALATED 的两个连续计数阈值（校准只改 policy.yaml 一处）。
+
+    - `guard_blocks_before_escalate`：连续 N 次决策被 Guard 拦截 → ESCALATED；
+    - `llm_invalid_before_escalate`（Task 6.1 / P3-26 加）：连续 N 次
+      LLM_INVALID_OUTPUT → ESCALATED。设计只点名了前者的「N 来自 policy」，
+      后者同为「初版值待校准」，同段同待遇。
+    """
 
     guard_blocks_before_escalate: int = Field(
         default=GUARD_BLOCKS_BEFORE_ESCALATE, ge=0)
+    llm_invalid_before_escalate: int = Field(default=2, ge=0)
 
 
 class EvidencePolicy(_Frozen):

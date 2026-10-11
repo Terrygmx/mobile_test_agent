@@ -109,10 +109,27 @@ class SQLiteAgentStore:
     def update_task_state(self, task_id: str, state: AgentState | str,
                           *, outcome: str | None = None,
                           end_time: str | None = None) -> None:
+        """任务状态落库——**强制走转换表**（Task 6.1 / P3-26；设计 §9.2）。
+
+        词表校验（只接受九态）+ **转换合法性**（目标必须是当前态的合法后继，
+        判据来自 `agents/state.py::AGENT_TRANSITIONS` 的**同一张表**——这里
+        不写第二份，两处漂移才是状态机最大的风险）。非法转换 fail-loud，
+        数据库不被改动（校验在 `with` 之前）。
+        """
+        from agents.state import successors
+
         state_value = state.value if isinstance(state, AgentState) else state
         if state_value not in {s.value for s in AgentState}:
             raise ValueError(
                 f"state 只接受 AgentState 枚举值，got {state_value!r}")
+        current = self.get_task(task_id)
+        if current is not None and state_value not in {
+                s.value for s in successors(current.state)}:
+            legal = ", ".join(sorted(s.value for s in successors(current.state)))
+            raise ValueError(
+                f"非法状态转换：task {task_id} 当前 {current.state.value} → "
+                f"{state_value}（合法后继：{legal or '无——终态'}；"
+                f"转换表见 agents/state.py）")
         with self._write_tx() as conn:
             cur = conn.execute(
                 "UPDATE agent_tasks SET state=?, outcome=COALESCE(?, outcome),"

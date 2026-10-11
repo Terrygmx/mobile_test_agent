@@ -28,8 +28,12 @@ exploration:
   max_repeated_state: 3        # 复用 P2 screen_fingerprint 判定「重复状态」（F8）
 
 # 设计 §9.2：ESCALATED 的触发条件之一 = 连续 N 次决策被 Guard 拦截。
+# `llm_invalid_before_escalate`（Task 6.1 / P3-26，初版值登记）：连续 N 次
+# LLM_INVALID_OUTPUT → ESCALATED（§9.2 的第四个触发；N 与 guard_blocks 同段，
+# 校准只改这一处）。
 escalation:
   guard_blocks_before_escalate: 3
+  llm_invalid_before_escalate: 2
 
 # 设计 §5.2：priority_score 的三个分量权重。⚠️ **设计没给数值**（只说「初版，
 # 需在真实数据上校准」）——这里取一组可解释的初值，Task 2.2 消费，校准后回填设计。
