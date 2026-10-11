@@ -346,9 +346,20 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
   遗留的**显性不做 / 未闭项**：① 翻案通道（沿 3.5 拍板）；② `screen_id` 的
   trace 数据源缺口（用户拍板登记偏离）；③ 模型路由（设计 §9.4 移出核心里程碑）；
   ④ Evidence Bundle 的外部系统对接（沿 M5 open question #1）；
-  ⑤ `reproduce` 的 `runner` 回调仍是 `cli/main.py` 里手工注入，应改走
-  `AgentToolkit.run_testcase`；⑥ testcase 的 `postcondition` 声明要并进
-  `StepProbe`。
+  ⑤ `reproduce` 的 `runner` 回调仍是 `cli/main.py::cmd_diagnose` 里手工注入
+  （`_run_reproduction`），应改走 `AgentToolkit.run_testcase`；
+  ⑥ **工具表仍有 10 个「已注册未接线」**（`agents/tools.py::NOT_WIRED`，
+  22 个允许工具里 12 个已接线）：`get_relevant_source` /
+  `get_relevant_experience` / `get_graph_neighbors`（标着「Task 2.2」，M2 早已
+  过去——M6 的 `agents/context.py::build_agent_context` 已经把同样的四个查询
+  经 `KnowledgeSources` 做出来了，接线是现成的）、`get_logs` /
+  `get_network_summary` / `get_crash_info`（标着「M5」）、`run_testcase` /
+  `run_candidate_test` / `create_test_candidate` / `create_bug_candidate`
+  （标着「M4/M6」）。这是本仓「**声称的能力必须有落点**」纪律下最实在的一段
+  欠账：`call()` 对它们明确报错不静默，所以不是假绿，但确实是没做完。
+  ⚠️ 顺带更正本条旧账：testcase 的 `postcondition` **已经**并进 `StepProbe`
+  （`diagnosis/reproducer.py` 的 `has_postcondition` / `postcondition`，
+  `cli/pipeline.py` 侧按 `step_index` 取用例声明），M5 之前记的这条待办已过时。
 - **待拍板的三项**（沿用，均**未闭**）：① `screen_id` 过滤的数据源缺口
   （`docs/p3_data_audit.md` Task 2.2）——M6 Task 6.3 已就此**登记偏离**并保持
   登记（用户拍板 2026-10-11）：`relevant_history` 改用 app_build + limit 可用键，
