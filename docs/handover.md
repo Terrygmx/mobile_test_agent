@@ -195,7 +195,7 @@ env PYTHONPATH=. CODEBUDDY_BROKERED_FS_HOOK_ENABLED=0 CODEBUDDY_SAFE_DELETE_SAND
 
 ## 9. 当前状态快照（**2026-10-11**，以实测为准）
 
-- **分支 / HEAD**：`P4-1011` / **`04b4c4a`**（**M1–M6 全部收口**，其上又叠了 Task 6.7
+- **分支 / HEAD**：`P4-1011` / **`2b621db`**（**M1–M6 全部收口**，其上又叠了 Task 6.7
   「工具层接线补齐」、Batch B「设备侧证据采集 + `APP_CRASH` 判定」、Batch B 修正
   （§10 崩溃判定覆盖所有失败出口）、以及 §11「步骤行兜底 + 扩词表」；
   里程碑 tag `checkpoint-p3-m6` = `f63b381` **不可动**）
