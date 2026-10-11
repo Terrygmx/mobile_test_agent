@@ -3226,3 +3226,58 @@ git 2.54 实测，其他版本可能不同。
   延迟/条件求值写法时守卫默认放行。
 - **读侧不许有默认值**：写侧"唯一路径"收口了，读侧一个 `or "PENDING"` 就能把
   「已决」洗成「未决」，从而绕过全部领域校验。**同一列两侧的宽严必须对称**。
+
+---
+
+## Task 4.1 完成记录（P3-14 Explorer Loop 骨架 + Guard 接入，2026-10-11）
+
+**M4 第一个任务**；也是 **M4∥M5 交错开发**的第一批（用户拍板：单会话交错——
+无共享面的任务交错推进，共享面 migrations/review kind/CLI/storage 按序集中落，
+迁移取 005/006，plan 写的 003/004 已被 M3 占用）。
+
+### 交付
+
+- `explorer/__init__.py` / `explorer/policy.py` / `explorer/agent.py`：
+  observe → decide → guard → execute → verify 主循环，每步落 `agent_trace`
+  （observation 带前后屏与指纹、decision 带风险预判、guard_result 带裁决）。
+- `tests/unit/test_explorer_guard.py` **10 例**。
+
+### 决策记录
+
+1. **探索侧 LOW-only 闸的拦截点在 explorer 循环，不在 P1 Guard**：P1 Guard
+   在 sandbox **放行 HIGH**（人工用例的合法空间）——初版探针实测
+   `pay_button(HIGH)` 被 explorer 放进 toolkit 执行了。设计 7.1「LOW 才允许
+   自动执行」的裁决点因此在探索侧（同一个 `effective_risk` 本体判定，F1）；
+   **CRITICAL / blocked_targets / production 仍由 toolkit 内建 Guard 兜底**
+   （探针里 CRITICAL 用例保持绿 = 分层成立）。两层各管一段，BLOCK 审计各自
+   留痕：HIGH → explorer 步骤记录 1 条；CRITICAL → toolkit audit + 步骤记录
+   2 条（口径登记）。
+2. **复用断言三件**：`explorer.policy.effective_risk is executor.policy.
+   effective_risk`（import 级）；explorer 包唯一放行的 `executor.*` import 是
+   `executor.policy`（**AST 守卫**——判据钉结构不钉文本，P2-D「docstring 能
+   满足守卫」教训的直接应用）；`Explorer` 构造只收 `AgentToolkit`（F12 类型
+   断言），且 `agent_db`/`task_id` 必填（无审计通路的探索不许启动）。
+3. **decider 是注入回调** `(observation, graph, visited) -> ProposedAction |
+   None`：4.2 的 frontier 选择 = 换一个 decider 构造器，循环本体不动。
+4. **终态词表 4.1 只有 `COMPLETED`**：FRONTIER_EMPTY / `*_BUDGET_EXCEEDED` /
+   LOOP_DETECTED 由 4.2/4.3/4.4 各自增量加（不提前占词——每项有自己的测试
+   与矩阵行）。
+5. **verify 降级而非中断**：post-observe 失败不否定已执行的动作，记空后继续
+   （pre-observe 失败才 `ExplorationError` fail-loud——没有观测就没有 decide
+   的输入）。
+
+### 实测
+
+- 全量 pytest **1876 passed / 0 failed**（1866 + 10）。
+- **A/B 探针**：架空 LOW-only 闸（`if False and …`）→ **1 red**（HIGH 用例；
+  CRITICAL 由 toolkit Guard 独立兜住仍绿——两层判据各自可独立探针）；还原后
+  10 passed + `git diff --stat` 空。
+- 过程由测试抓到的真问题 1 处：初版把 HIGH 拦截寄托在 toolkit Guard 上，
+  sandbox 下 Guard 规则不拦 HIGH（见决策 1）——先红后绿的流程当场暴露。
+
+### 教训（已并入 MEMORY §5）
+
+- **同一个 Guard 函数服务两种授权模型时，授权差异要落在各自入口**：P1 Guard
+  的 sandbox HIGH 放行是**人工用例**的空间；自主 Agent 不能借这个口子。指望
+  「Guard 会替我拦」而不核对 Guard 的实际规则，拦截就是假的。
+
