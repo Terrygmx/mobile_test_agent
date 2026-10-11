@@ -4500,3 +4500,66 @@ A/B 探针才告诉你断言够不够」。
 | A/B 探针 | 19/19 如实变红 |
 | 新增文件 | `agents/{state,base,context,manager,benchmark}.py`、`subagents/`（3 个薄封装）、`report/agent_metrics.py`、`agents/migrations/007_benchmark_runs.sql`、`phase0/verify_p3_final.py`、`docs/p3_demo_record.md` |
 | 新增测试 | 6 个文件 / 59 条 |
+
+---
+
+## 7. Task 6.7 / P3-32 —— 工具层接线补齐（3 知识 + 2 提案）
+
+**背景**：M1 建了 22 个工具，只接了 12 个。`NOT_WIRED` 表是「哪些还没有」
+的可读清单，但它**点名等的是已完成的里程碑**——写「等 Task 2.2」「等 M5」
+「等 M4/M6」时它们还没接线，指望它们交付是不成立的。这张表因此一直在说谎，
+而说谎的代价是每次读它的人都得重新核实一遍（本次核实结论：那 10 个里
+**5 个现在能接、3 个没有数据源、2 个不该接**）。
+
+### 7.1 接线 5 个
+
+| 工具 | 依赖 | 关键口径 |
+|---|---|---|
+| `get_relevant_experience` | `knowledge` | F3：走 `KnowledgeSources.experience_lookup`，测试用**计数替身**钉住（不是「结果对就算」） |
+| `get_graph_neighbors` | `knowledge` | 同一张图，本地过滤出边+入边；`in_graph=False` 与「在图里没边」严格区分 |
+| `get_relevant_source` | `source_metadata` | ⚠️ **不走** `KnowledgeSources`——源码元数据不是它的四查询之一，注入的映射（与 `agents/context.py` 同一形状，两处不会分叉口径） |
+| `create_test_candidate` | `agent_db` + `repository` + `secrets` | F5：`generator/validator.py::validate_schema`（`mta lint` 同一实现）；ERROR 拒且留痕。**Dry Run 不在这里**（留 `PENDING`，闸门在 `generator/dry_run.py`；候选未经人工 ACCEPT 落不进 `suites/`，触达不了设备） |
+| `create_bug_candidate` | `agent_db` | F10：`attribution_hypothesis` / `evidence_score` / `status` **都不是形参**——工具层只能写 `DISCOVERED` / `UNTRIAGED` / 0。`reproducible` / `reproduction_count` 是如实转述的**观测**，可传 |
+
+`NOT_WIRED`：**10 → 5**（`tests/unit/test_agent_tools.py` 的人数钉同步
+12/10 → 17/5——那行注释本来就说「每次接线一个工具都要改这一行」）。
+
+### 7.2 剩下 5 个为什么不接（决策③「列出不猜」）
+
+- **3 个诊断数据源**（`get_logs` / `get_network_summary` / `get_crash_info`）：
+  本仓**没有任何采集代码**（已 grep 全仓确认）。`get_network_summary` 尤其
+  是 `backend_evidence`（权重 2）至今**没有真实生产者**的原因。给它们写一个
+  「读本地文件假装有日志」的实现，比留着 `ToolNotWired` 更糟：诊断会把
+  「没采到」读成「App 没报错」，方向反了。**单独一批做**（决策②）。
+- **2 个重跑入口**（`run_testcase` / `run_candidate_test`）：**不是没接线**，
+  是**工具本体没有默认实现**。生产路径由调用方注入回调绕开本体——
+  `diagnosis/reproducer.py::_run_once` 优先用注入的 `runner`（`cli/main.py::
+  _run_reproduction` 注入真回调），只有没注入回调时才落到本体并 fail-loud。
+  不猜「默认该跑哪条流水线」：run 的入口有 `manage_env` / lifecycle /
+  `run_id`，工具层拿不到。
+
+### 7.3 反钉（防止表退回去）
+
+`test_every_not_wired_entry_names_a_real_remaining_debt` 断言每条理由
+**不得出现 `Task 2.2` / `M4` / `M5` / `M6` / `Task 3.4`**，且长度 > 30
+（说不清缺什么数据源就过不了）。这是把「历史误报」做成机械检查，而不是靠
+下一个人记得。
+
+### 7.4 测试侧的两处修正
+
+1. **`create_bug_candidate(status=…)` 的静默吞参**：第一版实现留了 `**kw`，
+   于是 `status="CONFIRMED"` 被 `**kw` 吃掉、**既不报错也不生效**——测试
+   当场抓到。删掉 `**kw`（形参删掉而不是加断言，与 `agents/storage.py` 的
+   `status` / `review_status` 处置同款）→ 现在以 `TypeError` fail-loud。
+2. **测试污染主仓库**：一条测试用 `drift_repo(Path("."))` 建替身
+   Repository，在仓库根下真写出了 `generated/local/**`。已改为 `tmp_path`
+   fixture 并删除该目录。**教训**：替身工厂也吃路径参数，`Path(".")` 在
+   测试里同样是「往工作目录里写」。
+
+### 7.5 数字
+
+| 项 | 值 |
+|---|---|
+| 新增测试 | `tests/unit/test_agent_tools_wired.py` / 17 条 |
+| 全量回归 | 2207 → **2219 passed / 0 failed** |
+| `NOT_WIRED` | 10 → 5（3 无数据源 + 2 无默认执行上下文） |

@@ -41,12 +41,13 @@ Agent（Planner/Explorer/Diagnosis/Subagent）
    确实会调 WDA 读页面，但它的「风险」不是风险等级能表达的；环境侧的兜底是
    **F7 的启动期校验**（production 下自主命令整体不存在，见
    `cli.main._check_autonomous_env`）——两道闸不重叠、不互相替代。
-2. **本任务不持有 `knowledge` / `budget`**（plan 的 Files 段把它们列进了
-   `AgentToolkit` 的持有物）。理由：**本任务没有任何工具消费它们**
-   （`get_relevant_*` / `get_graph_neighbors` 归 Task 2.2 的 KnowledgeSources
-   装配；`budget` 是 LLM 调用的配额，而工具层是确定性的、不调 LLM）。
-   按「文档声称的能力必须有落点」的纪律，**等有消费者时再加**——不留
-   「已在生效」的假象（对照 `executor/guard.py::GuardContext.data_class` 的处置）。
+2. **不持有 `budget`**，且**持有 `knowledge` 只为三个知识工具**。`budget` 是
+   LLM 调用的配额，而工具层是确定性的、不调 LLM——按「文档声称的能力必须有
+   落点」的纪律，等有消费者再加（Task 6.7 接线了 `get_relevant_experience` /
+   `get_graph_neighbors`，它们经 `KnowledgeSources` 取数，于是 `knowledge`
+   有了第一个消费者，才加进来）。⚠️ `get_relevant_source` **不走**
+   `KnowledgeSources`：源码元数据不是它的四查询之一，由调用方注入
+   （与 `agents/context.py::build_agent_context` 同一形状）。
 
 ## 返回值的分工（与 `StepRunner.run_step` 同款，便于 F1 一致性比对）
 
@@ -148,22 +149,25 @@ TOOL_METHODS: dict[str, str] = {
 # 已注册但**实现未接线**的工具 → 接线它的任务（`call` 明确报错，不静默）。
 # 声明式而非散在方法体里：这样「哪些还没接线」是一张可读、可断言的表。
 NOT_WIRED: dict[str, str] = {
-    # 知识类：等 Task 2.2 的 KnowledgeSources 装配（F3：复用 P2 的四查询）
-    "get_relevant_source": "Task 2.2（KnowledgeSources 装配）",
-    "get_relevant_experience": "Task 2.2（KnowledgeSources 装配）",
-    "get_graph_neighbors": "Task 2.2（KnowledgeSources 装配）",
-    # 诊断数据源：等 M5 的 diagnosis 输入层（设计 §8.1）
-    "get_logs": "M5（Failure Diagnosis 的输入层）",
-    "get_network_summary": "M5（Failure Diagnosis 的输入层）",
-    "get_crash_info": "M5（Failure Diagnosis 的输入层）",
-    # Dry Run 入口：**不在 M3**——M3（Task 3.4）只让 LLM 产出步骤序列、走
-    # `generator/dry_run.py` 的注入式 `execute`，不做工具调用循环（`AgentToolkit`
-    # 在生成期是死对象）。真正需要工具层的是「会驱动设备的命令」：M4 的
-    # explorer 与 M6 的 diagnosis 循环（`docs/handover.md` §8 第 4 行同款判断）。
-    "run_testcase": "M4/M6（驱动设备的工具循环，非 M3 的注入式 Dry Run）",
-    "run_candidate_test": "M4/M6（驱动设备的工具循环，非 M3 的注入式 Dry Run）",
-    "create_test_candidate": "M4/M6（候选落库已在 Task 3.4 由 agents/storage 直写）",
-    "create_bug_candidate": "M5（bug_candidates 表，迁移 005）",
+    # 诊断数据源：**本仓没有采集器**，不是「装配没做」。`get_logs` 需要设备侧
+    # syslog 落盘（WDA `GET /log/retrieve` 或 `idevicesyslog`），`get_crash_info`
+    # 需要 `.ips`/`.crash` 崩溃报告取回，`get_network_summary` 需要一层
+    # 代理/埋点——三者都要**新写采集与落库**，本批不做（决策②：单独一批）。
+    # 不给它们编一个「读本地文件假装有日志」的实现：返回空结果会让诊断把
+    # 「没采到」读成「App 没报错」。
+    "get_logs": "缺设备侧日志采集器（WDA syslog / idevicesyslog → 落盘 → 索引）",
+    "get_network_summary": "缺网络观测层（无代理/埋点，backend_evidence 至今没有真实生产者）",
+    "get_crash_info": "缺崩溃报告取回通路（.ips/.crash 落盘与索引，与 syslog 同一批做）",
+    # 执行类入口：⚠️ **不是**「没人接线」，而是**工具本体没有默认实现**。
+    # 生产路径由调用方注入回调绕开本体——`diagnosis/reproducer.py::_run_once`
+    # 优先用注入的 `runner`（`cli/main.py::_run_reproduction` 注入基于
+    # `SessionPipeline` 的真回调），只有**没注入回调**时才落到工具本体并在此
+    # fail-loud。不猜「默认该跑哪条流水线」：run 的入口有
+    # `manage_env` / lifecycle / suite 上下文，工具层拿不到。
+    "run_testcase": "无默认实现：执行上下文（manage_env/lifecycle/run_id）不在工具层，"
+                    "靠调用方注入 runner 回调（diagnosis.reproducer 已如此）",
+    "run_candidate_test": "同上：候选重跑的 dry-run 闸门在 generator/dry_run.py，"
+                          "不经工具层（不猜该跑哪个 env_kind）",
 }
 
 
@@ -261,6 +265,9 @@ class AgentToolkit:
     | `assertion_engine` | `assert_exists` / `assert_text` |
     | `experience_store` | `create_promotion_proposal` |
     | `agent_db` + `task_id` | **BLOCK 留痕**（缺失则 `ToolkitAuditError`） |
+    | `knowledge` | `get_relevant_experience` / `get_graph_neighbors`（F3） |
+    | `source_metadata` | `get_relevant_source`（注入的映射，非检索口） |
+    | `secrets` + `repository` | `create_test_candidate`（F5 的 lint 需要） |
 
     ⚠️ `screenshot_dir` 默认 `"out/screenshots"` 是**相对 CWD**——与
     `DEFAULT_POLICY_PATH` / `suites` / `out/trace.db` 同款（本项目 P1 起的约定）。
@@ -270,6 +277,7 @@ class AgentToolkit:
                  repository=None, device_session=None, wait_engine=None,
                  assertion_engine=None, experience_store=None,
                  agent_db=None, task_id: str | None = None,
+                 knowledge=None, source_metadata=None, secrets=None,
                  build: str = "local",
                  screenshot_dir: str | Path = "out/screenshots") -> None:
         self.guard = guard
@@ -282,6 +290,14 @@ class AgentToolkit:
         self.experience_store = experience_store
         self.agent_db = agent_db
         self.task_id = task_id
+        # Task 6.7 起有两个消费者了（知识工具），故加这两个依赖——本任务之前
+        # 不持有它们，正是因为**没有消费者**（见模块 docstring 的边界 2）。
+        # `knowledge` 必须是 `KnowledgeSources` 形状（F3：唯一检索口）。
+        # `source_metadata` 是**注入的映射**而不是检索口：源码元数据不在
+        # `KnowledgeSources` 的四查询里（与 `agents/context.py` 同一形状）。
+        self.knowledge = knowledge
+        self.source_metadata = source_metadata
+        self.secrets = secrets
         self.build = build
         self.screenshot_dir = Path(screenshot_dir)
 
@@ -449,14 +465,59 @@ class AgentToolkit:
         self._need(executor=self.executor)
         return self.executor.page_source()
 
-    def _tool_get_relevant_source(self, **kw):
-        raise ToolNotWired(NOT_WIRED["get_relevant_source"])
+    def _tool_get_relevant_source(self, *, screen_id: str, **kw) -> dict:
+        """当前屏的源码元数据子集（注入的 `source_metadata` 的本地切片）。
 
-    def _tool_get_relevant_experience(self, **kw):
-        raise ToolNotWired(NOT_WIRED["get_relevant_experience"])
+        ⚠️ **不走 `KnowledgeSources`**：源码元数据不是它的四查询之一，
+        `agents/context.py::build_agent_context` 也是同样处置（注入的
+        `screen_elements` 里按 `name` 取子集）。两处共用同一形状，所以
+        「context 检索到的源码」与「这个工具读到的源码」不会是两个口径。
+        """
+        self._need(source_metadata=self.source_metadata)
+        for entry in (self.source_metadata.get("screen_elements") or ()):
+            if entry.get("name") == screen_id:
+                return {"screen": screen_id,
+                        "elements": list(entry.get("elements") or ())}
+        # 屏不在元数据里**不是错误**（本任务从未扫过的屏是常态）——但如实
+        # 返回空，不让「没扫到」读成「这屏没有源码」。
+        return {"screen": screen_id, "elements": []}
 
-    def _tool_get_graph_neighbors(self, **kw):
-        raise ToolNotWired(NOT_WIRED["get_graph_neighbors"])
+    def _tool_get_relevant_experience(self, *, app_id: str, screen_id: str,
+                                       target_id: str, **kw) -> dict:
+        """定位经验（`KnowledgeSources.experience_lookup`，F3 唯一检索口）。"""
+        self._need(knowledge=self.knowledge)
+        experiences = self.knowledge.experience_lookup(
+            app_id, screen_id, target_id)
+        return {"app_id": app_id, "screen": screen_id,
+                "target": target_id, "experiences": list(experiences)}
+
+    def _tool_get_graph_neighbors(self, *, app_id: str, screen_id: str,
+                                  **kw) -> dict:
+        """该屏的出边 + 入边（F3：`graph_query` 的产物本地过滤，不新建图查询）。
+
+        **两个方向都报**：图是可达性事实——「能去哪」与「从哪来」在规划补测
+        时缺一不可（出边找下一步，入边找该覆盖的回归路径）。
+        `in_graph=False` = 该屏不在图里（新屏是常态），与「在图里但没边」
+        严格区分——后者是边界已探到，前者是还没见过。
+        """
+        self._need(knowledge=self.knowledge)
+        graph = self.knowledge.graph_query(app_id)
+        transitions = getattr(graph, "transitions", ()) or ()
+        neighbors = []
+        for t in transitions:
+            if t.from_screen == screen_id:
+                neighbors.append(self._edge(t, t.to_screen, "outbound"))
+            if t.to_screen == screen_id and t.from_screen != screen_id:
+                neighbors.append(self._edge(t, t.from_screen, "inbound"))
+        in_graph = screen_id in set(getattr(graph, "screens", ()) or ()) \
+            or bool(neighbors)
+        return {"screen": screen_id, "in_graph": in_graph,
+                "neighbors": neighbors}
+
+    @staticmethod
+    def _edge(transition, screen: str, direction: str) -> dict:
+        return {"screen": screen, "direction": direction,
+                "trigger": transition.trigger, "count": transition.count}
 
     def _tool_get_logs(self, **kw):
         raise ToolNotWired(NOT_WIRED["get_logs"])
@@ -594,11 +655,88 @@ class AgentToolkit:
     # 候选资产（4）—— 不经 Guard（不碰 App）
     # ======================================================================
 
-    def _tool_create_test_candidate(self, **kw):
-        raise ToolNotWired(NOT_WIRED["create_test_candidate"])
+    def _tool_create_test_candidate(self, *, candidate_id: str, testcase,
+                                    generated_by: str | None = None,
+                                    evidence: dict | None = None) -> dict:
+        """落一条 Test Candidate——**先过 lint（F5）再入库**。
 
-    def _tool_create_bug_candidate(self, **kw):
-        raise ToolNotWired(NOT_WIRED["create_bug_candidate"])
+        走 `generator/validator.py::validate_schema`（`mta lint` 的**同一
+        实现**）：ERROR 一律拒（矩阵 #7 的判据，同 `generator/generator.py`
+        的落库前那道闸门）。判定放 `value["passed"]`（判定类工具的统一词汇，
+        见模块 docstring）。
+
+        ⚠️ **`repository` / `secrets` 缺一即 `ToolDependencyError`**，绝不
+        「跳过校验直接入库」：lint 要读 Repository（目标在不在元数据里）、
+        要读 secret provider（占位符是否已替换），两者缺了就没有「过」这个
+        概念——绕过校验落库的候选会一路进人工审核队列才被发现，污染面比
+        直接失败大得多。
+
+        ⚠️ **Dry Run 不在这里**：`dry_run_status` 留 `'PENDING'`。矩阵 #9 的
+        Dry Run 闸门在 `generator/dry_run.py`，且它**要求 sandbox**；工具层
+        不猜该用哪个 env_kind。候选在人工 ACCEPT 之前**不可能触达设备**
+        （落 `suites/` 是 `candidates/review.py` 的人工通道），所以这里
+        跳过 Dry Run 不会让未经 dry run 的用例真的跑起来。
+        """
+        self._need(agent_db=self.agent_db, repository=self.repository,
+                   secrets=self.secrets)
+        from generator.validator import schema_errors, validate_schema
+        from testcase.schema import TestCase, parse_testcase_dict
+        from candidates.fingerprint import test_fingerprint
+        from candidates.test_case import dump_testcase_yaml
+
+        tc = (testcase if isinstance(testcase, TestCase)
+              else parse_testcase_dict(dict(testcase)))
+        errors = schema_errors(
+            validate_schema(tc, repository=self.repository,
+                            secrets=self.secrets))
+        if errors:
+            return {"passed": False, "failure_type": "SCHEMA_INVALID",
+                    "issues": [{"code": i.code, "message": i.message,
+                                "step_index": i.step_index}
+                               for i in errors]}
+        row = self.agent_db.save_candidate(
+            candidate_id, testcase_yaml=dump_testcase_yaml(tc),
+            generation_evidence=evidence or {},
+            generated_by=generated_by, fingerprint=test_fingerprint(tc))
+        return {"passed": True, "candidate_id": row["candidate_id"],
+                "fingerprint": row["fingerprint"],
+                "review_status": row["review_status"],
+                "dry_run_status": row["dry_run_status"]}
+
+    def _tool_create_bug_candidate(self, *, candidate_id: str, title: str,
+                                   evidence: list[dict],
+                                   failure_type: str = "",
+                                   severity: str = "MEDIUM",
+                                   reproducible: bool | None = None,
+                                   reproduction_count: int = 0,
+                                   dedup_key: str | None = None,
+                                   affected_tests: list[str] | None = None) -> dict:
+        """落一条 Bug Candidate（F10：假设不是事实）。
+
+        `attribution_hypothesis` / `evidence_score` **不是形参**——工具层只写
+        `DISCOVERED` / `UNTRIAGED` / 0。归因与计分走 `agents/storage.py` 的
+        状态机（`decide_bug_candidate` / 诊断侧的状态推进），那边才拿得到
+        可数的证据（复现次数、
+        多用例佐证、源码变更相关性）。在这里给两个形参等于开一条旁路：
+        能产出 `score=11` 但无人复核过的行，而 `backend_evidence` 至今**没有
+        真实生产者**——分数只能由状态机从观测里堆出来。
+
+        `reproducible` / `reproduction_count` 是**如实转述的观测**（诊断重跑
+        数出来的），不是结论，故可传。
+        """
+        self._need(agent_db=self.agent_db)
+        if not evidence:
+            return {"passed": False, "failure_type": "NO_EVIDENCE",
+                    "error": "bug 候选必须带证据——无证据的候选等于 LLM 的"
+                             "一句话，会直接混进人工审核队列"}
+        row = self.agent_db.save_bug_candidate(
+            candidate_id, title=title, evidence=evidence,
+            failure_type=failure_type, severity=severity,
+            reproducible=reproducible, reproduction_count=reproduction_count,
+            dedup_key=dedup_key, affected_tests=affected_tests)
+        return {"passed": True, "candidate_id": row["candidate_id"],
+                "status": row["status"],
+                "attribution_hypothesis": row["attribution_hypothesis"]}
 
     def _tool_create_discovery_event(self, *, kind: str, detail: dict | None = None,
                                      event_id: str | None = None,
