@@ -3502,3 +3502,58 @@ git 2.54 实测，其他版本可能不同。
   - 空现场静默放行 → **1 red**（fail-loud 前置）；
   - `run_id` 过滤不生效 → **3 red**（现场/历史/空现场三条同时红）。
   - 五轮均还原到原 md5，`__pycache__` 已清，tracked diff 只剩本任务的在途改动。
+
+## Task 5.2 完成记录（P3-21 规则优先的假设引擎，2026-10-11）
+
+### 交付
+
+- `diagnosis/classifier.py`：`crash_detected(ctx)`（**新增判定**——底稿修订 #6：
+  P1 不存在 APP_CRASH 判定，`APP_CRASH` 只是 `FAILURE_TYPES` 里的字符串）、
+  `is_assertion_only_failure(ctx)`、`rule_based_hypotheses(ctx)` 三条规则
+  （崩溃→APP_DEFECT / 5xx+UI 正常→ENVIRONMENT_DEFECT / 漂移记录或 diff 命中
+  →UI_DRIFT）。
+- `diagnosis/analyzer.py`：`analyze(ctx, *, llm, budget, prompt_builder, parser)`
+  ——规则命中即返回（**LLM 零调用**）；断言值不符直接空手返回；规则空才调 LLM。
+- `llm/prompt.py::build_diagnosis_prompt`（可信区/不可信区分区，运行时观测进
+  `[UNTRUSTED …]`）；`llm/parser.py::parse_hypotheses`（fail-closed：类型不符
+  的条目丢弃，confidence 夹进 [0,1]）。
+- `tests/unit/test_classifier.py` **21 例**。
+
+### 决策记录
+
+1. **UI_DRIFT 读 P2 的 reconciliation 记录，不重算**（plan 明文）：判据是
+   `steps.detail_json` 的 `recovery.outcome == "DRIFT"`——那是
+   `agent/recovery.py` 在恢复流水线里跑 `reconcile_local` 后由
+   `cli/pipeline.py` 写下的。诊断时运行时 `page_source` 早已不在，
+   重算既不可能也引入第二个判据源。
+2. **`crash_detected` 的 infra 事件要配失败步骤**：单独一条 `WDA_DEAD`
+   不算「App 崩了」——WDA 重启后用例照常跑完是基础设施抖动，不是 App 缺陷。
+   判据写成 `crash_event and bool(failure_steps)`。
+3. **断言值不符是「不进诊断」而不是「规则没命中」**：`rule_based_hypotheses`
+   对纯断言失败返回 `[]`，`analyze` 据此**跳过 LLM**（不是「规则空了所以问
+   LLM」）。两者在代码里是两个分支——合成一个会让每次断言失败都白烧一次
+   LLM 调用，而设计 §8.2 末条明说它「不走 Diagnosis」。
+4. **LLM 假设必须挂 `llm_hypothesis_only` 证据**：`Hypothesis` 的空证据闸门
+   对 LLM 路径同样生效——「LLM 觉得」不是证据，「LLM 基于这些观测给出的假设」
+   才是（观测进 `EvidenceItem.source`）。探针 4 实测：撤掉这条证据 → 直接被
+   `Hypothesis` 的校验挡下（`ValidationError`），说明闸门真的在起作用。
+5. **5xx 规则要求「UI 侧无定位失败」**：`ELEMENT_NOT_FOUND` / `AMBIGUOUS_ELEMENT`
+   在场时不判环境缺陷——设计 §8.2 的前提是「**UI 正常**」。
+6. **LLM 门槛「两个都给」+ 预算 `try_acquire()` 无参形态**：照抄
+   `planner.plan` 的理由（只给 `llm` 不静默造 budget 对象）。预算耗尽**不绕过
+   计数直调 provider**（F4）。
+
+### 实测
+
+- 全量 pytest **1959 passed / 0 failed**（1938 + 21）。
+- A/B 探针（四轮，逐个红）：
+  - 规则命中不再短路（`if rules:` → `if False:`）→ **1 red**（矩阵 #14：crash
+    场景的 LLM 零调用被破坏）；
+  - `_has_drift_record` 恒 False（丢掉 P2 reconciliation 复用）→ **1 red**；
+  - `is_assertion_only_failure` 恒 False → **1 red**（断言值不符会进诊断）；
+  - LLM 假设不挂证据 → **1 red**（被 `Hypothesis` 的空证据闸门挡下）。
+  - 均还原干净，`__pycache__` 已清。
+- 教训：探针 3 的初版写法（`if False:` 替换 `if ...: return []` 而没保留
+  return 体）造成 `IndentationError`——那是**语法坏掉**不是行为变异，收集阶段
+  就炸，测不出任何东西。改成「函数体首行 `return False`」这种**保留语法**的
+  变异才有意义（与 Task 4.4「先想清楚 mutant 的失败形态」同一条教训）。

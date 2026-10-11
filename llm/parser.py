@@ -20,9 +20,11 @@ from dataclasses import dataclass, field
 
 from testcase.schema import AssertionSpec, Postcondition, WaitSpec
 
-__all__ = ["LLM_INVALID_OUTPUT", "MAX_REASON_CHARS", "ParsedCandidateSteps",
+__all__ = ["LLM_INVALID_OUTPUT", "MAX_REASON_CHARS", "MAX_STATEMENT_CHARS",
+           "ParsedCandidateSteps", "ParsedHypotheses",
            "ParsedLLMOutput", "PlanRationale", "parse_candidate_steps",
-           "parse_llm_output", "parse_plan_reasons", "ALLOWED_ACTIONS"]
+           "parse_hypotheses", "parse_llm_output", "parse_plan_reasons",
+           "ALLOWED_ACTIONS"]
 
 LLM_INVALID_OUTPUT = "LLM_INVALID_OUTPUT"
 
@@ -375,4 +377,68 @@ def parse_candidate_steps(raw: str) -> ParsedCandidateSteps:
             ignored[f"steps[{idx}].{k}"] = v
     out.steps = cleaned
     out.ignored_fields = ignored
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Failure Diagnosis 契约（设计 §8.2；Task 5.2 / P3-21）
+# ---------------------------------------------------------------------------
+
+# `statement` 的长度上限（与 `MAX_REASON_CHARS` 同款理由：这段文字会被持久化
+# 进 `bug_candidates.evidence_json` 并被审核界面渲染）。超长**截断并留 `…`**。
+MAX_STATEMENT_CHARS = 300
+
+
+@dataclass
+class ParsedHypotheses:
+    """`{"hypotheses": [{"statement": str, "confidence": float}]}` 的解析结果。
+
+    - `hypotheses`：**已清洗**（strip 过、去空、截断到 `MAX_STATEMENT_CHARS`）
+      且 confidence 已被夹进 `[0, 1]` 的条目。非法条目**直接丢掉**——LLM 的
+      输出不该有能力让 `Hypothesis` 构造失败（与 `PlanRationale.reasons` 同款）。
+    - `ignored_fields`：额外字段忽略但可见。
+    """
+
+    hypotheses: list[dict] = field(default_factory=list)
+    ignored_fields: dict = field(default_factory=dict)
+
+
+def parse_hypotheses(raw: str) -> ParsedHypotheses:
+    """严格解析诊断 LLM 的输出。**不抛异常**——返回尽最大努力的合法子集。
+
+    与 `parse_plan_reasons` 同一套纪律：`raw_decode` 增量提取、额外字段忽略但
+    记录、任何类型不符的条目**不采纳**（fail-closed —— 「尽量解释一下」是给
+    幻觉开后门）。`confidence` 缺失/非数 → 该条丢弃（不是默认 0.5：编一个
+    置信度等于替模型表态）。
+    """
+    out = ParsedHypotheses()
+    if not isinstance(raw, str):
+        return out
+    obj = _extract_json(raw)
+    if not isinstance(obj, dict):
+        return out
+
+    known = {"hypotheses"}
+    extra = {k: v for k, v in obj.items() if k not in known}
+    if extra:
+        out.ignored_fields = extra
+
+    items = obj.get("hypotheses")
+    if not isinstance(items, list):
+        return out
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        statement = item.get("statement")
+        if not isinstance(statement, str) or not statement.strip():
+            continue
+        cleaned = statement.strip()
+        if len(cleaned) > MAX_STATEMENT_CHARS:
+            cleaned = cleaned[:MAX_STATEMENT_CHARS] + "…"
+        confidence = item.get("confidence")
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            continue
+        out.hypotheses.append(
+            {"statement": cleaned,
+             "confidence": min(1.0, max(0.0, float(confidence)))})
     return out
