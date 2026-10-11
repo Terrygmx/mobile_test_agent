@@ -12,9 +12,9 @@ APP_DEFECT」）。归因默认 `UNTRIAGED`，证据分过阈值才给 `suggeste
 - `analyzer.py`  规则空结果才调 LLM 的编排（§8.2 末段）；
 - `evidence.py`  Evidence Score（§8.3）——排序由分数而非 LLM confidence 决定；
 - `reproducer.py` 复现引擎（§8.4）——**复用 `executor/policy` 的阶段判定本体**
-  （`FailurePhase` / `retry_decision`），不重新推断「动作是否已发出」（F9）。
-
-去重随 Task 5.5 落地。
+  （`FailurePhase` / `retry_decision`），不重新推断「动作是否已发出」（F9）；
+- `deduplicator.py` Bug 去重（§8.5）——`dedup_key` = screen + runtime diff +
+  source change 的哈希（F8 的 `stable_hash`），合并规则是纯函数。
 
 F3：本包**不直连数据源**（`sqlite3` / `tracer` / `graph.storage` /
 `experience.store` / `source.sqlite_tx`）——检索一律经

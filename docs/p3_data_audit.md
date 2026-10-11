@@ -3835,3 +3835,79 @@ git 2.54 实测，其他版本可能不同。
   该重跑**无害**（Guard 确定性，会在动作发出之前再拦一次），且如实计为「确定性
   复现」。`test_a_low_risk_guard_block_reruns_harmlessly_and_is_documented` 把
   这个形态钉在明处，免得将来被误读成漏判。
+
+## Task 5.5 完成记录（P3-24 Bug 去重，2026-10-11）
+
+### 交付
+
+| 文件 | 变化 |
+|---|---|
+| `diagnosis/deduplicator.py` | **新增**（`dedup_key` / `diff_tokens` / `merge_into` / `find_duplicate` / `DEDUP_PREFIX`） |
+| `diagnosis/models.py` | +12：`BugCandidateDraft` 追加去重三元组 `screen` / `runtime_diff` / `source_change`（末尾，带默认值） |
+| `diagnosis/__init__.py` | 模块图登记 `deduplicator.py`（「去重随 Task 5.5 落地」删除） |
+| `tests/unit/test_bug_dedup.py` | **新增** 28 例 |
+
+### 口径登记（三条）
+
+1. **`runtime_diff` 分量必须排序**。`GraphDiff.entries` 的顺序由图的遍历顺序决定，
+   而遍历顺序**不是**语义的一部分——不排序的话「同 runtime diff」会退化成「同
+   diff 且恰好同序」，去重**静默**失效（库里 key 各不相同，看起来像「本来就没有
+   重复」）。分量同时**去重**并**丢掉 `UNKNOWN`**（`GraphDiff.changed` 的判据就是
+   「有非 UNKNOWN 的差异」；UNKNOWN 是「没判定」，把它算进去会让「这次没给 base
+   build」变成另一条 Bug）。
+2. **`source_change` 进 key ⇒ 同一症状在不同 build 上是两条 Bug**。设计 §8.5 明文
+   要求它进 key，语义也对（build 变了意味着源码变了，可能是「还没修」与「修了但
+   没修干净」两件事）。代价是跨 build 的长期跟踪需人工合（库里没有跨 build 的关联
+   列）——登记，不假装完整。
+3. **⚠️ 空 diff 分量无法表达「没跑过 diff」**（**探针 9 实测发现**）。
+   `BugCandidateDraft.runtime_diff` 是 `list[str]`（pydantic 拒绝 `None`，默认
+   `[]`），`diff_tokens(None)` 也返回 `[]`——「跑了 diff 没有差异」与「压根没跑
+   diff」在本层得到同一个 key。**本层拿不到那个事实**（是调用方的知识），故登记给
+   Task 5.6 的 `mta diagnose`：**没有 `--base-build` 时不应落 `dedup_key`**（留
+   `NULL`），而不是落一个会误合的空分量 key。
+
+### 为什么 `failure_type` 不进 key（本任务的核心判据）
+
+设计 §8.5 的三元组是 **screen + runtime diff + source change**——`failure_type`
+**刻意不在其中**。同一个根因在三条用例上常常表现为三种不同的失败
+（`ELEMENT_NOT_FOUND` / `WAIT_TIMEOUT` / 断言炸），按失败类型去重会把它们记成
+三个 Bug，而它们其实是一个。矩阵 #16 后半（「三个不同 testcase 失败但同一根因 →
+合并为一个 Bug + `affected_tests` 累加」）正是这条的落点，
+`test_the_key_ignores_failure_type` 与 `test_three_failing_testcases_become_one_bug_with_accumulated_tests`
+各钉一侧（后者走真 `SQLiteAgentStore`）。
+
+### 合并规则（`merge_into`，纯函数）
+
+只增不减：`affected_tests` 保序并集、`reproduction_count` / `evidence_score` 取
+max、`reproducible` 三态**单调**（`True` 支配 `False` 支配 `None`——一次跑不出来
+不能抹掉已确认的复现）、`severity` 取更强、`title` / `attribution` 保留先到者。
+返回的是 `save_bug_candidate(**…)` 的**实参形状**（不含 `status`——`save_bug_candidate`
+根本不收它，状态推进的唯一入口是 Task 5.6 的状态机）；有一条测试用
+`inspect.signature` 断言这个形状，防止「合并产物多带一个键 → 调用方 TypeError」。
+
+### 实测
+
+- 全量 `pytest tests`（macOS）：**2076 passed / 0 failed**（exit 0；父提交 2048，
+  +28）。
+- A/B 探针（十一轮，逐个红/绿、逐个还原 md5 一致、`__pycache__` 已清）：
+  | # | 变异 | 红数 |
+  |---|---|---|
+  | 1 | `failure_type` 进 key | **2** |
+  | 2 | diff 分量不排序 | **2** |
+  | 3 | `UNKNOWN` 不丢 | **1** |
+  | 4 | `affected_tests` 取先到者（不合并） | **2** |
+  | 5 | `reproducible` 取先到者（非单调） | **1** |
+  | 6 | `find_duplicate` 取最新（不是最早） | **1** |
+  | 7 | `find_duplicate` 过滤掉终态 | **1** |
+  | 8 | hash 原语换成本地 sha256 | **1** |
+  | 9 | 空 diff 换成哨兵值 | **0**（**诚实记录**，见下） |
+  | 10 | `severity` 取先到者（不取更强） | **1** |
+  | 11 | `title` 被后到者覆写 | **1** |
+- **探针 9 全绿是一次诚实的发现，不是漏网**：初版
+  `test_an_empty_diff_is_a_valid_component` 的 docstring 声称「空与缺 diff 必须
+  区分」，但 `runtime_diff` 在模型层**不可能**是 `None`（pydantic 拒绝），所以那个
+  区分在本层根本不存在。修法不是补一条假测试，而是**把声称改成事实**：该测试改述
+  为「空分量是稳定的、且与有差异不同」，并把「无法表达『没跑过 diff』」作为口径
+  登记三交给调用方（Task 5.6）。**教训**：探针全绿有两种可能——测试没钉住实现，
+  或者**声称本身是错的**；后者只能靠回头读声称发现（与 Task 5.4 的两处自我纠正同
+  源）。

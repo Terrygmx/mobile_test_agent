@@ -166,6 +166,17 @@ class BugCandidateDraft(_Strict):
     reproduction_count: int = Field(default=0, ge=0)
     dedup_key: str | None = None
     affected_tests: list[str] = Field(default_factory=list)
+    # --- Task 5.5（P3-24）：去重的**三元组**（设计 §8.5） ---------------------
+    # 设计 §8.5 的 `dedup_key(bug: BugCandidateDraft)` 读这三个字段。追加而非
+    # 重排、都带默认值、放在末尾（与 `TraceStep` 的两次追加同款）。
+    #
+    # ⚠️ **`failure_type` 不在这三元组里**，这不是疏漏：同一个根因在三条用例上
+    # 常常表现为三种不同的失败（`ELEMENT_NOT_FOUND` / `WAIT_TIMEOUT` / 断言炸）
+    # ——按失败类型去重会把它们记成三个 Bug。判据是「在同一个屏上、由同一次
+    # 变更、产生了同一组运行时差异」，见 `diagnosis/deduplicator.py`。
+    screen: str = ""
+    runtime_diff: list[str] = Field(default_factory=list)
+    source_change: str = ""
 
     @field_validator("title")
     @classmethod
