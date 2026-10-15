@@ -171,11 +171,13 @@ lst-build-device:
 # 安装真机产物到 USB 连接的设备（iOS 17+ 走 devicectl；MTA_DEVICE_UDID 可显式
 # 指定，缺省取第一台 connected 的 physical 设备。devicectl 新版输出无 Available
 # 分节（Name/Hostname/Identifier/State/Model/Reality 表头，Hostname 常为空导致
-# 列错位），故按行内 physical+connected 过滤后提取 8-12 位 UDID，不按列取）。
+# 列错位），故按行内 physical+状态过滤后提取 UDID，不按列取）。State 的措辞
+# 随 Xcode 版本变过（connected → available (paired)，2026-10-15 实测），故按
+# 关键词放宽匹配，避免「设备明明在却过滤空」。
 lst-install-device:
 	@bash -c 'set -e; \
 	export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer; \
-	UDID=$${MTA_DEVICE_UDID:-$$(xcrun devicectl list devices 2>/dev/null | grep physical | grep connected | grep -oE "[0-9A-F]{8}-[0-9A-F]{12,16}" | head -1)}; \
-	test -n "$$UDID" || { echo "lst-install-device: 未找到 USB 连接的 physical 设备（xcrun devicectl list devices 为空）"; exit 1; }; \
+	UDID=$${MTA_DEVICE_UDID:-$$(xcrun devicectl list devices 2>/dev/null | grep physical | grep -Ei "connected|available" | grep -oE "[0-9A-F]{8}-[0-9A-F]{12,16}" | head -1)}; \
+	test -n "$$UDID" || { echo "lst-install-device: 未找到 USB 连接的 physical 设备（xcrun devicectl list devices 为空或 State 非 connected/available）"; exit 1; }; \
 	echo "lst-install-device: $$UDID"; \
 	xcrun devicectl device install app --device "$$UDID" "$(LST_DEVICE_APP)"'

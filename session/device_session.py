@@ -85,11 +85,88 @@ class DeviceSession:
         return self.driver
 
 
-def resolve_local_caps(udid: str, bundle_id: str) -> dict:
-    """真机装配 caps（Task 2.7 接线 / M4 Gate 前置）。
+def _sdk_version() -> str | None:
+    """本地 iPhoneOS SDK 版本（= 部署目标上限）；取不到返回 None（不猜）。"""
+    import os
+    import subprocess
 
-    device_name / platform_version 从 simctl 解析，不再像 M2/F5 那样在
-    脚本里硬编码；udid 必填（无 booted 设备时上层 fail-loud）。
+    env = dict(os.environ)
+    env.setdefault("DEVELOPER_DIR",
+                   "/Applications/Xcode.app/Contents/Developer")
+    try:
+        proc = subprocess.run(
+            ["xcrun", "--sdk", "iphoneos", "--show-sdk-version"],
+            capture_output=True, text=True, env=env, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return proc.stdout.strip() or None if proc.returncode == 0 else None
+
+
+def _clamp_to_sdk(version: str, sdk: str | None) -> str:
+    """设备 OS 高于本地 SDK 时压到 SDK 上限（27.2 设备 + 27.0 SDK 实测）。
+
+    xcodebuild 对「部署目标 > SDK 上限」直接 error（code 65）。Appium 把
+    `platformVersion` 同时当 WDA 的 IPHONEOS_DEPLOYMENT_TARGET 用，所以这里
+    压掉的既是构建参数也是上报值——低版本构建在高版本设备上正常运行，反向
+    则根本编不动。sdk 取不到时原样返回（让 xcodebuild 自己报错，不猜）。
+    """
+    if not sdk:
+        return version
+
+    def _t(v: str) -> tuple[int, ...]:
+        try:
+            return tuple(int(x) for x in v.split(".")[:3])
+        except ValueError:
+            return ()
+    a, b = _t(version), _t(sdk)
+    if not a or not b:
+        return version
+    return version if a <= b else sdk
+
+
+def _physical_device_info(udid: str) -> tuple[str, str] | None:
+    """devicectl 查物理设备的 (name, os_version)；查不到返回 None。
+
+    与 simctl 路线互补：`simctl list devices` 只认识模拟器，物理设备的
+    UDID（8-16 位十六进制段，如 00008120-0018499A1450C01E）在里面永远
+    匹配不到——真机接入（2026-10-15 乐速通）必须走 devicectl。
+    `-q -j -`：纯 JSON 到 stdout（人读进度走 stderr）。
+    """
+    import os
+    import subprocess
+
+    env = dict(os.environ)
+    env.setdefault("DEVELOPER_DIR",
+                   "/Applications/Xcode.app/Contents/Developer")
+    try:
+        proc = subprocess.run(
+            ["xcrun", "devicectl", "device", "info", "details",
+             "--device", udid, "-q", "-j", "-"],
+            capture_output=True, text=True, env=env, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+    props = data.get("result", {}).get("deviceProperties", {})
+    name = props.get("name")
+    version = props.get("osVersionNumber")
+    if not name or not version:
+        return None
+    return str(name), str(version)
+
+
+def resolve_local_caps(udid: str, bundle_id: str) -> dict:
+    """真机装配 caps（Task 2.7 接线 / M4 Gate 前置；2026-10-15 扩物理设备）。
+
+    device_name / platform_version 双路线：
+    - 模拟器：`simctl list devices -j booted`（udid 必填且必须 Booted）；
+    - 物理设备：`devicectl device info details`（simctl 匹配不到时 fallthrough，
+      不需要按 UDID 格式猜设备类型——猜错就是把真机当模拟器报错）。
+    两条都查不到 → InfraError（上层 fail-loud，不猜设备名/版本号）。
     """
     import os
     import subprocess
@@ -115,8 +192,17 @@ def resolve_local_caps(udid: str, bundle_id: str) -> dict:
         if name:
             break
     if name is None:
-        raise InfraError(f"UDID {udid} 不在 booted 设备中")
-    return {
+        physical = _physical_device_info(udid)
+        if physical is not None:
+            name, runtime = physical
+            # 设备 OS 可能高于本地 SDK（27.2 设备 + 27.0 SDK 实测）——Appium
+            # 拿 platformVersion 当 WDA 部署目标，不压会 xcodebuild code 65。
+            runtime = _clamp_to_sdk(runtime, _sdk_version())
+    if name is None:
+        raise InfraError(
+            f"UDID {udid} 不在 booted 模拟器，也不是已连接的 physical 设备"
+            f"（xcrun devicectl list devices 确认连接与配对状态）")
+    caps = {
         "platform_name": "iOS",
         "automation_name": "XCUITest",
         "device_name": name,
@@ -126,3 +212,24 @@ def resolve_local_caps(udid: str, bundle_id: str) -> dict:
         "no_reset": True,
         "new_command_timeout": 120,
     }
+    # WDA 真机签名：WebDriverAgent 工程不带 team，不显式给
+    # `appium:xcodeOrgId` 会被 xcodebuild 判「requires a development team」
+    # （2026-10-15 实测 code 65）。team 是**被测产品侧**信息（乐速通 =
+    # TSVS7C28BU），平台不写死——从环境变量取，缺省不加（模拟器路线不需要）。
+    import os as _os
+    org = _os.environ.get("MTA_XCODE_ORG_ID")
+    if org:
+        caps["appium:xcodeOrgId"] = org
+        caps["appium:xcodeSigningId"] = _os.environ.get(
+            "MTA_XCODE_SIGNING_ID", "Apple Development")
+    # 设备 OS 高于本地 SDK 时（27.2 设备 + 27.0 SDK 实测），Appium 会用设备
+    # 真实版本拼 IPHONEOS_DEPLOYMENT_TARGET 覆盖 caps 里的值（driver.js 里
+    # `opts.platformVersion = 设备版本`），xcodebuild 报 code 65——caps 侧
+    # 钳不掉。标准解法是 prebuilt WDA：自己按工程默认部署目标构建一次，
+    # 让 Appium 跳过构建（usePrebuiltWDA + derivedDataPath 指向同一份）。
+    # 构建命令见 docs/lst_update_playbook.md §3.10。
+    prebuilt = _os.environ.get("MTA_WDA_DERIVED_DATA")
+    if prebuilt:
+        caps["appium:usePrebuiltWDA"] = True
+        caps["appium:derivedDataPath"] = prebuilt
+    return caps
