@@ -55,15 +55,22 @@ console 里看到 `[MTA] scene willConnect` 且进程不退出即链路健康。
 
 ```bash
 source .venv/bin/activate && python -m cli.main run \
-  --suite smoke --udid 00008120-0018499A1450C01E \
+  --suite lst_smoke --suites-root suites \
+  --udid 00008120-0018499A1450C01E \
   --bundle-id com.etc.nfcPushOnline \
   --app-path build/lst-device-uat/Build/Products/Debug-iphoneos/nfcPushOnline.app \
-  --generated repository/generated --metadata repository/generated/local-uat/source_metadata.json
+  --overrides repository/overrides \
+  --generated repository/generated/local-uat \
+  --metadata repository/generated/local-uat/source_metadata.json
 ```
 
 - `--app-path` 指向 `lst-build-device` 的产物目录（同一环境）；
-- `--metadata`/`--generated` 必须与 `lst-repo-generate LST_ENV=<env>` 的
-  输出对齐（`local-<env>`）；
+- `--metadata` / `--generated` 必须与 `lst-repo-generate LST_ENV=<env>` 的
+  输出对齐（`local-<env>`）；⚠️ `--generated` 要指到 **build 目录本身**
+  （`repository/generated/local-uat`，不是 `repository/generated`）；
+- ⚠️ `--overrides` 和 `--generated` **要么都给、要么都不给**——只给一个不会
+  按默认布局补另一个（默认布局仅在两者都缺省时生效），踩过：只给
+  `--generated` 导致 overrides 整个不加载、全部 target unknown；
 - 校验不过 → `PREFLIGHT ERROR: build identity …` + exit 3，重跑第 2、3 步，
   不要 `--allow-metadata-mismatch`。
 
@@ -128,11 +135,17 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
   `$(LST_SRC)/nfcPushOnline`，**不含 Pods**（含了会多出 SVProgressHUD 等
   pod 元素，污染 screens）。也不加 `--check`——overrides 是 LoginDemo 的手写
   层，与被测产品无关。
-- **乐速通的 accessibilityIdentifier 覆盖极低**：614 个 .m 只有 2 处
-  （两个 CalendarView 的 `calendar`），source 扫描只能解析出这 2 个元素
-  （+此前一个 schema 失配 bug 曾让 ObjC 分支静默输出 0 元素，已修并有
-  round-trip 回归测试）。**坐标驱动/界面结构探测的用例不依赖这个表**，
-  但按 accessibility id 定位的用例目前只有 `calendar` 可用。
+- **乐速通的 accessibilityIdentifier 覆盖极低**：614 个 .m 原本只有 2 处
+  （两个 CalendarView 的 `calendar`）。2026-10-15 为冒烟用例补了**首页锚点**：
+  `LSTHomeViewController.m` 的 tableView 加 `accessibilityIdentifier =
+  @"home_list"`（对用户不可见、不影响正常打包），mta 侧
+  `repository/overrides/screens/LSTHomeViewController.yaml` 把 screen marker
+  指向它。后续首页流用例可复用该锚点；新增 screen 时照此办理：
+  **App 加一个真 accessibility id + overrides 声明 marker**（generated 的
+  marker 是 `screen.<类名>`，永远匹配不到真机，见 `source/export.py` 注释）。
+  （此前一个 schema 失配 bug 曾让 ObjC 分支静默输出 0 元素，已修并有
+  round-trip 回归测试。）**坐标驱动/界面结构探测的用例不依赖这个表**，
+  但按 accessibility id 定位的用例目前只有 `calendar` / `home_list` 可用。
 - **含 mta 能力的包只在本项目构建**：App 同事的正常打包（b.sh 等）保持原样，
   **不需要**他们集成 scene 宏 / 身份注入——没有 `MTA_GIT_COMMIT`/`MTA_BUILD_ID`
   的包本来就无法喂 `mta run`（G8 fail-closed），这是设计而非缺陷。给 mta 用的

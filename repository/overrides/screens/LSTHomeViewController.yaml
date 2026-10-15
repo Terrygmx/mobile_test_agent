@@ -1,0 +1,14 @@
+# overrides/screens/LSTHomeViewController.yaml — 乐速通首页 Screen 定义
+# （2026-10-15 接入）：marker 必须指向**真机上可见的 accessibility id**。
+# generated 侧的 screen marker 是 `screen.<类名>`（export 策略，永远匹配不到
+# 真机节点——见 source/export.py 的教训注释），故 LST 的 screen 一律由
+# overrides 声明。id 与 generated 元素的 container_type（@implementation
+# 类名）一致，便于 `screen: LSTHomeViewController.home_list` 形式引用。
+schema_version: "1.0"
+kind: screen
+id: LSTHomeViewController
+marker: home_list
+kind_hint: page
+metadata:
+  risk: LOW
+  origin: manual

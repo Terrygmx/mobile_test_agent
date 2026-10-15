@@ -1,0 +1,18 @@
+# suites/lst/smoke_launch_001.yaml — 乐速通冒烟：冷启动 → 首页可见
+# 断言锚点 home_list：LSTHomeViewController.m 里 tableView 的
+# accessibilityIdentifier（2026-10-15 加，App 侧 1 行可测性投入）；
+# screen 定义在 repository/overrides/screens/LSTHomeViewController.yaml
+# （marker: home_list——generated 的 marker 是 screen.<类名>，匹配不到真机）。
+schema_version: "0.2"
+id: lst_smoke_launch_001
+name: 乐速通冷启动后首页可见
+suite: lst_smoke
+tags: [lst, smoke]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - wait_for:
+      target: screen:LSTHomeViewController
+      condition: active
+      timeout: 15
