@@ -13,8 +13,10 @@ out/
 
 # M3 generated 产物：local build 不入库（时间戳/git_commit 每次生成必变，
 # 常驻 dirty——review P3-4 拍板）。release/staging build 的 generated/
-# 仍可入库；CI 自行 regenerate local。
+# 仍可入库；CI 自行 regenerate local。local-<env>（乐速通三环境，
+# 2026-10-15）同属每次生成必变的本地产物，一并忽略。
 repository/generated/local/
+repository/generated/local-*/
 
 # 12.5 p1-build 产物（LoginDemo 注入构建；verify_p1_task33 可重跑再生）
 build/

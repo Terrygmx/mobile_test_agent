@@ -236,7 +236,7 @@ python -m cli.main agent benchmark compare v1 v2 --threshold 0.05
 | 命令 | 类型 | 干什么 | 关键参数 |
 |---|---|---|---|
 | `lint` | 人工 | 用例静态检查 | `TESTCASE_YAML…`、`--overrides`、`--generated` |
-| `run` | 人工 | 执行用例/套件（三选一：`--suite/--tag/--case`） | `--no-llm`、`--junit`、`--html`、`--fake-driver`、`--bundle-id`、`--udid`、`--env-kind`、`--allow-metadata-mismatch`、`--db`、`--exp-db` |
+| `run` | 人工 | 执行用例/套件（三选一：`--suite/--tag/--case`） | `--no-llm`、`--junit`、`--html`、`--fake-driver`、`--bundle-id`、`--udid`、`--app-path`、`--env-kind`、`--allow-metadata-mismatch`、`--db`、`--exp-db` |
 | `plan` | **自主** | git diff → 回归优先级 Plan | `--base-build`、`--build`、`--json`、`--no-llm`、`--policy` |
 | `repo generate` | 人工 | 扫源码 → metadata（+`--check` 一致性 Gate） | `SOURCES…`、`--out`、`--build`、`--check` |
 | `source coverage` | 人工 | 用例引用的 identifier 有多少被 metadata 解析 | `--strict`（dynamic 也算未达标）、`--json/--html` |

@@ -67,7 +67,14 @@ def build_parser() -> argparse.ArgumentParser:
                        help="被测 App bundle id（真机路径必填，12.5 身份"
                             "读取用；如 com.phaset0.logindemo）")
     run_p.add_argument("--udid", metavar="UDID",
-                       help="目标模拟器 UDID（默认自动发现 booted 设备）")
+                       help="目标设备 UDID（模拟器默认自动发现 booted；真机"
+                            "用物理 UDID，如 00008120-0018499A1450C01E）")
+    run_p.add_argument("--app-path", metavar="PATH",
+                       help="真机路线：本地产物 .app 目录（identity 从它的 "
+                            "Info.plist 读——物理设备没有 simctl 等价物；"
+                            "如 build/lst-device-uat/Build/Products/"
+                            "Debug-iphoneos/nfcPushOnline.app）。模拟器"
+                            "路线不需要，给了则以它为准")
     # Task 2.4：Experience Store 库路径。默认 out/experience.db（与
     # trace.db 分库——前者可变状态单写者，后者 append-only 流水）。
     run_p.add_argument("--exp-db", metavar="PATH",
@@ -1101,14 +1108,16 @@ def cmd_run(args: argparse.Namespace) -> int:
             udid = args.udid or bi.resolve_booted_udid()
             if not udid:
                 raise bi.BuildIdentityError(
-                    "无 booted 模拟器（用 --udid 显式指定或启动一个）")
+                    "无 booted 模拟器（真机路线：--udid <物理UDID> 加 "
+                    "--app-path <产物.app>；模拟器：启动一个或用 --udid）")
             meta_path = (Path(args.metadata) if args.metadata else
                          Path(args.generated or "repository/generated/local")
                          / "source_metadata.json")
             gr = bi.gate_run_start(
                 metadata_path=meta_path, udid=udid,
                 bundle_id=args.bundle_id,
-                allow=args.allow_metadata_mismatch, env=os.environ)
+                allow=args.allow_metadata_mismatch, env=os.environ,
+                app_path=args.app_path)
         except bi.BuildIdentityError as e:
             store.start_run(run_id, suite=args.suite,
                             env_kind=env_kind.value)
@@ -2555,6 +2564,27 @@ def cmd_candidate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _common_source_root(sources: list[str]) -> Path:
+    """输入参数的公共祖先目录（resolved）——git_commit 的 source_root。
+
+    单目录参数即自身；多路径取 os.path.commonpath。文件/目录不存在时
+    不崩（rev-parse 失败 → metadata 记 unknown，fail-loud 交给 G8）。
+    """
+    paths = []
+    for s in sources:
+        p = Path(s)
+        paths.append(p if p.is_dir() else p.parent)
+    if not paths:
+        return Path(".")
+    resolved = [p.resolve() for p in paths]
+    if len(resolved) == 1:
+        return resolved[0]
+    try:
+        return Path(os.path.commonpath(resolved))
+    except ValueError:  # 不同盘符/跨根（Windows）——退 CWD 语义
+        return Path(".")
+
+
 def cmd_repo(args: argparse.Namespace) -> int:
     """mta repo（M3）。`generate`：源码扫描 → 12.3 metadata（P1-09）。
     一致性 Gate（--check，12.6/plan Task 3.1 第 5 步）失败语义：缺口是
@@ -2584,9 +2614,14 @@ def cmd_repo(args: argparse.Namespace) -> int:
         return 3
 
     out = Path(args.out) / args.build / "source_metadata.json"
+    # source_root：被测源码仓库根——metadata 的 git_commit 从**它**取，而不是
+    # CWD（外部源码场景：乐速通在 ~/Desktop/workspace/ios，走 CWD 会把平台
+    # 自己的 commit 写进 metadata，与 App 里注入的 commit 永不相同 → G8 拦）。
+    # 取输入参数的公共祖先（目录即自身；多路径/文件取最深公共目录）。
+    source_root = _common_source_root(args.sources)
     try:
         meta = build_metadata(files, out, app_version=args.app_version,
-                              build=args.build)
+                              build=args.build, source_root=source_root)
     except ScanError as e:
         print(f"repo generate FAILED: {e}")
         return 3

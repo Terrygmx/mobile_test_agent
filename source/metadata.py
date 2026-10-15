@@ -46,11 +46,20 @@ def _scan_binary() -> Path:
         f"(release|debug); build it: cd source/swift_scan && swift build")
 
 
-def _git_commit() -> str:
-    """review P2-5 同款保护：非 git 目录不崩，返回 unknown。"""
+def _git_commit(source_root: str | Path | None = None) -> str:
+    """源码仓库 HEAD 短号；非 git 目录不崩，返回 unknown。
+
+    `source_root` 是**被测 App 源码**的根（`repo generate` 的输入路径所在
+    仓库）——默认取 CWD 只在「源码就在本仓库」时碰巧正确。外部源码
+    （乐速通在 ~/Desktop/workspace/ios，2026-10-15 实测）若走 CWD，metadata
+    记的是**mta 平台自己的 commit**，与构建时注入 App 的 commit 永不相同 →
+    `mta run` G8 fail-closed（exit 3）。所以 CLI 必须把 source_root 传下来。
+    """
+    cmd = ["git", "rev-parse", "--short", "HEAD"]
+    if source_root is not None:
+        cmd = ["git", "-C", str(source_root), "rev-parse", "--short", "HEAD"]
     try:
-        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
-                             capture_output=True, text=True)
+        out = subprocess.run(cmd, capture_output=True, text=True)
         return out.stdout.strip() or "unknown"
     except Exception:
         return "unknown"
@@ -128,17 +137,21 @@ def scan_files(files: list[str | Path]) -> dict:
 
 
 def build_metadata(files: list[str | Path], out_path: str | Path, *,
-                   app_version: str = "debug", build: str = "local") -> dict:
+                   app_version: str = "debug", build: str = "local",
+                   source_root: str | Path | None = None) -> dict:
     """扫描 + 组装 12.3 metadata 并落盘。
 
     `out_path` 通常为 `repository/generated/<build>/source_metadata.json`
     （12.4 构建产物布局；H16：只能重新生成，不得手改）。
+
+    `source_root`：被测源码仓库根，`git_commit` 从它取（见 `_git_commit`）。
+    源码在外部仓库时必须传，否则 metadata 记的是平台仓库 commit。
     """
     raw = scan_files(files)
     meta = {
         "app_version": app_version,
         "build": build,
-        "git_commit": _git_commit(),
+        "git_commit": _git_commit(source_root),
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "parser_version": PARSER_VERSION,
         **raw,

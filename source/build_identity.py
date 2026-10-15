@@ -20,8 +20,10 @@ fail-closed 语义（G8「App / Metadata / commit 可关联，不一致 fail clo
   「一致」（12.2 同源纪律：没扫到 ≠ 不存在）。
 
 H18 边界：`evaluate` / `override_allowed` / `gate_run_start` 纯逻辑离设备；
-设备访问隔离在 `read_app_identity` / `resolve_booted_udid`（subprocess），
-`gate_run_start(read=...)` 注入点供单测与 Gate 使用。
+设备/产物访问隔离在 `read_app_identity`（simctl，模拟器路线）/
+`read_app_identity_from_bundle`（本地 .app，真机路线）/
+`resolve_booted_udid`（subprocess），`gate_run_start(read=...)` 注入点供
+单测与 Gate 使用。
 """
 from __future__ import annotations
 
@@ -174,6 +176,32 @@ def read_app_identity(udid: str, bundle_id: str, *,
                     build=info.get(APP_BUILD_KEY))
 
 
+def read_app_identity_from_bundle(app_path: str | Path) -> AppIdentity:
+    """真机路线：从**本地产物 .app** 读 MTA_GIT_COMMIT / MTA_BUILD_ID。
+
+    物理设备没有 `simctl get_app_container` 等价物（devicectl 只列应用、不
+    给 Info.plist 内容，且每次 run 去设备上挖既慢又脆）。身份本就是**产物**
+    的属性——`lst-build-device` 注入后的 .app 就在本地，直接 plistlib 读，
+    与「设备上装的那个包」是同一个文件。键缺失不是错误（未注入的旧包要能被
+    读出来再由 evaluate 判 fail-closed，与 simctl 路线同语义）。
+    """
+    plist_path = Path(app_path) / "Info.plist"
+    if not plist_path.is_file():
+        raise BuildIdentityError(
+            f"产物 Info.plist 不存在：{plist_path}"
+            f"（--app-path 要指向 .app 目录本身，如 "
+            f"build/lst-device-uat/Build/Products/Debug-iphoneos/"
+            f"nfcPushOnline.app）")
+    try:
+        with plist_path.open("rb") as f:
+            info = plistlib.load(f)
+    except (OSError, plistlib.InvalidFileException) as e:
+        raise BuildIdentityError(f"Info.plist 不可解析：{plist_path}"
+                                 f"（{e}）") from e
+    return AppIdentity(git_commit=info.get(APP_COMMIT_KEY),
+                    build=info.get(APP_BUILD_KEY))
+
+
 def resolve_booted_udid(*, simctl_bin: str = "xcrun") -> str | None:
     """第一个 booted 模拟器 UDID；无 booted 设备返回 None（调用方报错）。"""
     try:
@@ -198,16 +226,28 @@ def resolve_booted_udid(*, simctl_bin: str = "xcrun") -> str | None:
 def gate_run_start(*, metadata_path: str | Path, udid: str, bundle_id: str,
                    allow: bool, env: Mapping[str, str],
                    read: Callable[[str, str], AppIdentity] | None = None,
-                   simctl_bin: str = "xcrun") -> GateResult:
+                   simctl_bin: str = "xcrun",
+                   app_path: str | Path | None = None) -> GateResult:
     """`mta run` 启动时编排（12.5「运行开始时」）：读 App + 读 metadata →
     evaluate → 放行规则。读取失败抛 BuildIdentityError（调用方 exit 3）。
 
-    `read` 注入点：单测/Gate 传 stub；默认 `read_app_identity`（**函数内
-    迟绑定**，monkeypatch 模块属性必须生效——默认参数会在 def 时固化）。
+    两条读取路线（12.5 Task 3.3 之后的真机接入，2026-10-15）：
+    - `app_path` 给定（**真机/外部产物路线**）：从本地产物 .app 的
+      Info.plist 读（`read_app_identity_from_bundle`），不碰设备；
+    - 否则（模拟器路线）：`simctl get_app_container` 读设备上的包。
+
+    `read` 注入点优先于两者（单测/Gate 传 stub）；默认读取**函数内迟绑定**
+    （monkeypatch 模块属性必须生效——默认参数会在 def 时固化）。
     """
     if not bundle_id:
         raise BuildIdentityError("真机路径需要 --bundle-id（被测 App）")
-    reader = read if read is not None else read_app_identity
+    if read is not None:
+        reader = read
+    elif app_path is not None:
+        def reader(_udid: str, _bid: str) -> AppIdentity:
+            return read_app_identity_from_bundle(app_path)
+    else:
+        reader = read_app_identity
     meta = metadata_identity(metadata_path)
     app = reader(udid, bundle_id)
     verdict = evaluate(app, meta)

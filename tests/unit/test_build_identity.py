@@ -21,6 +21,7 @@ from source.build_identity import (
     gate_run_start,
     metadata_identity,
     read_app_identity,
+    read_app_identity_from_bundle,
     resolve_booted_udid,
     override_allowed,
 )
@@ -368,3 +369,107 @@ def test_cli_run_read_failure_is_preflight_exit3(tmp_path, monkeypatch,
     out = capsys.readouterr().out
     assert code == 3
     assert "build identity" in out
+
+
+# --- 真机路线：read_app_identity_from_bundle（本地 .app 工件读身份） ---
+# 物理设备没有 simctl get_app_container 等价物；身份是**产物**的属性，
+# 直接 plistlib 读 lst-build-device 注入后的 .app（2026-10-15 乐速通接入）。
+
+
+def _fake_app_bundle(tmp_path, info: dict) -> Path:
+    app = tmp_path / "nfcPushOnline.app"
+    app.mkdir()
+    (app / "Info.plist").write_bytes(
+        plistlib.dumps(info, fmt=plistlib.FMT_BINARY))
+    return app
+
+
+def test_from_bundle_parses_injected_keys(tmp_path):
+    app = _fake_app_bundle(tmp_path, {"MTA_GIT_COMMIT": "fef2f1e8",
+                                      "MTA_BUILD_ID": "local-uat"})
+    assert read_app_identity_from_bundle(app) == \
+        AppIdentity("fef2f1e8", "local-uat")
+
+
+def test_from_bundle_uninjected_yields_none_keys(tmp_path):
+    """与 simctl 路线同语义：键缺失不是读取错误，交给 evaluate 判
+    fail-closed（未注入的旧包要能被读出来，不能吞现场）。"""
+    app = _fake_app_bundle(tmp_path, {"CFBundleIdentifier": "com.x"})
+    ident = read_app_identity_from_bundle(app)
+    assert ident.git_commit is None and ident.build is None
+
+
+def test_from_bundle_missing_dir_raises_with_guidance(tmp_path):
+    with pytest.raises(BuildIdentityError, match=r"\.app 目录本身"):
+        read_app_identity_from_bundle(tmp_path / "nowhere.app")
+
+
+def test_from_bundle_corrupt_plist_raises(tmp_path):
+    app = tmp_path / "x.app"
+    app.mkdir()
+    (app / "Info.plist").write_bytes(b"not a plist")
+    with pytest.raises(BuildIdentityError, match="不可解析"):
+        read_app_identity_from_bundle(app)
+
+
+def test_gate_app_path_uses_bundle_reader_not_simctl(tmp_path, monkeypatch):
+    """给了 --app-path 就不许碰 simctl（真机上 simctl 必然失败）。"""
+    app = _fake_app_bundle(tmp_path, {"MTA_GIT_COMMIT": "fef2f1e8",
+                                      "MTA_BUILD_ID": "local-uat"})
+    meta = tmp_path / "source_metadata.json"
+    # metadata 与产物**同源**（乐速通场景：lst-build-device 注入 fef2f1e8/
+    # local-uat ↔ lst-repo-generate 生成的 metadata），gate 应放行。
+    meta.write_text(json.dumps({"git_commit": "fef2f1e8",
+                                "build": "local-uat"}), encoding="utf-8")
+
+    def _boom(*a, **k):
+        raise AssertionError("app_path 路线不应调用 simctl")
+
+    monkeypatch.setattr("source.build_identity.subprocess.run", _boom)
+    gr = gate_run_start(metadata_path=meta, udid="00008120-0018499A1450C01E",
+                        bundle_id="com.etc.nfcPushOnline", allow=False,
+                        env={}, app_path=app)
+    assert gr.app == AppIdentity("fef2f1e8", "local-uat")
+    assert not gr.blocked and not gr.mismatch
+
+
+def test_gate_app_path_uninjected_still_blocked(tmp_path):
+    """fail-closed 不因路线切换而放松：产物没注入 → 拦，allow 也不放行。"""
+    app = _fake_app_bundle(tmp_path, {})
+    meta = tmp_path / "source_metadata.json"
+    meta.write_text(json.dumps(META), encoding="utf-8")
+    gr = gate_run_start(metadata_path=meta, udid="UDID",
+                        bundle_id="com.etc.nfcPushOnline", allow=True,
+                        env={}, app_path=app)
+    assert gr.blocked and gr.mismatch
+    assert "app_missing_injection" in gr.mismatches
+
+
+def test_cli_run_app_path_physical_device_flow(tmp_path, monkeypatch,
+                                               capsys):
+    """端到端：--udid <物理UDID> + --app-path <产物.app> → 走 bundle 读取，
+    simctl 完全不被调用（连 resolve_booted_udid 都不该触发）。"""
+    from cli.main import main
+
+    suites, meta_path = _run_scaffold(tmp_path)
+    app = _fake_app_bundle(tmp_path, {"MTA_GIT_COMMIT": "a76d449",
+                                      "MTA_BUILD_ID": "local"})
+    monkeypatch.setattr(
+        "source.build_identity.resolve_booted_udid",
+        lambda **k: pytest.fail("给了 --udid 不应解析 booted 模拟器"))
+    db = tmp_path / "trace.db"
+    main(["run", "--suite", "smoke", "--suites-root", str(suites),
+          "--db", str(db), "--udid", "00008120-0018499A1450C01E",
+          "--bundle-id", "com.etc.nfcPushOnline",
+          "--metadata", str(meta_path), "--app-path", str(app)])
+    out = capsys.readouterr().out
+    # G8 必须放行（身份一致），绝不允许出现 BUILD_METADATA_MISMATCH；
+    # 之后走到设备装配——单测不接真机，装配失败（UDID 不在 booted 设备）
+    # 是预期终点，exit 3 也必须是**装配**的 3，不是 identity 的 3。
+    assert "BUILD_METADATA_MISMATCH" not in out
+    assert "PREFLIGHT ERROR: build identity" not in out
+    conn = sqlite3.connect(db)
+    row = conn.execute(
+        "SELECT app_git_commit, metadata_git_commit, metadata_mismatch"
+        " FROM runs").fetchone()
+    assert row == ("a76d449", "a76d449", 0)

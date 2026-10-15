@@ -82,3 +82,83 @@ class TestBuildMetadata:
         out = tmp_path / "deep" / "nested" / "dir" / "source_metadata.json"
         md.build_metadata(["a.swift"], out)
         assert out.exists()
+
+
+class TestGitCommitSourceRoot:
+    """git_commit 必须取自**被测源码仓库**，不是 CWD（2026-10-15 乐速通接入
+    实测：源码在外部仓库 ~/Desktop/workspace/ios，走 CWD 会把平台自己的
+    commit 写进 metadata → 与 App 注入值永不相同 → G8 fail-closed）。"""
+
+    def test_source_root_passed_to_git(self, tmp_path, monkeypatch):
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            class _P:
+                returncode = 0
+                stdout = "fef2f1e8\n"
+                stderr = ""
+            return _P()
+
+        monkeypatch.setattr(md.subprocess, "run", fake_run)
+        assert md._git_commit(tmp_path / "src") == "fef2f1e8"
+        assert seen["cmd"][:3] == ["git", "-C", str(tmp_path / "src")]
+
+    def test_default_no_root_keeps_cwd_semantics(self, monkeypatch):
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            class _P:
+                returncode = 0
+                stdout = "localrepo\n"
+                stderr = ""
+            return _P()
+
+        monkeypatch.setattr(md.subprocess, "run", fake_run)
+        assert md._git_commit() == "localrepo"
+        assert seen["cmd"] == ["git", "rev-parse", "--short", "HEAD"]
+
+    def test_build_metadata_threads_source_root(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(md, "scan_files",
+                            lambda files: {"screens": [], "screen_elements": []})
+        seen = {}
+        real = md._git_commit
+
+        def spy(root=None):
+            seen["root"] = root
+            return real(root)
+
+        monkeypatch.setattr(md, "_git_commit", spy)
+        md.build_metadata(["a.swift"], tmp_path / "m.json",
+                          source_root=tmp_path / "app")
+        assert seen["root"] == tmp_path / "app"
+
+
+class TestObjcRoundTrip:
+    """objc_scan 子进程输出 ↔ scan_files objc 分支的 schema round-trip。
+
+    2026-10-15 修：objc_scan.main() 曾输出 {"screen", "elements"}（Phase 1
+    独立形态），而 metadata.py 读 screen_elements——键名失配使 ObjC 元素
+    **静默合并空**（乐速通 614 个 .m 扫出 0 元素）。此处直接跑真子进程，
+    钉死真实 round-trip（此前测试全 stub scan_files，所以缺陷能存活）。
+    """
+
+    def test_objc_subprocess_output_merges_into_screen_elements(self, tmp_path):
+        src = tmp_path / "Demo.m"
+        src.write_text(
+            "@implementation DemoView\n"
+            "- (void)setup {\n"
+            '    self.button.accessibilityIdentifier = @"login_button";\n'
+            "}\n"
+            "@end\n", encoding="utf-8")
+        out = md.scan_files([src])
+        names = [s["name"] for s in out["screen_elements"]]
+        assert "DemoView" in names
+        entry = next(s for s in out["screen_elements"] if s["name"] == "DemoView")
+        el = entry["elements"][0]
+        assert el["id"] == "login_button"
+        assert el["accessibility_id"] == "login_button"
+        assert el["container_type"] == "DemoView"
+        assert el["resolution_type"] == "literal"
+        assert "DemoView" in out["screens"]

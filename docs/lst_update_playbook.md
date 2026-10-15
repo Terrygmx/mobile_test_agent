@@ -29,7 +29,7 @@ pod install --repo-update        # 若 Podfile.lock 无变化可省 --repo-updat
 cd ~/PycharmProjects/Mobile_test_agent && make lst-build-device
 
 # 第 3 步：重新生成 metadata（G8 门槛要求与注入的 commit 同源）
-make repo-generate               # 注意：此目标当前指向 LoginDemo，见 §2 注意事项
+make lst-repo-generate LST_ENV=uat   # 内部即 repo generate <LST_SRC>/nfcPushOnline --build local-uat
 
 # 第 4 步：装机 + 人工冒烟（USB 连接测试机）
 make lst-install-device
@@ -48,6 +48,24 @@ xcrun devicectl device process launch --device 00008120-0018499A1450C01E \
 ```
 
 console 里看到 `[MTA] scene willConnect` 且进程不退出即链路健康。
+
+**喂给 `mta run`（真机路线，2026-10-15 起可用）**：G8 身份校验走
+`--app-path` 从**本地产物**读 Info.plist（物理设备没有 simctl 等价物），
+不去设备上挖：
+
+```bash
+source .venv/bin/activate && python -m cli.main run \
+  --suite smoke --udid 00008120-0018499A1450C01E \
+  --bundle-id com.etc.nfcPushOnline \
+  --app-path build/lst-device-uat/Build/Products/Debug-iphoneos/nfcPushOnline.app \
+  --generated repository/generated --metadata repository/generated/local-uat/source_metadata.json
+```
+
+- `--app-path` 指向 `lst-build-device` 的产物目录（同一环境）；
+- `--metadata`/`--generated` 必须与 `lst-repo-generate LST_ENV=<env>` 的
+  输出对齐（`local-<env>`）；
+- 校验不过 → `PREFLIGHT ERROR: build identity …` + exit 3，重跑第 2、3 步，
+  不要 `--allow-metadata-mismatch`。
 
 ## 1.5 多环境（dev / uat / prod）
 
@@ -100,16 +118,30 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
 
 ## 2. 注意事项（做第 3 步之前先看）
 
+- **metadata 的 commit 取自乐速通仓库**（2026-10-15 修）：`repo generate` 的
+  `git_commit` 原来取 CWD（平台仓库），对外部源码会把平台 commit 写进
+  metadata，与注入 App 的值永不相同 → `mta run` 被 G8 拦（exit 3）。现在
+  `make lst-repo-generate` 内部按输入路径推导 source_root，从乐速通仓库取。
+  验证：`repository/generated/local-<env>/source_metadata.json` 的
+  `git_commit` 必须等于构建回显里的 `MTA_GIT_COMMIT`。
+- **metadata 只扫 App 自身源码**：`lst-repo-generate` 只扫
+  `$(LST_SRC)/nfcPushOnline`，**不含 Pods**（含了会多出 SVProgressHUD 等
+  pod 元素，污染 screens）。也不加 `--check`——overrides 是 LoginDemo 的手写
+  层，与被测产品无关。
+- **乐速通的 accessibilityIdentifier 覆盖极低**：614 个 .m 只有 2 处
+  （两个 CalendarView 的 `calendar`），source 扫描只能解析出这 2 个元素
+  （+此前一个 schema 失配 bug 曾让 ObjC 分支静默输出 0 元素，已修并有
+  round-trip 回归测试）。**坐标驱动/界面结构探测的用例不依赖这个表**，
+  但按 accessibility id 定位的用例目前只有 `calendar` 可用。
 - **含 mta 能力的包只在本项目构建**：App 同事的正常打包（b.sh 等）保持原样，
   **不需要**他们集成 scene 宏 / 身份注入——没有 `MTA_GIT_COMMIT`/`MTA_BUILD_ID`
   的包本来就无法喂 `mta run`（G8 fail-closed），这是设计而非缺陷。给 mta 用的
   包一律走本项目脚本（`lst_build_*.sh` / make 目标）。
-- **`repo-generate` 目标未切到乐速通**：Makefile 里 `repo-generate` 目前写死
-  `ios_demo/LoginDemo`。对乐速通要手动跑
-  `python -m cli.main repo generate /Users/terrygmx/Desktop/workspace/ios`（是否加
-  `--check` 按当时需要）。目标改造完成前，这是唯一需要手打命令的步骤。
-- **commit 同源纪律**：构建（第 2 步）与 `repo generate`（第 3 步）之间**不要**
-  再动乐速通仓库，且两者的环境必须一致（`LST_ENV=uat` 构建 ↔
+- **`repo-generate` 目标保持 LoginDemo**：`make repo-generate` 仍是 demo 的
+  一致性 Gate（12.6），乐速通走独立的 `make lst-repo-generate LST_ENV=<env>`
+  （已切好，见上）。两者互不影响，别混用。
+- **commit 同源纪律**：构建（第 2 步）与 `lst-repo-generate`（第 3 步）之间
+  **不要**再动乐速通仓库，且两者的环境必须一致（`LST_ENV=uat` 构建 ↔
   `--build local-uat` 生成）。中间拉了新代码或换了环境 → 注入的身份与 metadata
   不一致 → `mta run` fail-closed（exit 3）。被拦了就重跑第 2、3 步，**不要**用
   `--allow-metadata-mismatch` 绕（它只豁免「可关联但不一致」，且 CI 下需第二开关）。
@@ -207,6 +239,8 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
 
 | 位置 | 文件 | 职责 | 版本更新时动不动 |
 |---|---|---|---|
+| mta 仓库 | `Makefile` 的 `lst-repo-generate` | metadata 生成（commit 取乐速通仓库，扫 App 源码不含 Pods） | 否 |
+| mta 仓库 | `source/build_identity.py` 的 `read_app_identity_from_bundle` | 真机身份路线：从本地 .app 工件读（`--app-path`），不碰设备 | 否 |
 | mta 仓库 | `Makefile` 的 `lst-build-device` | 构建+注入 scene 宏/manifest+身份键+重签 | 否（自动化吸收） |
 | mta 仓库 | `Makefile` 的 `lst-install-device` | devicectl 装机 | 否 |
 | mta 仓库 | `scripts/lst_build_dev.sh` / `lst_build_uat.sh` / `lst_build_prod.sh` | 三环境一键构建+strings 环境验证（+可选装机），内部调 make 目标 | 否（指纹失效时改 VERIFY_PATTERN） |

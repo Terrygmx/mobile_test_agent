@@ -18,6 +18,20 @@ repo-generate:
 	@bash -c 'source .venv/bin/activate && \
 	python -m cli.main repo generate ios_demo/LoginDemo --check'
 
+# 乐速通 metadata 生成（外部源码）：git_commit 取自**乐速通仓库 HEAD**
+# （source/metadata.py `_git_commit(source_root)`，2026-10-15 修：走 CWD 会把
+# 平台自己的 commit 写进 metadata，与 lst-build-device 注入 App 的值永不相同 →
+# mta run G8 fail-closed）。--build 必须与构建时的 LST_ENV 一致
+# （local-<env>），且两次操作之间不要动乐速通仓库（commit 同源纪律）。
+# 扫描范围只含 nfcPushOnline 自身源码（不含 Pods——pod 的 accessibilityIdentifier
+# 会污染 screens；实测含 Pods 时多出 SVProgressHUD）。不加 --check：overrides
+# 是 LoginDemo 的手写层，与被测产品无关，比了只会误报。
+LST_META_SRC = $(LST_SRC)/nfcPushOnline
+
+lst-repo-generate:
+	@bash -c 'source .venv/bin/activate && \
+	python -m cli.main repo generate "$(LST_META_SRC)" --build local-$(LST_ENV)'
+
 # Build Identity 注入构建（12.5 / Task 3.3 第 1 步）。注入走 12.5「无 CI
 # 兜底」允许的本地脚本 plist 注入：xcodebuild 后 PlistBuddy 写入
 # MTA_GIT_COMMIT / MTA_BUILD_ID。（INFOPLIST_KEY_<自定义键> 实测不进生成的
