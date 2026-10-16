@@ -491,6 +491,49 @@ def test_r16_2_no_fake_driver_exits_3_not_fail(tmp_path, capsys, monkeypatch):
         assert rows == [], f"fail-quiet 假用例结果入库：{rows}"
 
 
+def test_r16_3_wda_launch_failure_hint_names_lock_screen():
+    """R16-3：WDA 起不来的错误要附可操作提示（2026-10-16 真机实测）。
+
+    Appium 的原话是「Failed to start the preinstalled WebDriverAgent in 60000
+    ms … might not be properly built」，把人往「WDA 没构建好」上引；真实原因是
+    **手机锁屏**——iOS 拒绝拉起 runner，日志只留 `Connection was refused to
+    port 8100`。不点破的话每轮白等 60 秒，且方向是错的。
+    devicectl 单独拉起会明确报 `device was not, or could not be, unlocked`，
+    但 Appium 的 RemoteXPC 路径不吐这句，所以只能由 mta 侧补提示。"""
+    from cli.main import _session_failure_hint
+
+    hint = _session_failure_hint(RuntimeError(
+        "Unable to launch WebDriverAgent. Original error: Failed to start the "
+        "preinstalled WebDriverAgent in 60000 ms. The WebDriverAgent might not "
+        "be properly built or the device might be locked."))
+    assert "解锁" in hint, f"提示必须点名锁屏：{hint!r}"
+    assert "tunnel-creation" in hint, f"提示要给隧道的补救命令：{hint!r}"
+
+
+def test_r16_3_hint_also_covers_missing_tunnel():
+    """同一个 gate 覆盖「隧道没跑」的形态——外层文案同样是
+    `Unable to launch WebDriverAgent`（只是 Original error 换成 RemoteXPC）。"""
+    from cli.main import _session_failure_hint
+
+    hint = _session_failure_hint(RuntimeError(
+        "Unable to launch WebDriverAgent. Original error: Failed to launch the "
+        "preinstalled WebDriverAgent via RemoteXPC: Failed launch preinstalled "
+        "WebDriverAgent via RemoteXPC for '00008120-0018499A1450C01E' "
+        "(RemoteXPC is not available for this session)."))
+    assert "解锁" in hint
+    assert "tunnel-creation" in hint
+
+
+def test_r16_3_hint_silent_for_unrelated_errors():
+    """无关错误不加提示——不制造噪音，也不假装自己能诊断一切。"""
+    from cli.main import _session_failure_hint
+
+    assert _session_failure_hint(RuntimeError("boom")) == ""
+    # 提到 WDA 但不是启动失败 → 不加
+    assert _session_failure_hint(
+        RuntimeError("WebDriverAgent quit unexpectedly")) == ""
+
+
 def test_r16_3_run_id_unique_across_runs(tmp_path, capsys):
     """R16-2/P3-3：同秒多次 run 不得撞 runs.run_id 主键（原 time.time()）。"""
     import time as _t

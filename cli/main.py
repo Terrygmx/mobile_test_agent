@@ -974,6 +974,26 @@ def _load_repository(args: argparse.Namespace) -> Repository:
     return Repository.from_dirs(generated_root=generated, overrides_root=overrides)
 
 
+def _session_failure_hint(e: Exception) -> str:
+    """把 Appium 的原始错误翻成可操作的下一步（真机接入踩过的坑，§3.10）。
+
+    WDA 起不来时 Appium 的原话是「60 秒没起来 / 可能没构建好」，但真机上最
+    常见的两个原因都不在这个方向上：① **手机锁屏**——iOS 直接拒绝拉起 runner，
+    日志只留 `Connection was refused to port 8100`（实测：devicectl 单独拉起会
+    明确报 `device was not, or could not be, unlocked`，而 Appium 路径不吐这句）；
+    ② RemoteXPC 隧道没在跑。两种形态都等满 60 秒才超时，值得一句话点破。
+    两种错误 mta 看到的外层文案都是 `Unable to launch WebDriverAgent`，据此 gate。
+    """
+    if "Unable to launch WebDriverAgent" not in str(e):
+        return ""
+    return ("\n  提示：真机 WDA 起不来，按概率查两件事——"
+            "① 手机是否已解锁且没有自动锁屏（锁屏时 iOS 拒绝拉起 runner，"
+            "只报 Connection was refused to port 8100）；"
+            "② RemoteXPC 隧道是否还在跑"
+            "（sudo appium driver run xcuitest tunnel-creation）。"
+            "详见 docs/lst_update_playbook.md §3.10")
+
+
 def cmd_lint(args: argparse.Namespace) -> int:
     repo = _load_repository(args)
     secrets = EnvSecretProvider()
@@ -1184,7 +1204,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             fake_driver=args.fake_driver)
     except Exception as e:  # noqa: BLE001 — 设备会话建立失败 = 前置配置错误
         store.end_run(run_id, status="ABORTED", exit_code=3)
-        print(f"PREFLIGHT ERROR: 设备会话建立失败：{e}")
+        print(f"PREFLIGHT ERROR: 设备会话建立失败：{e}{_session_failure_hint(e)}")
         print("run: exit 3")
         return 3
 
@@ -1608,7 +1628,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
             fake_driver=args.fake_driver)
     except Exception as e:  # noqa: BLE001 — 设备会话建立失败 = 前置配置错误
         trace_store.end_run(run_id, status="ABORTED", exit_code=3)
-        print(f"PREFLIGHT ERROR: 设备会话建立失败：{e}")
+        print(f"PREFLIGHT ERROR: 设备会话建立失败：{e}{_session_failure_hint(e)}")
         print("generate: exit 3")
         return 3
 
@@ -1877,7 +1897,7 @@ def cmd_explore(args: argparse.Namespace) -> int:
         trace_store.end_run(run_id, status="ABORTED", exit_code=3)
         agent_db.update_task_state(task_id, "ESCALATED",
                                    outcome="DEVICE_UNAVAILABLE")
-        print(f"PREFLIGHT ERROR: 设备会话建立失败：{e}")
+        print(f"PREFLIGHT ERROR: 设备会话建立失败：{e}{_session_failure_hint(e)}")
         print("explore: exit 3")
         return 3
 

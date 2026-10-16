@@ -81,6 +81,12 @@ console 里看到 `[MTA] scene willConnect` 且进程不退出即链路健康。
 
 3. **签名 team**：`export MTA_XCODE_ORG_ID=TSVS7C28BU`——WebDriverAgent 工程不带
    team，不给会被 xcodebuild 判 `requires a development team`（code 65）。
+4. **手机保持解锁**（2026-10-16 实测）。锁屏时 iOS 会**拒绝拉起 WDA runner**，
+   Appium 只报 `Failed to start the preinstalled WebDriverAgent in 60000 ms`
+   + `Connection was refused to port 8100`，把人往「WDA 没构建好」上引；用
+   `xcrun devicectl device process launch --console` 单独拉起才看得到真话：
+   `Unable to launch … because the device was not, or could not be, unlocked`。
+   跑长用例前把「设置 → 显示与亮度 → 自动锁定」设为「永不」，或让屏幕常亮。
 
 **喂给 `mta run`（真机路线，2026-10-15 起可用）**：G8 身份校验走
 `--app-path` 从**本地产物**读 Info.plist（物理设备没有 simctl 等价物），
@@ -320,11 +326,18 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
      (RemoteXPC is not available for this session)`。
      ⚠️ 同一份日志里的 `Failed to create crash reports client … Skipping crash
      logs collection` **不是故障**——只是崩溃日志采集被跳过。
+  5. **手机锁屏**（隧道建好之后才露出来，2026-10-16 实测）。iOS 拒绝拉起
+     runner，Appium 只报 `Failed to start the preinstalled WebDriverAgent in
+     60000 ms`——进程控制其实拿到了 PID，但 8100 始终没人监听，方向被指向
+     「WDA 没构建好」。`devicectl` 单独拉起才给真话：
+     `device was not, or could not be, unlocked`。mta 已在该错误后附提示
+     （`cli/main.py` 的 `_session_failure_hint`），锁屏本身只能人工解。
 
-- **处理**：按 §1「真机前置条件」1/2/3 做一遍，`mta run` 带
-  `MTA_XCODE_ORG_ID` + `MTA_WDA_PREBUILT_APP`。装机链路本身是通的（AFC/lockdown，
-  日志 `installation of 'com.facebook.WebDriverAgentRunner.xctrunner'
-  succeeded`），所以隧道是唯一的外部依赖。
+- **处理**：按 §1「真机前置条件」四条（隧道 / 预建 WDA / 签名 team / 手机解锁）
+  做一遍，`mta run` 带 `MTA_XCODE_ORG_ID` + `MTA_WDA_PREBUILT_APP`。装机链路
+  本身是通的（AFC/lockdown，日志 `installation of
+  'com.facebook.WebDriverAgentRunner.xctrunner' succeeded`），所以隧道是唯一的
+  外部依赖。
   另一条备选 `MTA_WDA_DERIVED_DATA` → `usePrebuiltWDA`（仍要 xcodebuild，只是
   免编译）留给设备 OS ≤ 本地 SDK 的机器；⚠️ 该路径必须是**绝对路径**——Appium
   在自己的 CWD（WDA 包目录）里跑 xcodebuild，相对路径会解析到别处（实测仍报 65）。
