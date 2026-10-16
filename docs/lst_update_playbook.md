@@ -49,6 +49,39 @@ xcrun devicectl device process launch --device 00008120-0018499A1450C01E \
 
 console 里看到 `[MTA] scene willConnect` 且进程不退出即链路健康。
 
+**真机前置条件（一次性；换 Xcode / WDA 版本后重做。缺一项 `mta run` 就在
+「设备会话建立失败」上 exit 3，报错文案见 §3.10）**：
+
+1. **RemoteXPC 隧道（必需）**。Appium 对 iOS 17+ 真机的 WDA 拉起/进程控制走
+   RemoteXPC，本机必须先建 TUN/TAP 隧道。脚本要 root（建 TUN 设备），且
+   **必须与 Appium server 同时保持运行**（另开一个终端，别关）：
+
+   ```bash
+   sudo appium driver run xcuitest tunnel-creation
+   ```
+
+   没建时的症状：`Unable to launch WebDriverAgent … RemoteXPC is not available
+   for this session`，Appium 日志里同步有
+   `Tunnel registry port not found. Please run the tunnel creation script first`。
+
+2. **预建 WDA（iOS 27+ 必需）**。设备 OS 高于本机 SDK 时 Appium 自己编 WDA 必挂
+   （code 65，见 §3.10），改用预建产物：Appium 只负责装机 + 拉起，**全程不调
+   xcodebuild**：
+
+   ```bash
+   DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild build-for-test \
+     -project ~/.appium/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent/WebDriverAgent.xcodeproj \
+     -scheme WebDriverAgentRunner \
+     -destination "id=00008120-0018499A1450C01E" \
+     -derivedDataPath out/wda-ddata
+   ```
+
+   产物 `out/wda-ddata/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app`
+   已在库里；WDA 版本或 Xcode 变了才需重跑。
+
+3. **签名 team**：`export MTA_XCODE_ORG_ID=TSVS7C28BU`——WebDriverAgent 工程不带
+   team，不给会被 xcodebuild 判 `requires a development team`（code 65）。
+
 **喂给 `mta run`（真机路线，2026-10-15 起可用）**：G8 身份校验走
 `--app-path` 从**本地产物**读 Info.plist（物理设备没有 simctl 等价物），
 不去设备上挖：
@@ -62,6 +95,13 @@ source .venv/bin/activate && python -m cli.main run \
   --overrides repository/overrides \
   --generated repository/generated/local-uat \
   --metadata repository/generated/local-uat/source_metadata.json
+```
+
+真机路线要在命令前带上前置条件的环境变量（WDA 签名 + 预建 WDA）：
+
+```bash
+export MTA_XCODE_ORG_ID=TSVS7C28BU
+export MTA_WDA_PREBUILT_APP=$PWD/out/wda-ddata/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app
 ```
 
 - `--app-path` 指向 `lst-build-device` 的产物目录（同一环境）；
@@ -248,6 +288,50 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
   （脚本里的 dev 指纹用的是完整 tpark URL）。该行在 prod 包会推一个打内网
   测试服务器的 webview，同样建议报备 App 同事。
 
+### 3.10 真机 WDA 起不来（iOS 27+：caps / SDK / 隧道三重坑）
+
+- **症状**：`mta run --suite lst_smoke` 在真机上 exit 3
+  （`PREFLIGHT ERROR: 设备会话建立失败`），底下挂的具体错误可能是
+  `xcodebuild … code 65`、`Failed to receive any data within the timeout: 5000`，
+  或 `Unable to launch WebDriverAgent … RemoteXPC is not available`。
+- **根因链**（2026-10-15 实测：设备 iOS 27.2 + 本机 SDK 27.0，Appium 3.7.0 +
+  xcuitest 12.13.2）。按踩坑顺序，**上一层修完才会露出下一层**：
+
+  1. **caps 键名**。Appium 只认 camelCase；写成 snake_case（`platform_version` /
+     `bundle_id` / `no_reset` / `device_name`）时它只提示
+     `platform_version (did you mean 'platformVersion'?)` 然后**静默丢弃**——
+     日志不报错，caps 等于没给。连锁后果：`platformVersion` 丢了 → Appium 退回
+     设备真实 OS 版本 → 该值又变成 WDA 的 `IPHONEOS_DEPLOYMENT_TARGET` →
+     设备 OS(27.2) > 本地 SDK(27.0) → `xcodebuild` code 65。
+     mta 侧已在 `session/device_session.py` 全部改成 camelCase 并有单测钉住。
+  2. **SDK 钳制**。`resolve_local_caps` 把 `platformVersion` 钳到本地 SDK 上限
+     （27.2 → 27.0）。⚠️ 这只对「Appium 自己编 WDA」有效，钳不掉 driver.js 内部
+     拿设备真实版本拼部署目标的那条路——所以有第 3 条。
+  3. **iOS 27+ 不能让 Appium 自己编 WDA**。即使给了 `usePrebuiltWDA` +
+     `derivedDataPath`，Appium 仍会跑 `xcodebuild test-without-building` 且仍会把
+     设备版本拼进部署目标；而 devicectl 兜底启动在 27+ 已不可用（runner 被推前台
+     后要合成 Home 键把自己切后台，Xcode 27 的 DDI/XCTest 栈忽略这次按键 →
+     `Failed to background test runner`，Appium 在 27+ 直接禁用了该兜底）。
+     故 27+ **必须走 `usePreinstalledWDA` + `prebuiltWDAPath`**：装好 .app 后由
+     Appium 直接拉起，全程不碰 xcodebuild。
+  4. **RemoteXPC 隧道**。预装路线的拉起走 RemoteXPC，本机必须先建隧道（root，
+     见 §1 前置条件 1）。没建时报
+     `Failed to launch the preinstalled WebDriverAgent via RemoteXPC …
+     (RemoteXPC is not available for this session)`。
+     ⚠️ 同一份日志里的 `Failed to create crash reports client … Skipping crash
+     logs collection` **不是故障**——只是崩溃日志采集被跳过。
+
+- **处理**：按 §1「真机前置条件」1/2/3 做一遍，`mta run` 带
+  `MTA_XCODE_ORG_ID` + `MTA_WDA_PREBUILT_APP`。装机链路本身是通的（AFC/lockdown，
+  日志 `installation of 'com.facebook.WebDriverAgentRunner.xctrunner'
+  succeeded`），所以隧道是唯一的外部依赖。
+  另一条备选 `MTA_WDA_DERIVED_DATA` → `usePrebuiltWDA`（仍要 xcodebuild，只是
+  免编译）留给设备 OS ≤ 本地 SDK 的机器；⚠️ 该路径必须是**绝对路径**——Appium
+  在自己的 CWD（WDA 包目录）里跑 xcodebuild，相对路径会解析到别处（实测仍报 65）。
+- **已知 Appium 侧小毛病**：devicectl 兜底查进程用的 filter 字段
+  `executable.path` 与当前 devicectl 不符（报 `Did you mean 'Executable
+  Path'?`）。有隧道时走不到这条分支，不用管；别处撞到同款就是版本错配。
+
 ## 4. 各文件职责速查（接入相关）
 
 | 位置 | 文件 | 职责 | 版本更新时动不动 |
@@ -256,6 +340,7 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
 | mta 仓库 | `source/build_identity.py` 的 `read_app_identity_from_bundle` | 真机身份路线：从本地 .app 工件读（`--app-path`），不碰设备 | 否 |
 | mta 仓库 | `Makefile` 的 `lst-build-device` | 构建+注入 scene 宏/manifest+身份键+重签 | 否（自动化吸收） |
 | mta 仓库 | `Makefile` 的 `lst-install-device` | devicectl 装机 | 否 |
+| mta 仓库 | `session/device_session.py` 的 `resolve_local_caps` | 真机 caps 装配：camelCase 键名 / `platformVersion` 钳到本地 SDK / 预建 WDA 路线（见 §3.10） | 否 |
 | mta 仓库 | `scripts/lst_build_dev.sh` / `lst_build_uat.sh` / `lst_build_prod.sh` | 三环境一键构建+strings 环境验证（+可选装机），内部调 make 目标 | 否（指纹失效时改 VERIFY_PATTERN） |
 | 乐速通仓库 | `AppDelegate.m` ifdef 块 | iOS 27 scene 生命周期最小采纳 | 待 App 正式采纳后删除 |
 | 乐速通仓库 | `Podfile` 顶部两个 spec 源 | pod 拉取 | 否（勿再注释） |

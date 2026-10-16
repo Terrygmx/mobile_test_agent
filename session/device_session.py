@@ -162,7 +162,7 @@ def _physical_device_info(udid: str) -> tuple[str, str] | None:
 def resolve_local_caps(udid: str, bundle_id: str) -> dict:
     """真机装配 caps（Task 2.7 接线 / M4 Gate 前置；2026-10-15 扩物理设备）。
 
-    device_name / platform_version 双路线：
+    deviceName / platformVersion 双路线：
     - 模拟器：`simctl list devices -j booted`（udid 必填且必须 Booted）；
     - 物理设备：`devicectl device info details`（simctl 匹配不到时 fallthrough，
       不需要按 UDID 格式猜设备类型——猜错就是把真机当模拟器报错）。
@@ -202,14 +202,23 @@ def resolve_local_caps(udid: str, bundle_id: str) -> dict:
         raise InfraError(
             f"UDID {udid} 不在 booted 模拟器，也不是已连接的 physical 设备"
             f"（xcrun devicectl list devices 确认连接与配对状态）")
+    # ⚠️ 键名必须是 Appium 的 camelCase。snake_case（platform_version /
+    # bundle_id / no_reset / device_name）Appium **不认**：它只提示
+    # "platform_version (did you mean 'platformVersion'?)" 然后**静默丢弃**
+    # （2026-10-15 真机实测，Appium 3.7.0 + xcuitest 12.13.2）。后果不只是
+    # 「没生效」：platformVersion 丢了，Appium 会退回设备真实 OS 版本，
+    # 而 driver.js 又用它当 WDA 的 IPHONEOS_DEPLOYMENT_TARGET——设备 OS 高于
+    # 本地 SDK 时直接 xcodebuild code 65。Python 客户端会自动给非 W3C 标准键
+    # 加 `appium:` 前缀，无需手写。
     caps = {
-        "platform_name": "iOS",
-        "automation_name": "XCUITest",
-        "device_name": name,
-        "platform_version": runtime,
+        "platformName": "iOS",
+        "automationName": "XCUITest",
+        "deviceName": name,
+        "platformVersion": runtime,
         "udid": udid,
-        "bundle_id": bundle_id,
-        "no_reset": True,
+        "bundleId": bundle_id,
+        "noReset": True,
+        # Appium recognized 的既有别名，保持不变（两个拼写都收）。
         "new_command_timeout": 120,
     }
     # WDA 真机签名：WebDriverAgent 工程不带 team，不显式给
@@ -225,11 +234,29 @@ def resolve_local_caps(udid: str, bundle_id: str) -> dict:
     # 设备 OS 高于本地 SDK 时（27.2 设备 + 27.0 SDK 实测），Appium 会用设备
     # 真实版本拼 IPHONEOS_DEPLOYMENT_TARGET 覆盖 caps 里的值（driver.js 里
     # `opts.platformVersion = 设备版本`），xcodebuild 报 code 65——caps 侧
-    # 钳不掉。标准解法是 prebuilt WDA：自己按工程默认部署目标构建一次，
-    # 让 Appium 跳过构建（usePrebuiltWDA + derivedDataPath 指向同一份）。
+    # 钳不掉。两条绕开路线（二选一，都不让 Appium 自己编 WDA）：
+    # ① usePreinstalledWDA + prebuiltWDAPath：装好 WDA .app 后由 Appium 直接
+    #    拉起，全程不碰 xcodebuild。**iOS 27+ 唯一可靠路线**——devicectl 兜底
+    #    会把 XCTest runner 推前台导致 "Failed to background test runner"，
+    #    Appium 在 27+ 已禁用该兜底（wda-host-ops.js 注释）。
+    # ② usePrebuiltWDA + derivedDataPath：让 Appium 跑
+    #    `xcodebuild test-without-building`，需要 DerivedData 里有 .xctestrun。
     # 构建命令见 docs/lst_update_playbook.md §3.10。
+    # ⚠️ derivedDataPath 必须**绝对路径**：Appium 在自己的 CWD（WDA 包目录）
+    # 里执行 xcodebuild，相对路径会解析到别处、找不到预建产物（实测仍报 65）。
+    wda_app = _os.environ.get("MTA_WDA_PREBUILT_APP")
     prebuilt = _os.environ.get("MTA_WDA_DERIVED_DATA")
+    if wda_app and prebuilt:
+        # 两条是**互斥**的 WDA 启动策略（Appium 只认先命中的那条，另一个的路径
+        # 被静默忽略）。同时给＝留一个没人执行的配置，报错而不是猜。
+        raise InfraError(
+            "MTA_WDA_PREBUILT_APP 与 MTA_WDA_DERIVED_DATA 只能给一个："
+            "前者是 iOS 27+ 唯一可靠路线（不调 xcodebuild），后者留给设备 OS "
+            "≤ 本地 SDK 的机器。见 docs/lst_update_playbook.md §3.10")
+    if wda_app:
+        caps["appium:usePreinstalledWDA"] = True
+        caps["appium:prebuiltWDAPath"] = str(Path(wda_app).resolve())
     if prebuilt:
         caps["appium:usePrebuiltWDA"] = True
-        caps["appium:derivedDataPath"] = prebuilt
+        caps["appium:derivedDataPath"] = str(Path(prebuilt).resolve())
     return caps
