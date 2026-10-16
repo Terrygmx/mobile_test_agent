@@ -81,12 +81,17 @@ console 里看到 `[MTA] scene willConnect` 且进程不退出即链路健康。
 
 3. **签名 team**：`export MTA_XCODE_ORG_ID=TSVS7C28BU`——WebDriverAgent 工程不带
    team，不给会被 xcodebuild 判 `requires a development team`（code 65）。
-4. **手机保持解锁**（2026-10-16 实测）。锁屏时 iOS 会**拒绝拉起 WDA runner**，
-   Appium 只报 `Failed to start the preinstalled WebDriverAgent in 60000 ms`
-   + `Connection was refused to port 8100`，把人往「WDA 没构建好」上引；用
-   `xcrun devicectl device process launch --console` 单独拉起才看得到真话：
-   `Unable to launch … because the device was not, or could not be, unlocked`。
-   跑长用例前把「设置 → 显示与亮度 → 自动锁定」设为「永不」，或让屏幕常亮。
+4. **手机保持解锁，且屏幕亮着**（2026-10-16 实测，两种症状不同）。锁屏时 iOS
+   会**拒绝拉起 WDA runner**，Appium 只报 `Failed to start the preinstalled
+   WebDriverAgent in 60000 ms` + `Connection was refused to port 8100`，把人往
+   「WDA 没构建好」上引；用 `xcrun devicectl device process launch --console`
+   单独拉起才看得到真话：`Unable to launch … because the device was not, or
+   could not be, unlocked`。**屏幕熄灭但设备没锁**时外层报错一模一样，但 runner
+   是能起来的、只是 60s 内 `Timed out while enabling automation mode`——
+   按一下侧边键唤醒即可。跑长用例前把「设置 → 显示与亮度 → 自动锁定」设为
+   「永不」，或让屏幕常亮。两者的详细区分见 §3.10 第 5 / 7 条。
+5. **App 已装机**：`make lst-install-device LST_ENV=<env>`（§1 上文）。
+   冒烟整条走 `make lst-smoke-device LST_ENV=<env>`。
 
 **喂给 `mta run`（真机路线，2026-10-15 起可用）**：G8 身份校验走
 `--app-path` 从**本地产物**读 Info.plist（物理设备没有 simctl 等价物），
@@ -332,12 +337,41 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
      「WDA 没构建好」。`devicectl` 单独拉起才给真话：
      `device was not, or could not be, unlocked`。mta 已在该错误后附提示
      （`cli/main.py` 的 `_session_failure_hint`），锁屏本身只能人工解。
+  6. **隧道过期**（首次跑绿之后重跑才撞到，2026-10-16 实测）。症状是**设备枚举
+     就空了**：`Available real devices: ` 后面什么都没有，紧接着
+     `Error: Unknown device or simulator UDID: '00008120-…'`。此时 `curl
+     127.0.0.1:4723/status` 正常、隧道进程也还活着，很容易误判成 Appium 坏了。
+     真因：设备在隧道创建**之后**重连过（`xcrun devicectl device info details`
+     的 `Last Connection Date` 比对隧道启动时间即可确认），隧道那份 per-device
+     会话没跟上，而 devicectl 自己仍显示 `available (paired)`。
+     处置：重启隧道，Appium 不用动（它每次建 session 都重新问注册表）。
+  7. **屏幕熄灭**（与第 5 条**症状完全相同、根因不同**，2026-10-16 实测）。
+     外层仍是 `Failed to start the preinstalled WebDriverAgent in 60000 ms`，
+     Appium 日志里是 `RemoteXPC upstream connect error … Connection was
+     refused to port 8100` 刷满 60s 后 `Failed to get the status endpoint`。
+     区分点只能靠 `devicectl device process launch --console` 单独拉 runner：
+     - 锁屏（第 5 条）：**启动就被拒**，直接 `device was not, or could not be,
+       unlocked`，runner 根本没起来；
+     - 屏幕熄灭（本条）：**启动成功**——先打印 `Launched application with
+       com.facebook.WebDriverAgentRunner.xctrunner` + `Waiting for the
+       application to terminate…`，然后 runner 自己报
+       `Failed to initialize for UI testing … "Timed out while enabling
+       automation mode."` 并 exit 1。iOS 允许拉 runner，但 automation mode
+       使能要求屏幕亮着。
+     处置：按侧边键唤醒、停在解锁状态；无人值守跑就把
+     **设置 → 显示与亮度 → 自动锁定 → 永不**，否则一跑完它又锁上。
+     ⚠️ 已排除「我们打包的 WDA 有问题」：同一份预建产物走两条独立安装路线
+     （Appium 的 AFC 安装 vs `xcrun devicectl device install app`）报**完全一样**
+     的错；`Developer Mode Status: Enabled (1)`，设备 connected/paired/booted。
+     所以这是纯设备侧状态，别去改 WDA 构建。
 
-- **处理**：按 §1「真机前置条件」四条（隧道 / 预建 WDA / 签名 team / 手机解锁）
-  做一遍，`mta run` 带 `MTA_XCODE_ORG_ID` + `MTA_WDA_PREBUILT_APP`。装机链路
-  本身是通的（AFC/lockdown，日志 `installation of
-  'com.facebook.WebDriverAgentRunner.xctrunner' succeeded`），所以隧道是唯一的
-  外部依赖。
+- **处理**：按 §1「真机前置条件」五条（隧道 / 预建 WDA / 签名 team / 手机解锁
+  **且屏幕亮着** / App 已装机）做一遍，`mta run` 带 `MTA_XCODE_ORG_ID` +
+  `MTA_WDA_PREBUILT_APP`。装机链路本身是通的（AFC/lockdown，日志
+  `installation of 'com.facebook.WebDriverAgentRunner.xctrunner' succeeded`），
+  所以隧道是唯一的外部依赖。⚠️ **重跑**时若撞到第 6 条（设备枚举为空 /
+  `Unknown device … UDID`），先 `xcrun devicectl device info details` 看
+  `Last Connection Date` 是否晚于隧道启动时间——是就重启隧道，不用动 Appium。
   另一条备选 `MTA_WDA_DERIVED_DATA` → `usePrebuiltWDA`（仍要 xcodebuild，只是
   免编译）留给设备 OS ≤ 本地 SDK 的机器；⚠️ 该路径必须是**绝对路径**——Appium
   在自己的 CWD（WDA 包目录）里跑 xcodebuild，相对路径会解析到别处（实测仍报 65）。

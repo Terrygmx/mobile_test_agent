@@ -978,19 +978,28 @@ def _session_failure_hint(e: Exception) -> str:
     """把 Appium 的原始错误翻成可操作的下一步（真机接入踩过的坑，§3.10）。
 
     WDA 起不来时 Appium 的原话是「60 秒没起来 / 可能没构建好」，但真机上最
-    常见的两个原因都不在这个方向上：① **手机锁屏**——iOS 直接拒绝拉起 runner，
-    日志只留 `Connection was refused to port 8100`（实测：devicectl 单独拉起会
-    明确报 `device was not, or could not be, unlocked`，而 Appium 路径不吐这句）；
-    ② RemoteXPC 隧道没在跑。两种形态都等满 60 秒才超时，值得一句话点破。
+    常见的几个原因都不在这个方向上：
+    ① **手机锁屏**——iOS 直接拒绝拉起 runner，日志只留
+       `Connection was refused to port 8100`（实测：devicectl 单独拉起会明确报
+       `device was not, or could not be, unlocked`，而 Appium 路径不吐这句）；
+    ② **屏幕熄灭但设备没锁**——外层报错与①**一字不差**，但 runner 其实起来了、
+       只是 60s 内 `Timed out while enabling automation mode`（automation mode
+       要求屏幕亮着）。按侧边键唤醒即可，不用重启任何东西；
+    ③ RemoteXPC 隧道没在跑，或**设备在隧道创建之后重连过**（症状是设备枚举
+       就空了：`Available real devices:` 后面空白 + `Unknown device … UDID`）。
+    ① ② 都等满 60 秒才超时，③ 则根本进不到 WDA 那一层，值得一句话点破。
     两种错误 mta 看到的外层文案都是 `Unable to launch WebDriverAgent`，据此 gate。
     """
     if "Unable to launch WebDriverAgent" not in str(e):
         return ""
-    return ("\n  提示：真机 WDA 起不来，按概率查两件事——"
-            "① 手机是否已解锁且没有自动锁屏（锁屏时 iOS 拒绝拉起 runner，"
-            "只报 Connection was refused to port 8100）；"
+    return ("\n  提示：真机 WDA 起不来，按概率查三件事——"
+            "① 手机是否已解锁**且屏幕亮着**（锁屏时 iOS 拒绝拉起 runner；"
+            "屏幕熄灭时报错一模一样但 runner 起得来，只是 automation mode "
+            "超时——按侧边键唤醒即可）；"
             "② RemoteXPC 隧道是否还在跑"
-            "（sudo appium driver run xcuitest tunnel-creation）。"
+            "（sudo appium driver run xcuitest tunnel-creation）；"
+            "③ 若错误是 Unknown device UDID / 设备列表为空，说明设备在隧道"
+            "创建后重连过，重启隧道即可。"
             "详见 docs/lst_update_playbook.md §3.10")
 
 
