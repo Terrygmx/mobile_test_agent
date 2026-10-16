@@ -345,6 +345,42 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
   `executable.path` 与当前 devicectl 不符（报 `Did you mean 'Executable
   Path'?`）。有隧道时走不到这条分支，不用管；别处撞到同款就是版本错配。
 
+### 3.11 首页锚点找不到：`home_list` 不存在 + 更新弹窗盖住首页
+
+- **症状**：`lst_smoke_launch_001: FAIL (CURRENT_SCREEN_UNKNOWN)`，detail 是
+  `WAIT_TIMEOUT: target='LSTHomeViewController' condition='active' timeout=15.0s …
+  no element for [{'type': 'accessibility_id', 'value': 'home_list'}]`。
+- **根因是两层，叠在一起**（2026-10-16 真机 dump 无障碍树实测，不是猜的）：
+
+  1. **更新弹窗把首页盖住了**。冷启动后 uat 服务器会弹「更新提示」（服务器
+     4.2.31 > 装机 4.2.30）。模态弹窗一上，首页内容在无障碍树里全部变成
+     `visible="false"`——节点还在，但不可见。实测：点掉前「可见且有名」的节点
+     只有 **7** 个（全是弹窗自己的：标题、正文、两个按钮及其文字），点掉
+     「取消」后跳到 **43** 个。`wait_for screen active` 要求 marker 既找得到又
+     **可见**，所以弹窗在时必挂。
+  2. **`home_list` 这个锚点本身不存在**。整棵树上没有任何元素的 accessibility
+     id 是它，而且**连一个 `XCUIElementTypeTable` 都没有**——首页列表由
+     ScrollView/CollectionView 承载，这些容器的 `name` 全是空串。
+     ⚠️ 这是 App 侧那行 `_tableView.accessibilityIdentifier = @"home_list"`
+     的**结构性无效**：`accessibilityIdentifier` 设在**容器**上，XCUITest 根本
+     不把容器当可定位节点暴露（设了也白设，`strings` 二进制能看到串、树里找不到）。
+     要能定位，标识符得设在**叶子**元素上（且不能给容器设
+     `isAccessibilityElement=YES`——那会把整表折成一个节点，VoiceOver 全废）。
+
+- **处理**（mta 侧已改，零 App 改动）：
+  - screen marker 从 `home_list` 改成**首页搜索框占位文案**
+    `请输入「关键词」搜索`——实测 `visible=true`、name 全局唯一、且首页之外
+    不出现（弹窗盖住时它倒是 `visible=false`，正好一起被第 1 条挡住，语义自洽）。
+  - 用例加一步 **optional** 的 `tap update_dialog_cancel` 点掉弹窗。元素定义用
+    **predicate**（`type == "XCUIElementTypeButton" AND name == "取消"`）而不是
+    accessibility_id——`取消` 在树里有**两个同名节点**（Button 和它内部承载
+    文字的 StaticText），单策略会 `AmbiguousElement`。
+  - `optional` 的语义：定位不到 = 条件不成立，跳过并记 SUCCESS（不是 FAIL）。
+    App 追上 4.2.31 后弹窗不再出现，普通 tap 会让用例假红。⚠️ optional
+    **只豁免定位失败**，动作执行中途抛的别的错照旧 FAIL。
+  - 仍待 App 同事处理：`LSTHomeViewController.m:1134` 那行要么删，要么挪到叶子
+    元素上；挪之前 mta 侧不依赖它。
+
 ## 4. 各文件职责速查（接入相关）
 
 | 位置 | 文件 | 职责 | 版本更新时动不动 |
@@ -354,6 +390,8 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
 | mta 仓库 | `Makefile` 的 `lst-build-device` | 构建+注入 scene 宏/manifest+身份键+重签 | 否（自动化吸收） |
 | mta 仓库 | `Makefile` 的 `lst-install-device` | devicectl 装机 | 否 |
 | mta 仓库 | `session/device_session.py` 的 `resolve_local_caps` | 真机 caps 装配：camelCase 键名 / `platformVersion` 钳到本地 SDK / 预建 WDA 路线（见 §3.10） | 否 |
+| mta 仓库 | `repository/overrides/{screens,elements}/LSTHomeViewController.yaml` | 首页 screen marker（搜索框占位文案）+ 更新弹窗「取消」按钮的 predicate 定位（见 §3.11） | 否 |
+| mta 仓库 | `suites/lst/smoke_launch_001.yaml` | 冷启动冒烟：launch → optional 点掉更新弹窗 → 等首页可见 | 弹窗行为变时改 |
 | mta 仓库 | `scripts/lst_build_dev.sh` / `lst_build_uat.sh` / `lst_build_prod.sh` | 三环境一键构建+strings 环境验证（+可选装机），内部调 make 目标 | 否（指纹失效时改 VERIFY_PATTERN） |
 | 乐速通仓库 | `AppDelegate.m` ifdef 块 | iOS 27 scene 生命周期最小采纳 | 待 App 正式采纳后删除 |
 | 乐速通仓库 | `Podfile` 顶部两个 spec 源 | pod 拉取 | 否（勿再注释） |

@@ -131,22 +131,31 @@ class TestcaseRunner:
         try:
             getattr(self, f"_do_{action}")(step)
         except Exception as e:
-            status, error = "FAILED", f"{type(e).__name__}: {e}"
-            # Recovery 分流（7.3 / 第 9 节）：
-            #   - 定位失败（ElementNotFound / AmbiguousElement）→ 可恢复；
-            #   - 断言目标漂移（AssertionTargetDrift）→ 可恢复（detail.kind=assertion_target）；
-            #   - 断言值不符（AssertionValueMismatch）→ H6：直接 FAIL，无 Recovery；
-            #   - 等待超时（WaitTimeout）→ 默认不恢复（recovery.on_wait_timeout 才放行）。
-            recoverable = isinstance(
-                e, (ElementNotFound, AmbiguousElement, AssertionTargetDrift))
-            if (recoverable and step.target and self.recovery_ctx):
-                rec_result = self._try_recovery(step, e)
-                if rec_result and rec_result["status"] == "RECOVERED":
-                    status, error = "RECOVERED", None
+            # optional 步：定位不到 = 那个条件性前置不成立（如「更新弹窗没弹」），
+            # 跳过并记 SUCCESS 而不是 FAIL——它不是断言，是可能不出现的前置。
+            # 与 R11-2 的 settle 放行同形：SUCCESS 步的 error 字段承载说明，
+            # 事后能区分「真做了」和「条件不成立跳过了」。
+            # ⚠️ 只豁免定位失败；动作执行中途抛的别的错照旧 FAIL。
+            if getattr(step, "optional", False) and isinstance(
+                    e, (ElementNotFound, AmbiguousElement)):
+                status, error = "SUCCESS", f"optional step skipped ({type(e).__name__})"
+            else:
+                status, error = "FAILED", f"{type(e).__name__}: {e}"
+                # Recovery 分流（7.3 / 第 9 节）：
+                #   - 定位失败（ElementNotFound / AmbiguousElement）→ 可恢复；
+                #   - 断言目标漂移（AssertionTargetDrift）→ 可恢复（detail.kind=assertion_target）；
+                #   - 断言值不符（AssertionValueMismatch）→ H6：直接 FAIL，无 Recovery；
+                #   - 等待超时（WaitTimeout）→ 默认不恢复（recovery.on_wait_timeout 才放行）。
+                recoverable = isinstance(
+                    e, (ElementNotFound, AmbiguousElement, AssertionTargetDrift))
+                if (recoverable and step.target and self.recovery_ctx):
+                    rec_result = self._try_recovery(step, e)
+                    if rec_result and rec_result["status"] == "RECOVERED":
+                        status, error = "RECOVERED", None
+                    else:
+                        raise
                 else:
                     raise
-            else:
-                raise
         finally:
             # R11-2：settle 放行记进该步 error 字段（SUCCESS 步 error 原本为 None）。
             # 目的：事后能区分「树真静止了」和「到上限放行的」。trace schema 0.1

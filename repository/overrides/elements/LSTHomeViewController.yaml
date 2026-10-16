@@ -1,0 +1,21 @@
+# overrides/elements/LSTHomeViewController.yaml — 乐速通首页相关元素
+# （2026-10-16 真机接入）：更新提示弹窗的「取消」按钮。
+#
+# ⚠️ 为什么必须用 predicate 而不是 accessibility_id：弹窗里 Button「取消」
+# 和它内部承载文字的 StaticText「取消」**同名**，`accessibility id` 单策略
+# find 会返回 2 个 → mta 判 AmbiguousElement（唯一性校验内嵌在 find）。
+# 用 predicate 限定 type 后实测唯一匹配（2026-10-16 真机 dump：
+# `取消 button matches: 1`）。
+schema_version: "1.0"
+kind: element
+id: update_dialog_cancel
+screen: LSTHomeViewController
+type: button
+strategies:
+  - {type: predicate,
+     value: 'type == "XCUIElementTypeButton" AND name == "取消"',
+     origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC

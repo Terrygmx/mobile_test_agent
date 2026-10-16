@@ -138,6 +138,12 @@ $(error LST_ENV 只能是 dev / uat / prod)
 endif
 LST_DEVICE_BUILDDIR = $(CURDIR)/build/lst-device-$(LST_ENV)
 LST_DEVICE_APP = $(LST_DEVICE_BUILDDIR)/Build/Products/Debug-iphoneos/nfcPushOnline.app
+# 乐速通的签名 team（playbook §0 固定信息）。WDA 工程不带 team，不给会被
+# xcodebuild 判 requires a development team（code 65）。
+LST_XCODE_ORG_ID ?= TSVS7C28BU
+# 预建 WDA（iOS 27+ 必需，见 docs/lst_update_playbook.md §1 前置条件 2 /
+# §3.10）：设备 OS 高于本地 SDK 时 Appium 自己编 WDA 必挂，改用预建产物。
+LST_WDA_PREBUILT_APP = $(CURDIR)/out/wda-ddata/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app
 
 # 真机目标注入发生在签名之后：PlistBuddy 改 Info.plist 会破签名 → 注入完
 # 必须立刻重签主 bundle（嵌套 framework 未动）。证书取钥匙串第一个
@@ -181,3 +187,28 @@ lst-install-device:
 	test -n "$$UDID" || { echo "lst-install-device: 未找到 USB 连接的 physical 设备（xcrun devicectl list devices 为空或 State 非 connected/available）"; exit 1; }; \
 	echo "lst-install-device: $$UDID"; \
 	xcrun devicectl device install app --device "$$UDID" "$(LST_DEVICE_APP)"'
+
+# 真机冒烟一条龙（2026-10-16 首次真绿）。把「漏一个环境变量就白跑一小时」的
+# 东西固化下来：WDA 签名 team + 预建 WDA 路线 + UDID 自动探测（同
+# lst-install-device 的过滤逻辑）。
+# 前置条件见 docs/lst_update_playbook.md §1：① RemoteXPC 隧道在跑
+# （sudo appium driver run xcuitest tunnel-creation）；② 手机已解锁、没自动锁屏；
+# ③ App 已装机（make lst-install-device LST_ENV=<env>）。
+lst-smoke-device:
+	@bash -c 'set -e; \
+	export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer; \
+	UDID=$${MTA_DEVICE_UDID:-$$(xcrun devicectl list devices 2>/dev/null | grep physical | grep -Ei "connected|available" | grep -oE "[0-9A-F]{8}-[0-9A-F]{12,16}" | head -1)}; \
+	test -n "$$UDID" || { echo "lst-smoke-device: 未找到 USB 连接的 physical 设备"; exit 1; }; \
+	test -d "$(LST_WDA_PREBUILT_APP)" || { echo "lst-smoke-device: 预建 WDA 不存在（$(LST_WDA_PREBUILT_APP)），构建命令见 docs/lst_update_playbook.md §1 前置条件 2"; exit 1; }; \
+	echo "lst-smoke-device: $$UDID env=$(LST_ENV)"; \
+	MTA_XCODE_ORG_ID=$(LST_XCODE_ORG_ID) \
+	MTA_WDA_PREBUILT_APP="$(LST_WDA_PREBUILT_APP)" \
+	$(CURDIR)/.venv/bin/python -m cli.main run \
+	  --suite lst_smoke --suites-root suites \
+	  --udid "$$UDID" --bundle-id com.etc.nfcPushOnline \
+	  --app-path "$(LST_DEVICE_APP)" \
+	  --overrides repository/overrides \
+	  --generated repository/generated/local-$(LST_ENV) \
+	  --metadata repository/generated/local-$(LST_ENV)/source_metadata.json \
+	  --db out/lst-smoke.db'
+

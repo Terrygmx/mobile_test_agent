@@ -1,8 +1,18 @@
 # suites/lst/smoke_launch_001.yaml — 乐速通冒烟：冷启动 → 首页可见
-# 断言锚点 home_list：LSTHomeViewController.m 里 tableView 的
-# accessibilityIdentifier（2026-10-15 加，App 侧 1 行可测性投入）；
-# screen 定义在 repository/overrides/screens/LSTHomeViewController.yaml
-# （marker: home_list——generated 的 marker 是 screen.<类名>，匹配不到真机）。
+#
+# 2026-10-16 真机实测修订（两处，都是 dump 无障碍树看出来的，不是猜的）：
+# ① screen marker 从 `home_list` 改成首页搜索框占位文案。原锚点在真机
+#    无障碍树里**根本不存在**——App 把 accessibilityIdentifier 设在容器
+#    （UITableView）上，而 XCUITest 不把容器当可定位节点暴露（实测整棵树
+#    连一个 XCUIElementTypeTable 都没有，列表由 ScrollView/CollectionView
+#    承载，这些容器的 name 全是空串）。详见 playbook §3.11。
+#    新 marker 的唯一性/可见性是实测过的：visible=true、name 全局唯一、
+#    且首页之外不出现。
+# ② 新增 optional 的「取消更新弹窗」步。冷启动后 uat 服务器会弹「更新提示」
+#    （服务器 4.2.31 > 装机 4.2.30），模态弹窗把首页内容全部置成
+#    visible=false——不点掉，任何首页断言都过不了（实测点掉前可见且有名的
+#    节点只有 7 个、全是弹窗自己的；点掉后 43 个）。App 追上版本后不再弹，
+#    所以该步 optional：没弹就跳过，不会假红。
 schema_version: "0.2"
 id: lst_smoke_launch_001
 name: 乐速通冷启动后首页可见
@@ -12,6 +22,9 @@ precondition:
   reset: RELAUNCH
 steps:
   - action: launch_app
+  - action: tap
+    target: update_dialog_cancel
+    optional: true
   - wait_for:
       target: screen:LSTHomeViewController
       condition: active

@@ -128,6 +128,13 @@ class ActionStep(BaseModel):
     idempotency: Idempotency | None = None  # None = 未声明 → Executor 按 7.4 推导
     risk: Risk | None = None
     postcondition: Postcondition | None = None
+    # 条件性前置：定位不到（ElementNotFound / AmbiguousElement）时**跳过并记
+    # SUCCESS**，不是 FAIL。用于「可能弹也可能不弹」的模态——乐速通 uat 的
+    # 更新提示弹窗（2026-10-16 实测）：服务器有更新时必弹，App 追上版本后
+    # 不弹，用普通 tap 会让用例在没弹时假红。
+    # ⚠️ 只豁免**定位失败**；动作执行后抛的别的错照旧 FAIL——optional 不等于
+    # 「随便失败都能过」。
+    optional: bool = False
 
     @model_validator(mode="after")
     def _input_needs_target_and_value(self) -> "ActionStep":
