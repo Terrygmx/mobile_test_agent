@@ -442,6 +442,330 @@ steps:
     assert result.failure_type == "WAIT_TIMEOUT"
 
 
+def test_wait_step_settles_after_element_hit(tmp_path):
+    """迁移旧 TestcaseRunner 时不能丢掉「命中后等树静止」的语义。
+
+    真机 R11-1 实锤：`wait_for element exists → tap` 会在 SwiftUI 转场期间
+    吞掉 tap；wait 成功本身不够，必须再等 UI 树稳定。
+    """
+    from executor.guard import EnvKind, Guard
+    from executor.wait import WaitConfig
+    from runner.lifecycle import Lifecycle
+    from runner.runner import StepRunner
+    from tracer.storage import TraceStore
+
+    class _Ex:
+        def __init__(self):
+            self.page_source_calls = 0
+
+        def find(self, strategies):
+            return _StubOKElement()
+
+        def perform(self, action, element, value=None):
+            pass
+
+        def page_source(self):
+            self.page_source_calls += 1
+            return "<stable/>"
+
+    store = TraceStore(tmp_path / "trace.db")
+    store.start_run("run_settle")
+    ex = _Ex()
+    pipe = SessionPipeline(
+        suites_root=None, store=store,
+        wait_config=WaitConfig(polling_interval=0.01, stable_polls=2,
+                               stable_interval=0.01))
+    case = _load_case("""\
+schema_version: "0.2"
+id: settle_case
+name: settle
+steps:
+  - wait_for:
+      target: HomeView.go_search
+      condition: exists
+      timeout: 0.05
+""")
+    runner = StepRunner(ex, _FakeDS(), Guard(EnvKind.SANDBOX))
+    result = pipe.run_case(runner, Lifecycle(store=store), case,
+                           run_id="run_settle")
+
+    assert result.status == "PASS"
+    assert ex.page_source_calls == 2, "命中后必须执行 settle（首树 + 对比树）"
+    row = store.conn.execute(
+        "SELECT status, detail_json FROM steps").fetchone()
+    assert row[0] == "SUCCESS"
+    assert "settle" not in (row[1] or ""), "稳定时不该写放行说明"
+
+
+def test_screen_wait_skips_settle_by_default_through_pipeline(tmp_path):
+    """screen active 默认仍走 7.3 廉价路径，不因迁移额外拉 page_source。"""
+    from executor.guard import EnvKind, Guard
+    from executor.wait import WaitConfig
+    from runner.lifecycle import Lifecycle
+    from runner.runner import StepRunner
+    from tracer.storage import TraceStore
+
+    class _Ex:
+        def __init__(self):
+            self.page_source_calls = 0
+
+        def find(self, strategies):
+            return _StubOKElement()
+
+        def perform(self, action, element, value=None):
+            pass
+
+        def page_source(self):
+            self.page_source_calls += 1
+            return "<stable/>"
+
+    store = TraceStore(tmp_path / "trace.db")
+    store.start_run("run_screen_settle")
+    ex = _Ex()
+    pipe = SessionPipeline(
+        suites_root=None, store=store,
+        wait_config=WaitConfig(polling_interval=0.01))
+    case = _load_case("""\
+schema_version: "0.2"
+id: screen_settle_case
+name: screen settle
+steps:
+  - wait_for:
+      target: screen:HomeView
+      condition: active
+      timeout: 0.05
+""")
+    runner = StepRunner(ex, _FakeDS(), Guard(EnvKind.SANDBOX))
+    result = pipe.run_case(runner, Lifecycle(store=store), case,
+                           run_id="run_screen_settle")
+
+    assert result.status == "PASS"
+    assert ex.page_source_calls == 0
+
+
+def test_wait_recovery_rerun_still_settles(tmp_path):
+    """恢复定位后重跑 wait 成功，也必须补 settle。
+
+    旧 runner 的 settle 在 `_do_wait_for` 内，恢复后重跑走的是同一个入口；
+    新管线把恢复重跑写在 wait 分支里，若直接 `continue` 就会静默少一次
+    静止判定——转场期紧随其后的 tap 仍可能被吞。
+    """
+    from agent.context import RecoveryResult
+    from executor.guard import EnvKind, Guard
+    from executor.wait import WaitConfig
+    from runner.lifecycle import Lifecycle
+    from runner.runner import StepRunner
+    from tracer.storage import TraceStore
+
+    class _Ex:
+        def __init__(self, recovery):
+            self.calls = 0
+            self.page_source_calls = 0
+            self.recovery = recovery
+
+        def find(self, strategies):
+            self.calls += 1
+            # 恢复前持续失败以触发 wait 超时；恢复定位后才允许重跑命中。
+            if not self.recovery.entered:
+                from executor.executor import ElementNotFound
+                raise ElementNotFound("drifted")
+            return _StubOKElement()
+
+        def find_all(self, locator):
+            return [_StubOKElement()]
+
+        def page_source(self):
+            self.page_source_calls += 1
+            return "<stable/>"
+
+        def perform(self, action, element, value=None):
+            pass
+
+    class _Recovery:
+        def __init__(self):
+            self.entered = False
+
+        def recover(self, ctx):
+            self.entered = True
+            return RecoveryResult(
+                recovered=True, kind="llm",
+                detail={"stages": [{"stage": "llm", "outcome": "candidate"}]},
+                strategy={"type": "accessibility_id", "value": "new_target"})
+
+    store = TraceStore(tmp_path / "trace.db")
+    store.start_run("run_wait_recovered_settle")
+    recovery = _Recovery()
+    ex = _Ex(recovery)
+    pipe = SessionPipeline(
+        suites_root=None, store=store, recovery=recovery,
+        wait_config=WaitConfig(polling_interval=0.01, stable_polls=2,
+                               stable_interval=0.01))
+    case = _load_case("""\
+schema_version: "0.2"
+id: wait_recovered_settle
+name: wait recovered settle
+steps:
+  - wait_for:
+      target: HomeView.go_search
+      condition: exists
+      timeout: 0.02
+""")
+    runner = StepRunner(ex, _FakeDS(), Guard(EnvKind.SANDBOX))
+    result = pipe.run_case(runner, Lifecycle(store=store), case,
+                           run_id="run_wait_recovered_settle")
+
+    assert result.status == "RECOVERED", result.detail
+    assert ex.page_source_calls == 2, "恢复后的 wait 命中仍必须做 settle"
+    row = store.conn.execute(
+        "SELECT status, detail_json FROM steps").fetchone()
+    assert row[0] == "RECOVERED"
+    assert "settle" not in (row[1] or "")
+
+
+def test_wait_recovery_settle_timeout_is_audited(tmp_path):
+    """恢复路径的 settle 放行说明也要进 RECOVERED 步骤详情。"""
+    from agent.context import RecoveryResult
+    from executor.guard import EnvKind, Guard
+    from executor.wait import WaitConfig
+    from runner.lifecycle import Lifecycle
+    from runner.runner import StepRunner
+    from tracer.storage import TraceStore
+
+    class _Ex:
+        def __init__(self, recovery):
+            self.calls = 0
+            self.page_source_calls = 0
+            self.recovery = recovery
+
+        def find(self, strategies):
+            self.calls += 1
+            if not self.recovery.entered:
+                from executor.executor import ElementNotFound
+                raise ElementNotFound("drifted")
+            return _StubOKElement()
+
+        def find_all(self, locator):
+            return [_StubOKElement()]
+
+        def page_source(self):
+            self.page_source_calls += 1
+            return f"<tree seq={self.page_source_calls}/>"
+
+        def perform(self, action, element, value=None):
+            pass
+
+    class _Recovery:
+        def __init__(self):
+            self.entered = False
+
+        def recover(self, ctx):
+            self.entered = True
+            return RecoveryResult(
+                recovered=True, kind="llm",
+                detail={"stages": [{"stage": "llm", "outcome": "candidate"}]},
+                strategy={"type": "accessibility_id", "value": "new_target"})
+
+    store = TraceStore(tmp_path / "trace.db")
+    store.start_run("run_wait_recovered_settle_timeout")
+    recovery = _Recovery()
+    pipe = SessionPipeline(
+        suites_root=None, store=store, recovery=recovery,
+        wait_config=WaitConfig(polling_interval=0.01, stable_polls=2,
+                               stable_interval=0.01, settle_timeout=0.01))
+    case = _load_case("""\
+schema_version: "0.2"
+id: wait_recovered_settle_timeout
+name: wait recovered settle timeout
+steps:
+  - wait_for:
+      target: HomeView.go_search
+      condition: exists
+      timeout: 0.02
+""")
+    runner = StepRunner(_Ex(recovery), _FakeDS(), Guard(EnvKind.SANDBOX))
+    result = pipe.run_case(runner, Lifecycle(store=store), case,
+                           run_id="run_wait_recovered_settle_timeout")
+
+    assert result.status == "RECOVERED", result.detail
+    row = store.conn.execute(
+        "SELECT status, detail_json FROM steps").fetchone()
+    assert row[0] == "RECOVERED"
+    assert "ui tree never stable" in (row[1] or "")
+
+
+def test_optional_step_skips_only_locator_failures_through_pipeline(tmp_path):
+    """旧 runner 退役后，optional 的口径仍钉在真实执行路径上。
+
+    只豁免定位失败（ElementNotFound / AmbiguousElement / 0 匹配）；动作执行
+    抛的别的错照旧 FAIL——optional 不能退化成「随便失败都能过」。
+    """
+    from executor.guard import EnvKind, Guard
+    from executor.executor import ElementNotFound
+    from runner.lifecycle import Lifecycle
+    from runner.runner import StepRunner
+    from tracer.storage import TraceStore
+
+    class _Ex:
+        def __init__(self, error):
+            self.error = error
+            self.tap_calls = 0
+
+        def find(self, strategies):
+            if self.find_error is not None:
+                raise self.find_error
+            return _StubOKElement()
+
+        def tap_element(self, element):
+            self.tap_calls += 1
+            raise self.error
+
+        def perform(self, action, element, value=None):
+            self.tap_calls += 1
+            raise self.error
+
+        def page_source(self):
+            return "<stable/>"
+
+        find_error = None
+
+    case = _load_case("""\
+schema_version: "0.2"
+id: optional_case
+name: optional
+steps:
+  - action: tap
+    target: update_dialog_cancel
+    optional: true
+""")
+
+    store = TraceStore(tmp_path / "trace.db")
+    store.start_run("run_optional_only_locator")
+    ex = _Ex(RuntimeError("unused"))
+    ex.find_error = ElementNotFound("no dialog")
+    runner = StepRunner(ex, _FakeDS(),
+                        Guard(EnvKind.SANDBOX))
+    result = SessionPipeline(suites_root=None, store=store).run_case(
+        runner, Lifecycle(store=store), case,
+        run_id="run_optional_only_locator")
+    assert result.status == "PASS", result.detail
+    row = store.conn.execute(
+        "SELECT status, detail_json FROM steps").fetchone()
+    assert row[0] == "SUCCESS"
+    assert "optional_skipped" in (row[1] or "")
+
+    store2 = TraceStore(tmp_path / "trace2.db")
+    store2.start_run("run_optional_other_error")
+    runner2 = StepRunner(_Ex(RuntimeError("WDA died")), _FakeDS(),
+                         Guard(EnvKind.SANDBOX))
+    result2 = SessionPipeline(suites_root=None, store=store2).run_case(
+        runner2, Lifecycle(store=store2), case,
+        run_id="run_optional_other_error")
+    assert result2.status == "FAIL", result2.detail
+    row2 = store2.conn.execute(
+        "SELECT status, detail_json FROM steps").fetchone()
+    assert row2[0] == "FAILED", "非定位错误不能被 optional 豁免"
+
+
 # --- R16 修复回归 ---
 
 class _StubOKExecutor:

@@ -110,7 +110,7 @@ class Unrankable:
     """**进了影响面却无法打分**的用例 + 原因。
 
     当前只有一种成因：用例引用了 Repository 解析不到的元素（`UnknownReferenceError`）。
-    P1 的处置是同一句话——`runner/testcase_runner.py` 把它当**用例缺陷**（lint 应已
+    P1 的处置是同一句话——执行链路把引用错误当**用例缺陷**（lint 应已
     拦截）→ 该用例直接 FAIL，不做 recovery。所以这里也**不猜**它的风险（猜 LOW 会让
     它在 Plan 里沉底，而它恰恰是最可能失败的那个），而是**列出来**让人看见。
     """
@@ -416,7 +416,7 @@ def plan(planner_input: PlannerInput, *, knowledge: KnowledgeSources,
         try:
             risk = case_risk(meta, repository, build=planner_input.app_build)
         except (UnknownReferenceError, AmbiguousReferenceError) as e:
-            # P1 的同一句话（`runner/testcase_runner.py`）：引用错误是**用例缺陷**
+            # P1 的同一句话（执行链路）：引用错误是**用例缺陷**
             # （lint 应已拦截），运行期直接 FAIL、不做 recovery。这里同理：不猜风险
             # （猜 LOW 会让它沉底，而它恰恰最可能失败）——列出来让人看见。
             unrankable.append(Unrankable(

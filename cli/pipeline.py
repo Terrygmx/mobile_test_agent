@@ -26,7 +26,7 @@ from pathlib import Path
 import yaml
 
 from agent.recovery import resolve_deferred_sample
-from executor.wait import WaitTimeout
+from executor.wait import WaitConfig, WaitTimeout
 from runner.lifecycle import Lifecycle
 from runner.result import RunResult, TestcaseResult, recovered_kind
 from runner.runner import RunStepContext, StepOutcome, StepRunner
@@ -50,7 +50,7 @@ from source.build_identity import DEFAULT_APP_BUILD  # noqa: E402
 
 # App/driver 级动作（6.2 action 里的三种非元素动作）：不走 7.1 的
 # find/perform 元素管线。launch/terminate 归 AppSession，back 归 driver，
-# swipe 归 Executor——旧 runner（testcase_runner._do_*）同款分流。
+# swipe 归 Executor——与 P0 旧 runner 的 _do_* 分流同形（已退役）。
 _APP_LEVEL_ACTIONS = frozenset(
     {"launch_app", "terminate_app", "back", "swipe"})
 
@@ -284,7 +284,8 @@ class SessionPipeline:
     def __init__(self, suites_root: Path | str | None, *,
                  store=None, deps: PipelineDeps | None = None,
                  recovery=None, secrets=None, app_id: str = "",
-                 app_build: str = DEFAULT_APP_BUILD, crash_probe=None):
+                 app_build: str = DEFAULT_APP_BUILD, crash_probe=None,
+                 wait_config: WaitConfig | None = None):
         self.suites_root = Path(suites_root) if suites_root else None
         self.store = store
         self.deps = deps
@@ -313,6 +314,9 @@ class SessionPipeline:
         # 「App 崩了吗」（`_crash_report`，每用例至多探一次），是则记
         # `APP_CRASH` 而不是 `WDA_FAILURE` / 原症状（§10 的真机实测）。
         self.crash_probe = crash_probe
+        # 等待参数来自 mta.yaml wait: 段（不在代码里写死），由管线持有一份，
+        # 供 wait/assertion 引擎与 settle 判定共用。
+        self.wait_config = wait_config or WaitConfig()
         # Batch B 修正：崩溃报告的时间窗下界与**每用例一次**的探测缓存。
         # 窗从**本条用例**开始算（不是 run 开始）——见 `_crash_report` 的
         # 「为什么窗口是用例级」。
@@ -402,10 +406,11 @@ class SessionPipeline:
             lifecycle.begin_testcase(run_id, tc.id, attempt=attempt)
 
         wait_engine = WaitEngine(
-            runner.ex, self._locator_for(runner)) \
+            runner.ex, self._locator_for(runner), config=self.wait_config) \
             if runner is not None else None
         assertion_engine = AssertionEngine(
-            runner.ex, self._locator_for(runner)) \
+            runner.ex, self._locator_for(runner),
+            polling_interval=self.wait_config.polling_interval) \
             if runner is not None else None
 
         status = "PASS"
@@ -584,16 +589,24 @@ class SessionPipeline:
                                     rec, int((time.time() - t1) * 1000))
                                 raise
                             resolve_deferred_sample(rec, succeeded=True)
+                            settle_notice = self._wait_settle_notice(
+                                wait_engine, step.wait_for)
                             recovered_labels.append(self._record_aux_recovered(
                                 lifecycle, idx, "wait_for",
                                 _target_label(step.wait_for.target),
-                                rec, latency_ms=int((time.time() - t1) * 1000)))
+                                rec, latency_ms=int((time.time() - t1) * 1000),
+                                detail_extra=({"settle": settle_notice}
+                                              if settle_notice else None)))
                             recovered_kinds.append(rec.kind)
                             continue
+                        settle_notice = self._wait_settle_notice(
+                            wait_engine, step.wait_for)
                         self._record_aux_step(
                             lifecycle, idx, "wait_for",
                             _target_label(step.wait_for.target),
-                            latency_ms=int((time.time() - t1) * 1000))
+                            latency_ms=int((time.time() - t1) * 1000),
+                            detail=({"settle": settle_notice}
+                                    if settle_notice else None))
                     elif isinstance(step, AssertionStep):
                         t1 = time.time()
                         try:
@@ -888,7 +901,7 @@ class SessionPipeline:
                               step: ActionStep) -> tuple[bool, str | None]:
         """App/driver 级动作执行（M2 Gate 真机实锤后新增）。
 
-        分流（与 P0 testcase_runner._do_* 一致）：
+        分流（与旧 runner 的 _do_* 一致）：
           launch_app    → deps.app.launch()
           terminate_app → deps.app.terminate()
           back          → device session 的 driver.back()
@@ -1117,7 +1130,8 @@ class SessionPipeline:
 
     def _record_aux_recovered(self, lifecycle, idx, step_type, target_id,
                               rec, *, latency_ms: int = 0,
-                              context: str | None = None) -> str:
+                              context: str | None = None,
+                              detail_extra: dict | None = None) -> str:
         """aux 步骤恢复成功：steps 行 RECOVERED + recoveries 行 + 4.7 样本。
 
         返回设计 10 的分类标签，调用方记进用例明细（`context` 只有调用方
@@ -1125,13 +1139,16 @@ class SessionPipeline:
         函数仍是 `runner.result.recovered_kind` 单一实现）。
         """
         label = recovered_kind(rec.kind, context=context)
+        detail = {"recovery_kind": rec.kind,
+                  "recovered_kind": label,
+                  "recovery_context": context,
+                  "recovery": rec.detail}
+        if detail_extra:
+            detail.update(detail_extra)
         step_row_id = lifecycle.record_step(
             StepOutcome(ok=True, step_index=idx, action=step_type,
                         element_id=target_id, latency_ms=latency_ms,
-                        detail={"recovery_kind": rec.kind,
-                                "recovered_kind": label,
-                                "recovery_context": context,
-                                "recovery": rec.detail}),
+                        detail=detail),
             step_index=idx, status="RECOVERED")
         self._write_recovery_row(step_row_id, target_id, rec, context)
         self._write_experience_artifacts(step_row_id, rec)
@@ -1267,6 +1284,21 @@ class SessionPipeline:
                 and getattr(target_registered, "marker", None):
             return "CURRENT_SCREEN_UNKNOWN"
         return None
+
+    def _wait_settle_notice(self, wait_engine, wait_spec) -> str | None:
+        """wait 命中后补树静止判定（R11-1 真机实锤：转场期 tap 被吞）。
+
+        screen active 默认走 7.3 廉价路径；其余目标或显式开启
+        `settle_on_screen_wait` 时做判定。超时只留审计说明并放行——
+        settle 是额外保险，不是被测行为判定（R11-2）。
+        """
+        is_screen = wait_spec.target.type == "screen"
+        if is_screen and not self.wait_config.settle_on_screen_wait:
+            return None
+        if wait_engine.wait_for_settle():
+            return None
+        return (f"ui tree never stable within "
+                f"{self.wait_config.settle_timeout}s (proceeded anyway)")
 
     def _aux_recover(self, runner, tc, attempt, target_ref, exc,
                      step_type: str, *, run_id: str | None = None,

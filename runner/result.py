@@ -238,7 +238,7 @@ class TestcaseResult:
         return junit_status_for(self.status, self.failure_type)
 
 
-# 类名以 Test 开头会被 pytest 误当测试类收集（与 TestcaseRunner 同款处理）
+# 类名以 Test 开头会被 pytest 误当测试类收集（Test* 前缀同款处理）
 TestcaseResult.__test__ = False
 
 

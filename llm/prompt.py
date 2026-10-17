@@ -1,4 +1,9 @@
-"""Recovery prompt（Stage 8）。输出只允许一个 JSON 对象（设计文档 4.8.2）。"""
+"""Recovery prompt（Stage 8）。输出只允许一个 JSON 对象（设计文档 4.8.2）。
+
+历史模板：P0 的模块级 `agent.recovery.recover()` 消费它；该路径随旧
+`TestcaseRunner` 一起退役后，恢复链路只消费下方 `build_recovery_prompt`。
+本常量保留作 Phase 0 存档——引擎的产物是分区模板，两者的信任边界不同。
+"""
 
 PROMPT_TEMPLATE = """你是 iOS UI 自动化测试的元素定位恢复专家。
 
@@ -32,8 +37,8 @@ risk_level 规则：tap 普通按钮/输入框为 LOW；涉及删除/支付/提�
 
 
 # ---------------------------------------------------------------------------
-# P1 分区模板（10.4，Task 4.2）——上方 PROMPT_TEMPLATE 为 P0 遗留
-# （verify_stage8 回归路径），Task 4.2 起引擎只消费 build_recovery_prompt。
+# P1 分区模板（10.4，Task 4.2）——引擎只消费 build_recovery_prompt；
+# 上方 PROMPT_TEMPLATE 是 P0 遗留存档（见模块 docstring）。
 # ---------------------------------------------------------------------------
 
 import re                                    # noqa: E402

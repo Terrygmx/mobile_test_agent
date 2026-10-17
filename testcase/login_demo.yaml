@@ -1,5 +1,5 @@
-# P0 遗留用例（Phase 0 验收）：松散模型、无 schema_version，不走 P1 lint 门禁
-# （mta lint 会报 schema_invalid exit 3，属预期）。Task 1.6 另建 suites/smoke/*.yaml。
+# Phase 0 登录 demo；已迁移到 strict schema 0.2，与正式用例共用 lint / 新管线。
+schema_version: "0.2"
 id: login_demo_001
 name: 登录 Demo（Phase 0 验收用例）
 
@@ -11,19 +11,24 @@ steps:
   - action: launch_app
 
   - action: input
-    target: username_field
+    target: LoginView.username_field
     value: "${TEST_USERNAME}"
 
   - action: input
-    target: password_field
+    target: LoginView.password_field
     value: "${TEST_PASSWORD}"
+    sensitive: true
 
   - action: tap
-    target: login_button
+    target: LoginView.login_button
+    idempotency: IDEMPOTENT
 
-  - action: wait_exists
-    target: home_page
-    timeout: 10
+  - wait_for:
+      target: screen:HomeView
+      condition: active
+      timeout: 10
 
-  - action: assert_exists
-    target: home_page
+  - assertion:
+      target: HomeView.home_page
+      condition: exists
+      timeout: 5

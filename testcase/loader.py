@@ -1,8 +1,11 @@
 """Testcase loader：P0 松散模型兼容层 + 设计 6.3 schema 分发入口（P1-01）。
 
-- 旧 `Step/TestCase/load_testcase`：P0 链路（run_phase0_demo / verify_stage5/9）仍在用；
 - `load_testcase_from_dict`：设计 6.3 strict 入口（extra=forbid + 版本分发）；
-- `load_testcase` 按 `schema_version` 键分流（R5-2：strict 不被文件级入口旁路）。
+- `load_testcase` 按 `schema_version` 键分流（R5-2：strict 不被文件级入口
+  旁路）；带版本号的用例一律走 strict；
+- 旧 `Step/TestCase` 松散模型仍保留：无 `schema_version` 的历史用例（仓库
+  外的老 YAML）不至于加载即炸。新用例**必须**带 `schema_version`（否则
+  strict 校验会被静默旁路）。
 """
 from __future__ import annotations
 

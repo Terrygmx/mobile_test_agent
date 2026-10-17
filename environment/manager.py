@@ -39,9 +39,13 @@ class EnvironmentManager:
         与 runner 现行为一致（precondition.get("reset")）；EnvSpec 定型（0.3）
         后由 schema 承担枚举校验，这里只管执行。
         """
-        reset = (getattr(tc, "precondition", None) or {}).get("reset")
+        precondition = getattr(tc, "precondition", None) or {}
+        reset = precondition.get("reset")
         if reset:
-            self.reset(reset)
+            # REINSTALL 需要 app_path；其它策略忽略该参数（ResetExecutor
+            # 会把 kwargs 原样交给 AppSession）。统一传（不按策略猜参数），
+            # 缺了它 REINSTALL 就没有输入。
+            self.reset(reset, app_path=precondition.get("app_path"))
 
     def cleanup(self, tc=None) -> None:
         """11.2：普通失败也执行 cleanup；失败 → CleanupError（不静默）。

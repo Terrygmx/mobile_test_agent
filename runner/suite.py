@@ -51,8 +51,9 @@ class SuiteRunner:
         按 failure_policy 决定中止或继续（H10）；
       - 不做 retry/recovery（那是 StepRunner 与 RecoveryEngine 的事）。
 
-    `execute(tc)` 返回 `TestcaseResult`。用例内部怎么跑由 `run_one` 注入
-    （P0 TestcaseRunner 或未来的新管线），本类只管套件语义与状态归集。
+    `run_one(tc)` 返回 `TestcaseResult`。用例内部怎么跑由 `run_one` 注入
+    （新管线的 `SessionPipeline._suite_run_one`），本类只管套件语义与状态
+    归集。旧 P0 TestcaseRunner 已退役，不再有第二条执行语义。
     """
 
     env: EnvironmentManager

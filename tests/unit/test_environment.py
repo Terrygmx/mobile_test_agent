@@ -90,32 +90,28 @@ def test_reset_delegates_with_strategy():
     assert app.calls == [("RELAUNCH", {})]
 
 
+def test_prepare_forwards_app_path_for_reinstall():
+    """precondition.app_path 是 REINSTALL 的输入，新管线不得丢掉它。"""
+    app = FakeApp()
+    tc = _FakeTC(precondition={"reset": "REINSTALL", "app_path": "/tmp/App.app"})
+    _manager(app).prepare(tc)
+    assert app.calls == [("REINSTALL", {"app_path": "/tmp/App.app"})]
+
+
+def test_prepare_forwards_none_app_path_for_non_reinstall():
+    """与旧 runner 一致：其它策略也传 app_path=None（不靠分支猜参数）。"""
+    app = FakeApp()
+    tc = _FakeTC(precondition={"reset": "RELAUNCH"})
+    _manager(app).prepare(tc)
+    assert app.calls == [("RELAUNCH", {"app_path": None})]
+
+
 class _FakeTC:
     """最小 Testcase 替身：runner.run 只读 .id / .precondition / .steps。"""
     def __init__(self, precondition=None, steps=(), id="tc_env_001"):
         self.id = id
         self.precondition = precondition or {}
         self.steps = list(steps)
-
-
-class _FakeRecorder:
-    def start_run(self, tc_id):
-        return 1
-
-    def end_run(self, run_id, status):
-        pass
-
-
-def _runner_stub(app):
-    """只关心 reset 分流的最薄 runner（steps 为空 → 不碰 executor）。
-
-    # type: ignore[arg-type] — 测试替身刻意不带真实 Executor/Recorder/Secrets
-    （steps 为空，跑不到它们），仅为触发 runner.run 的 reset 分流。
-    """
-    from runner.testcase_runner import TestcaseRunner
-    return TestcaseRunner(
-        executor=None, app=app, recorder=_FakeRecorder(),  # type: ignore[arg-type]
-        secrets=None)  # type: ignore[arg-type]
 
 
 # --- R13-1 跨源一致性：lint 放行的策略，执行路径必须可达 ---
@@ -151,25 +147,26 @@ def test_snapshot_in_matrix_but_not_claimed_executable():
     assert "SNAPSHOT" not in _EXECUTABLE_IN_EXECUTOR
 
 
-def test_runner_uses_reset_executor_not_p0_matrix():
-    """R13-1 根因防线：runner 的 reset 必须经 ResetExecutor，禁止直调
-    P0 app.reset_state（P0 SUPPORTED_STRATEGIES 不含 RESET_STATE/LOGOUT，
-    直调就是「lint 放行、运行时炸」）。"""
+def test_prepare_uses_reset_executor_not_p0_matrix():
+    """R13-1 根因防线：唯一的 precondition 执行入口必须经 ResetExecutor
+    （P0 SUPPORTED_STRATEGIES 不含 RESET_STATE/LOGOUT，直调就是「lint
+    放行、运行时炸」）。旧 runner 退役后，这条口径直接钉 EnvironmentManager。"""
     import inspect
-    from runner.testcase_runner import TestcaseRunner
-    src = inspect.getsource(TestcaseRunner.run)
-    assert "self._reset_executor.reset(" in src, \
-        "runner.run must reset via ResetExecutor (R13-1)"
-    assert "self.app.reset_state(" not in src, \
-        "runner must not call P0 app.reset_state directly (R13-1)"
+    from environment.reset import ResetExecutor
+    src = inspect.getsource(EnvironmentManager.prepare)
+    assert "self.reset(" in src, \
+        "prepare must reset via EnvironmentManager (R13-1)"
+    assert "app.reset_state(" not in src, \
+        "env manager must not call P0 app.reset_state directly (R13-1)"
+    assert ResetExecutor is not None   # 单一执行器仍存在（不退化成直调）
 
 
 def test_reset_state_survives_end_to_end_through_runner():
-    """R13-1 回归：RESET_STATE 经 runner.run 全链路不抛（原 bug 是运行时炸）。"""
+    """R13-1 回归：RESET_STATE 经 precondition 执行不抛（原 bug 是运行时炸）。"""
     app = FakeApp()
-    runner = _runner_stub(app)
+    manager = _manager(app)
     tc = _FakeTC(precondition={"reset": "RESET_STATE"}, steps=[])
-    runner.run(tc)
+    manager.prepare(tc)
     assert app.calls == [("terminate", {}),
                          ("launch", {"arguments": ["-UITestReset"]})]
 
@@ -177,19 +174,19 @@ def test_reset_state_survives_end_to_end_through_runner():
 def test_relaunch_still_works_through_runner():
     """接线不能回归既有 RELAUNCH 路径（5 条 smoke 全用 RELAUNCH）。"""
     app = FakeApp()
-    runner = _runner_stub(app)
+    manager = _manager(app)
     tc = _FakeTC(precondition={"reset": "RELAUNCH"}, steps=[])
-    runner.run(tc)
+    manager.prepare(tc)
     assert app.calls == [("RELAUNCH", {"app_path": None})]
 
 
 def test_reset_state_reinstall_passes_app_path():
     """REINSTALL 仍需 app_path；RESET_STATE 不需要但也不能吞掉参数。"""
     app = FakeApp()
-    runner = _runner_stub(app)
+    manager = _manager(app)
     tc = _FakeTC(precondition={"reset": "RESET_STATE", "app_path": "/x.app"},
                  steps=[])
-    runner.run(tc)
+    manager.prepare(tc)
     assert app.calls == [("terminate", {}),
                          ("launch", {"arguments": ["-UITestReset"]})]
 

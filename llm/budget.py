@@ -1,7 +1,8 @@
 """LLMBudget — Budget / Circuit Breaker（10.5，Task 4.2 重构）。
 
-P0 语义保留（verify_stage8 回归路径）：`try_acquire()` 无参 + per-run 上限
-（`max_calls_per_run` 属性仍在，P0 读它做展示）。
+无参调用语义保留（`try_acquire()` 不传 testcase_id + per-run 上限）：
+`diagnosis/analyzer.py`、`diagnosis/reproducer.py`、`planner/planner.py`
+与 `generator/generator.py` 都在用这个形态（`max_calls_per_run` 属性同）。
 
 P1 增量（10.5）：
 - **per-run + per-testcase 双限**：两个计数器独立扣减，任一超限即拒绝；
@@ -56,7 +57,7 @@ class LLMBudget:
 
     @property
     def max_calls_per_run(self) -> int:
-        """P0 兼容属性（verify_stage8 消费）。"""
+        """无参/旧调用方兼容属性：P0 形态按位置参数构造，仍读这个属性。"""
         return self.config.max_calls_per_run
 
     @property
@@ -75,9 +76,9 @@ class LLMBudget:
             return False
         if self._used_run >= self.config.max_calls_per_run:
             return False
-        # P0 无参形态（verify_stage8 回归路径）豁免 per-testcase 限：
-        # 它不知道 testcase 归属，全落 None 桶——套 3 次上限会在第 4 次调用
-        # 炸掉 P0 回归（review P3-3 实锤边界）。无参 = 只受 per-run 限。
+        # 无参形态豁免 per-testcase 限：它不知道 testcase 归属，全落 None
+        # 桶——套 3 次上限会在第 4 次调用炸掉一整类调用方（review P3-3 实锤
+        # 边界）。无参 = 只受 per-run 限。
         if testcase_id is not None:
             used_tc = self._used_testcase.get(testcase_id, 0)
             if used_tc >= self.config.max_calls_per_testcase:

@@ -122,7 +122,8 @@ python -m cli.main run --suite smoke --fake-driver
 # ③ 看跑出来的流水
 sqlite3 out/trace.db "SELECT run_id, suite, status FROM runs ORDER BY rowid DESC LIMIT 5;"
 
-# ④ 体验完整的 Phase 0 demo（元素漂移 → LLM 恢复 → PASS）
+# ④ 体验完整的 Phase 0 demo（元素漂移 → 恢复 → RECOVERED）
+#    需要模拟器/真机 + Appium；--stub 用固定候选替代真实 LLM
 python run_phase0_demo.py --stub          # 无 LLM key 用 stub
 python run_phase0_demo.py                 # 有 key 走真 LLM
 ```

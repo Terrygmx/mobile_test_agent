@@ -29,7 +29,7 @@
 
 **环境事实**：模拟器 iPhone 14 UDID `AEBDAE77-7C5B-468B-A5A7-01D41EDAAD9E`（iOS 18.5）；Appium 3.7.0 需 `DEVELOPER_DIR`；LLM 网关 `http://127.0.0.1:15721/v1` model `step-5-preview`（key 走 env）；`/tmp/swift_scan` 会被清理（重扫前 `make scan`）。
 
-**P0 行为保留原则**：P0 的 `phase0/verify_stage*.py` 全部保留且须持续通过（回归底线）；`run_phase0_demo.py` 在 P1-07 完成后标记 deprecated 但不删。
+**P0 行为保留原则（收口后）**：`runner/testcase_runner.py` 已于 2026-10-17 退役，执行语义唯一入口是 `cli.pipeline.SessionPipeline` + `runner.runner.StepRunner`；`run_phase0_demo.py` 与 `phase0/verify_stage5.py` 已迁到新管线，其余 P0 脚本（`verify_p1_m1` / `verify_stage8` / `verify_stage9_f5`）由故障矩阵测试覆盖后删除。
 
 ---
 
@@ -195,13 +195,13 @@ M0 基建(0.5d) ─► M1 Schema/Repo/Screen(3d) ─► M2 确定性平台(4d) �
 
 **Files:**
 - Create: `suites/smoke/login_001.yaml` 等 5 条、`phase0/verify_p1_m1.py`（Gate 验收脚本）
-- Modify: `runner/testcase_runner.py`（target 改走 Repository resolve；暂不加 wait/assertion 引擎，用现有 step 类型 + 新 schema 字段子集）
+- Modify: `runner/testcase_runner.py`（target 改走 Repository resolve；该文件已退役，语义在 `cli/pipeline.py` + `runner/runner.py`）
 
 **Steps:**
 1. 写 5 条 YAML（schema_version 0.1；password 步骤 `sensitive: true`；登录按钮显式 `idempotency: IDEMPOTENT`——设计 6 示例）。
 2. `mta lint` 先过（引用/secret 全解析）。
 3. 最小 runner 适配：`TargetRef` → repo.resolve → strategies → find/tap/input。
-4. `python phase0/verify_p1_m1.py` → 5/5 PASS。
+4. `python phase0/verify_p1_m1.py` → 5/5 PASS（脚本已退役，等量覆盖在 `phase0/verify_p1_m2.py` 与故障矩阵）。
 5. **复盘记录**：Schema 用着别扭的点写进 `docs/p1_schema_review.md`；确认无阻塞后 schema_version 升 `0.2`（Gate 要求），同步更新 5 条 YAML。
 6. Commit: `feat(p1): 5 real testcases on schema 0.2 (P1-04)` + tag `checkpoint-p1-m1`
 
@@ -269,7 +269,7 @@ M0 基建(0.5d) ─► M1 Schema/Repo/Screen(3d) ─► M2 确定性平台(4d) �
 
 **Files:**
 - Create: `runner/runner.py`、`runner/suite.py`、`runner/lifecycle.py`、`runner/result.py`、`executor/policy.py`（7.4 重试规则表纯函数）、`executor/guard.py`（10.1）
-- Modify: `runner/testcase_runner.py`（逐步替换，P0 脚本兼容到 M2 Gate 后退役）
+- Modify: `runner/testcase_runner.py`（已退役：新管线 + `runner/runner.py`；P0 消费脚本迁移或删除）
 - Test: `tests/unit/test_policy.py`、`tests/unit/test_result.py`、`tests/integration/test_runner_fakedriver.py`
 
 **Steps:**

@@ -12,8 +12,8 @@
 （P0 已因此改名 `tracer/`），本模块沿用 `tracer/`，不重蹈。
 
 关于 legacy 列：P0 的 `runs.test_case` / `steps.run_id` / `recoveries.strategy`
-等旧列在 0.1 中不再有对应位置，但**保留不删**——P0 脚本（run_phase0_demo、
-verify_stage*）还在读它们，M2 Gate 后才退役。现在删会打断那些脚本。
+等旧列在 0.1 中不再有对应位置，但**保留不删**——迁移脚本与报告侧仍在读它们。
+现在删会打断跨版本 trace 的读取。
 """
 
 from __future__ import annotations

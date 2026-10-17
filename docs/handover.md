@@ -32,7 +32,7 @@
 | 文件 | 作用 |
 |---|---|
 | `pyproject.toml` | 一句话定位：*Source-aware intelligent regression executor for iOS apps*。依赖面（Appium-Python-Client / pydantic / PyYAML），`requires-python >= 3.11` |
-| `run_phase0_demo.py` | **唯一一份「讲完整故事」的可执行 demo**（P0 Stage 9：元素漂移 → LLM 恢复 → PASS）。12 行 docstring 就说清了产品在干什么 |
+| `run_phase0_demo.py` | **唯一一份「讲完整故事」的可执行 demo**（元素漂移 → RecoveryEngine 恢复 → RECOVERED）。已迁到当前唯一管线（`SessionPipeline` + `TraceStore`），旧 P0 执行链已退役 |
 | `ios_demo/`（`LoginDemo.xcodeproj` + Swift 源） | **被测 App 本体** —— 背景的另一半，不看它无法理解 metadata 与「漂移」从哪来 |
 | `docs/windows_dev_notes.md` | **非工程产物**：Windows 侧开发必须知道的环境差异（`PYTHONUTF8=1`）与 **6 条 POSIX-only 测试的登记**。在 macOS 上开发可跳过；跨 OS 接手先读它 |
 

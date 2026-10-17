@@ -3,7 +3,7 @@
 
 验收对象：20 条用例在**新管线**（7.1 StepRunner + 7.5 Lifecycle +
 SuiteRunner H10 语义 + 14.2 TraceStore）上真机全绿。这是 R15-2「真实
-套件走新管线」的最终核销——M1 Gate 跑的是 P0 TestcaseRunner。
+套件走新管线」的最终核销；M1 Gate 是迁移前的历史基线，已退役。
 
 流程（复用 M1 Gate 模式）：
   0. 环境自检：Appium ready + 模拟器 booted（R9-2：MTA_SIM_UDID/自动发现）；
@@ -18,10 +18,9 @@ SuiteRunner H10 语义 + 14.2 TraceStore）上真机全绿。这是 R15-2「真�
   5. 连续性：一个套件连跑 2 轮结果一致（防 flaky 假绿）。
 产出：out/p1_m2_gate/gate_summary.json；exit 0 = 20/20 PASS。
 
-与 M1 Gate 的差异（R15-2 验收增量）：runner = SessionPipeline/StepRunner
-（非 TestcaseRunner）、precondition 经 EnvironmentManager（真 reset）、
-postcondition 经 checker（真执行）、steps/testcase_runs/runs 落新 trace
-schema 0.1（14.2）。
+验收口径：runner = SessionPipeline/StepRunner、precondition 经
+EnvironmentManager（真 reset）、postcondition 经 checker（真执行）、
+steps/testcase_runs/runs 落新 trace schema 0.1（14.2）。
 """
 from __future__ import annotations
 
@@ -168,7 +167,7 @@ def main() -> int:
 
     # postcondition 执行端：生产接线同 _suite_run_one——checker 复用
     # WaitEngine 条件矩阵（H7 闭环，2.7 新增）。
-    pipeline = SessionPipeline(SUITES, store=store,
+    pipeline = SessionPipeline(SUITES, store=store, wait_config=wait_cfg,
                                deps=PipelineDeps(env=env, repo=repo,
                                                  app=app, device_session=ds,
                                                  executor=ex, store=store))

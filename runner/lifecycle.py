@@ -4,10 +4,8 @@
 Recorder / gate 脚本全无引用（review R14-2 P2 记账到 2.5）。本模块由
 `SuiteRunner` 持有，把用例级执行结果写进 TraceStore。
 
-R15-2 更正：本模块**不**从 `TestcaseRunner` 取结果（旧 P0 runner 不用
-Lifecycle），也不被生产链路调用——目前只有 `tests/` 在用。真正的接线在
-Task 2.6（`mta run` 把 SuiteRunner 接成入口）。此处「接线」指模块间的
-依赖已建立且有测试覆盖，不等于生产链路已切换。
+R15-2 更正：本模块由 `SessionPipeline.run_case` 持有，把用例级执行结果写进
+TraceStore；旧 P0 `TestcaseRunner` 不用 Lifecycle，已随迁移退役。
 
 7.5 WDA 语义：
   - 每个 action 前 ensure_alive；失败 → restart_wda → 复检；仍失败抛

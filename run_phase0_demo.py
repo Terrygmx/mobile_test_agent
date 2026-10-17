@@ -1,12 +1,13 @@
-"""Phase 0 端到端 Demo（Stage 9）——设计文档第 5 节步骤 7 的真实版。
+"""Phase 0 端到端 Demo（Stage 9）——当前唯一执行管线版。
 
-场景：login_demo.yaml 用例找 login_button，但"源码已被改名"（用不存在元素模拟
-源码 metadata 仍是旧的）。流程：
-  tap(login_button) → ElementNotFound → reconcile_local → DRIFT
-  → recover()（真 LLM）→ 唯一性校验 → tap → PASS
+场景：`login_demo.yaml` 的元素在运行时已改名。流程：
+
+  tap(login_button) → ElementNotFound → Local Reconciliation 判 DRIFT
+  → RecoveryEngine（真 LLM 或 --stub）→ 唯一性/类型/风险校验
+  → 重发动作 → 用例 RECOVERED
 
 需要环境变量：LLM_API_KEY（+ 可选 LLM_BASE_URL / LLM_MODEL）。
-无 LLM key 时用 --stub 跑通全流程（stub 返回 signin_button 等价目标）。
+无 LLM key 时用 `--stub` 跑通全流程。
 """
 
 import argparse
@@ -15,22 +16,28 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # review P2-1：项目根，非上级
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
 
-from agent.recovery import recover
+from agent.recovery import RecoveryEngine
+from cli.pipeline import PipelineDeps, SessionPipeline
+from environment.manager import EnvironmentManager
 from environment.secrets import EnvSecretProvider
-from executor.executor import AmbiguousElement, ElementNotFound, Executor
+from executor.executor import Executor
+from executor.guard import EnvKind, Guard
 from llm.budget import LLMBudget
 from llm.provider import LLMProvider
-from runner.testcase_runner import TestFailure, TestcaseRunner
+from repository.resolver import Repository
+from runner.lifecycle import Lifecycle
+from runner.runner import StepRunner
 from session.app_session import AppSession
 from session.device_session import DeviceSession
-from source.metadata import build_metadata
-from source.reconciliation import reconcile_local
 from testcase.loader import load_testcase
-from tracer.recorder import Recorder
+from tracer.storage import TraceStore
 
-ROOT = Path(__file__).resolve().parent
+BUNDLE_ID = "com.phaset0.logindemo"
+APPIUM_URL = "http://127.0.0.1:4723"
+UDID = os.environ.get("MTA_SIM_UDID", "AEBDAE77-7C5B-468B-A5A7-01D41EDAAD9E")
 
 # Phase 0 测试口令：默认值只提示来源，不内嵌明文（review C5/P2）
 os.environ.setdefault("TEST_USERNAME", "qa_agent")
@@ -39,113 +46,121 @@ if "TEST_PASSWORD" not in os.environ:
     os.environ.setdefault("TEST_PASSWORD", "demo-only-not-a-secret")
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--stub", action="store_true", help="用 stub LLM 替代真实 API")
-    args = ap.parse_args()
-
-    ds = DeviceSession("http://127.0.0.1:4723", {
-        "platform_name": "iOS", "automation_name": "XCUITest",
-        "device_name": "iPhone 14", "platform_version": "18.5",
-        "udid": "AEBDAE77-7C5B-468B-A5A7-01D41EDAAD9E",
-        "bundle_id": "com.phaset0.logindemo", "no_reset": True,
-        "new_command_timeout": 120,
-    })
-    ds.connect()
-    rec = Recorder(ROOT / "out/trace.db")
-    app = AppSession(ds, "com.phaset0.logindemo")
-    ex = Executor(ds)
-    # recovery 依赖（review R2-5：demo 主入口启用自动恢复路径）
-    meta = build_metadata(str(ROOT / "ios_demo/LoginDemo/LoginDemoApp.swift"),
-                          ROOT / "out/source_metadata.json")
-    llm = StubLLM() if args.stub else (
-        LLMProvider() if os.environ.get("LLM_API_KEY") else None)
-    recovery_ctx = ({"metadata": meta, "budget": LLMBudget(max_calls_per_run=3),
-                     "llm": llm} if llm else None)
-    if recovery_ctx is None:
-        print("⚠ 未配置 LLM_API_KEY，自动恢复不启用（只演示基础链路）")
-    runner = TestcaseRunner(ex, app, rec, EnvSecretProvider(),
-                            recovery_context=recovery_ctx)
-    run_id = rec.start_run("phase0_demo")
-    # review R2-4：infra 事件挂到本 run 的 SQLite（run_id 存在后补挂）
-    ds.attach_recorder(rec, run_id)
-
-    print("=== Phase 0 端到端 Demo ===")
-    print("[1] 正常运行 login_demo.yaml ...")
-    tc = load_testcase(ROOT / "testcase/login_demo.yaml")
-    try:
-        runner.run(tc)
-        # 已登录（上次运行残留）→ 回登录页重来
-        app.reset_state("RELAUNCH")
-        runner.run(tc)
-        print("    PASS")
-    except (TestFailure, AssertionError):
-        print("    （登录页流程异常，继续 recovery 场景）")
-
-    print("\n[2] Recovery 场景：源码 metadata 仍是 login_button，运行时已被改名 ...")
-    # 回登录页（上面用例 PASS 后 App 停在首页，等价元素不在当前页面）
-    app.reset_state("RELAUNCH")
-    print(f"    source metadata: {[e['id'] for e in meta['elements']]}")
-
-    # 自动恢复路径（R2-5）：跑一个 target 不存在的 input 步骤，
-    # runner 内部 reconcile → recover → RECOVERED → 用例继续
-    from testcase.loader import Step, TestCase
-    tc2 = TestCase(id="phase0_demo_recovery", name="auto recovery demo", steps=[
-        Step(action="input", target="ghost_field_drift", value="${TEST_USERNAME}"),
-    ])
-    try:
-        runner.run(tc2)
-        print("    用例 PASS（runner 自动恢复生效，R2-1 闭环）")
-    except Exception as e:
-        print(f"    用例未恢复: {type(e).__name__}")
-
-    # 手动编排路径保留（展示 reconcile 语义给 LLM 的输入）
-    expected = "login_button"
-    err = ElementNotFound(f"accessibility id == {expected}")
-    page = ex.page_source()
-    recon = reconcile_local(expected, "LoginView", meta, page)
-    print(f"    reconciliation: {recon['status']}, candidates={recon['candidates_in_runtime'][:5]}")
-
-    if args.stub:
-        pass  # llm 已在上方按 --stub 构造
-    elif llm is None:
-        print("    ✗ 未配置 LLM_API_KEY，无法演示手动 recovery")
-        return 2
-    assert llm is not None  # 窄化类型（上方已排除 None）
-
-    r = recover(expected, err, ex, meta, LLMBudget(max_calls_per_run=3), llm,
-                recorder=rec)
-    print(f"    recovery: {json.dumps(r, ensure_ascii=False)}")
-
-    # R2-4 验证：infra_events 表应有本 run 的事件（若期间发生 WDA restart）
-    infra_rows = rec.conn.execute(
-        "SELECT COUNT(*) FROM infra_events WHERE run_id=?", (run_id,)).fetchone()[0]
-    print(f"    infra_events(本 run): {infra_rows} 条")
-
-    rec.end_run(run_id, "PASS" if r["status"] == "RECOVERED" else "FAIL")  # review F8：status 枚举收敛到 PASS/FAIL/INFRA_FAILURE
-    print(f"\n[3] run {run_id} 状态: {rec.conn.execute('SELECT status FROM runs WHERE run_id=?', (run_id,)).fetchone()[0]}")
-
-    if r["status"] == "RECOVERED":
-        print("\n✅ 端到端 Recovery 全链路通过（DRIFT → LLM → 唯一性校验 → 执行）")
-        return 0
-    print(f"\n✗ recovery 未成功: {r['status']}")
-    return 1
+DRIFT_CASE = """\
+schema_version: "0.2"
+id: phase0_demo_recovery
+name: Phase 0 auto recovery demo
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: input
+    target: LoginView.login_button
+    value: ${TEST_USERNAME}
+"""
 
 
 class StubLLM(LLMProvider):
+    """返回新 parser 契约；候选必须是运行时真实存在的 username_field。"""
+
     def complete(self, prompt, timeout=30):
-        # review R3-2：按 prompt 中的原动作回显——否则 input 步骤恢复时
-        # stub 返回 tap 必然 LLM_ACTION_MISMATCH，--stub 模式的自动恢复段静默失败
-        import re as _re
-        m = _re.search(r'执行 (tap|input)', prompt)
-        action = m.group(1) if m else "tap"
         return json.dumps({
+            "action": "input",
             "target": {"type": "accessibility_id", "value": "username_field"},
-            "action": action,
-            "input_value": None,
-            "scope": "LoginDemoApp", "reason": "stub: 等价元素",
-            "confidence": 0.9, "risk_level": "LOW",
+            "scope": "LoginView",
+            "reason": "stub: 等价输入框",
+            "confidence": 0.9,
         })
+
+
+def _write_demo_case(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(DRIFT_CASE, encoding="utf-8")
+    return path
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--stub", action="store_true",
+                    help="用 stub LLM 替代真实 API")
+    args = ap.parse_args()
+
+    ds = DeviceSession(APPIUM_URL, {
+        "platform_name": "iOS", "automation_name": "XCUITest",
+        "device_name": "iPhone 14", "platform_version": "18.5",
+        "udid": UDID, "bundle_id": BUNDLE_ID, "no_reset": True,
+        "new_command_timeout": 120,
+    })
+    ds.connect()
+
+    run_id = "phase0_demo"
+    store = TraceStore(ROOT / "out/trace.db")
+    store.start_run(run_id, suite="phase0_demo")
+    app = AppSession(ds, BUNDLE_ID)
+    ex = Executor(ds)
+    repo = Repository.from_dirs(
+        generated_root=str(ROOT / "repository/generated/local"),
+        overrides_root=str(ROOT / "repository/overrides"))
+    secrets = EnvSecretProvider()
+    llm = StubLLM() if args.stub else (
+        LLMProvider() if os.environ.get("LLM_API_KEY") else None)
+    budget = LLMBudget(max_calls_per_run=3) if llm is not None else None
+    recovery = RecoveryEngine(
+        repo=repo, llm=llm, budget=budget, sleep=lambda _s: None) \
+        if llm is not None else None
+    if recovery is None:
+        print("⚠ 未配置 LLM_API_KEY，自动恢复不启用（只演示基础链路）")
+
+    pipeline = SessionPipeline(
+        None, store=store, deps=PipelineDeps(
+            env=EnvironmentManager(app), repo=repo, app=app,
+            device_session=ds, executor=ex, store=store),
+        recovery=recovery, secrets=secrets, app_id=BUNDLE_ID)
+    runner = StepRunner(ex, ds, Guard(EnvKind.SANDBOX), run_id=run_id)
+    if recovery is not None:
+        recovery.guard = runner.guard
+    lifecycle = Lifecycle(store=store)
+
+    print("=== Phase 0 端到端 Demo ===")
+    print("[1] 正常登录流程 ...")
+    tc = load_testcase(ROOT / "testcase/login_demo.yaml")
+    first = pipeline.run_case(runner, lifecycle, tc, run_id=run_id)
+    print(f"    {first.status}")
+
+    print("\n[2] Recovery 场景：运行时 login_button 已被改名 ...")
+    case_path = _write_demo_case(ROOT / "out/phase0_demo_recovery.yaml")
+    drift = load_testcase(case_path)
+    result = pipeline.run_case(runner, lifecycle, drift, run_id=run_id)
+    print(f"    {result.status}")
+
+    rows = store.conn.execute(
+        "SELECT s.id, s.status, s.step_type, s.target_id, s.detail_json"
+        " FROM steps s JOIN testcase_runs tc ON tc.id=s.testcase_run_id"
+        " WHERE tc.run_id=? ORDER BY s.id", (run_id,)
+    ).fetchall()
+    recovered = [r for r in rows if r["status"] == "RECOVERED"]
+    print(f"    steps: {len(rows)} 条，RECOVERED: {len(recovered)} 条")
+    for row in recovered:
+        detail = json.loads(row["detail_json"] or "{}")
+        stages = (detail.get("recovery") or {}).get("stages") or []
+        print(f"    recovery stages: "
+              f"{[str(s.get('stage')) + ':' + str(s.get('outcome')) for s in stages]}")
+
+    reviews = store.list_reviews()
+    infra_rows = store.conn.execute(
+        "SELECT COUNT(*) FROM infra_events WHERE run_id=?", (run_id,)
+    ).fetchone()[0]
+    print(f"    pending reviews: {len(reviews)}；infra_events: {infra_rows} 条")
+
+    ok = result.status == "RECOVERED" and bool(recovered)
+    store.end_run(run_id, status="PASS" if ok else "FAIL",
+                  exit_code=0 if ok else 1)
+    if ok:
+        print("\n✅ 端到端 Recovery 全链路通过"
+              "（DRIFT → RecoveryEngine → 校验 → 执行）")
+        return 0
+    print(f"\n✗ recovery 未成功: {result.status} "
+          f"{result.failure_type or ''}")
+    return 1
 
 
 if __name__ == "__main__":

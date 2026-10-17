@@ -66,9 +66,10 @@ lst_tab_switch_back_001: PASS
 
 ### 根因
 
-仓库里有两套 runner：
+当时仓库里有两套 runner（现已收敛为一套）：
 
-- `runner/testcase_runner.py`：旧路径，已有 `optional`，但不在 `mta run` 主链路；
+- `runner/testcase_runner.py`：旧路径，已有 `optional`，但不在 `mta run` 主链路
+  （**已于 2026-10-17 退役删除**）；
 - `runner/runner.py::StepRunner`：真实路径，之前完全没有接收或处理 `optional`。
 
 因此 `cli/pipeline.py` 组装 `StepRunner` 时，即使用例写了 `optional: true`，
@@ -337,8 +338,10 @@ make lst-smoke-device LST_ENV=uat
   后续页面大多仍需结构探测；搜索输入框也尚无独立锚点。
 - 服务页 screen marker 临时使用服务端文案 `ETC发行`，运营改名会假红；需 App
   补稳定锚点后替换。
-- 两套 runner 仍并存。本轮选择方案 A 修复真实路径；若要根治语义漂移，后续可
-  迁移 `run_phase0_demo.py` 与旧 runner 测试后删除 `testcase_runner.py`。
+- ~~两套 runner 并存~~ **已收口（2026-10-17）**：`runner/testcase_runner.py`
+  删除，`run_phase0_demo.py` 与 `phase0/verify_stage5.py` 迁到新管线，旧 runner
+  单测由 `tests/unit/test_cli_run.py` 与故障矩阵接管，并新增
+  `tests/unit/test_legacy_runner_retired.py` 守卫其不得复活。
 
 ## 7. 快速索引
 
