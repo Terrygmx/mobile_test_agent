@@ -1,0 +1,46 @@
+# overrides/elements/LSTTabBarViewController.yaml — 乐速通底部 tab
+#
+# 真机探测（2026-10-17）：三个 tab 按钮的 name/label 与标题一致；服务页
+# 顶部 NavigationBar/标题也叫「服务」，所以必须用 Button predicate 限定
+# 类型。`畅行慧览` 也会出现在 tab 栏中，但本用例只覆盖稳定的首页/服务/我的。
+schema_version: "1.0"
+kind: element
+id: tab_home
+screen: LSTTabBarViewController
+type: button
+strategies:
+  - {type: predicate,
+     value: 'type == "XCUIElementTypeButton" AND name == "首页"',
+     origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: tab_service
+screen: LSTTabBarViewController
+type: button
+strategies:
+  - {type: predicate,
+     value: 'type == "XCUIElementTypeButton" AND name == "服务"',
+     origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: tab_mine
+screen: LSTTabBarViewController
+type: button
+strategies:
+  - {type: predicate,
+     value: 'type == "XCUIElementTypeButton" AND name == "我的"',
+     origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC

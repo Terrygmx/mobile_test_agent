@@ -1,0 +1,16 @@
+# overrides/screens/LSTServiceMenuViewController.yaml — 乐速通服务页 Screen 定义
+#
+# 真机探测（2026-10-17）：服务 tab 的 NavigationBar name 是「服务」，
+# 但底部 tab 按钮也叫「服务」，accessibility id 会命中 2 个节点。
+# screen wait 的 marker 走 accessibility id，因此这里选服务页独有的
+# 分区标题 `ETC发行`（首页/我的页均不存在）。它是服务端菜单标题，属于
+# 当前无 App 锚点时的临时 marker；后续 App 补 `service_nav_bar` 标识符
+# 后应替换，避免运营改菜单名导致假红。
+schema_version: "1.0"
+kind: screen
+id: LSTServiceMenuViewController
+marker: ETC发行
+kind_hint: page
+metadata:
+  risk: LOW
+  origin: manual

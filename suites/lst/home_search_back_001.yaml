@@ -15,6 +15,11 @@ precondition:
   reset: RELAUNCH
 steps:
   - action: launch_app
+  - wait_for:
+      target: update_dialog_cancel
+      condition: exists
+      timeout: 15
+    optional: true
   - action: tap
     target: update_dialog_cancel
     optional: true

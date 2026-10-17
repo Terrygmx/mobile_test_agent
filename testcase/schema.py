@@ -98,11 +98,17 @@ class WaitSpec(BaseModel):
 
 
 class WaitStep(BaseModel):
-    """6.3 步骤形态 2：`{"wait_for": {...}}`。"""
+    """6.3 步骤形态 2：`{"wait_for": {...}}`。
+
+    `optional`：等待超时 = 条件未成立，跳过并记 SUCCESS。用于冷启动后
+    「可能弹也可能不弹」的异步前置（如乐速通更新提示）；只豁免
+    `WaitTimeout`，驱动/配置错误照旧 FAIL。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     wait_for: WaitSpec
+    optional: bool = False
 
 
 class Postcondition(BaseModel):

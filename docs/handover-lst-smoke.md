@@ -1,7 +1,8 @@
-# 交接：乐速通真机冒烟与首页导航（P4-1017-mta）
+# 交接：乐速通真机冒烟与首页 / tab 导航（P4-1017-mta）
 
-> 本文记录 **2026-10-17 首页 → 搜索页链路接入后的真实状态**。平台整体设计见
-> `docs/handover.md`；真机接入与排错细节见 `docs/lst_update_playbook.md`。
+> 本文记录 **2026-10-17 首页搜索与 tab 导航链路接入后的真实状态**。平台整体
+> 设计见 `docs/handover.md`；真机接入与排错细节见
+> `docs/lst_update_playbook.md`。
 
 ## 0. 结论
 
@@ -37,15 +38,28 @@
 | 新链路真机 run | `run_084b6924` / PASS |
 | 新链路步骤 | 8/8 `SUCCESS` |
 | 原冒烟回归 | `lst_smoke_launch_001` / PASS |
-| 全量单测 | **2361 passed，0 failed**（72.94s） |
+| 全量单测 | **2363 passed，0 failed**（约 72s） |
 | App 源码改动 | 无；复用现有 `home_search` 与系统导航节点 |
 
-最近一次真机 trace 的三步全部为 `SUCCESS`：
+随后完成第二项业务主链路：
+
+- 首页 → 服务 → 我的 → 首页；
+- 新增服务页 / 我的页 screen 与 tab 操作 override；
+- 真机 13 步全部 `SUCCESS`。
+
+| 本轮项目 | 结果 |
+|---|---|
+| 新链路真机 run | `run_24bf6348` / PASS |
+| 新链路步骤 | 13/13 `SUCCESS` |
+| 同批回归 | 首页搜索 / 冷启动冒烟均 PASS |
+| App 源码改动 | 无；复用 `home_search`、`mineSet` 与系统 tab 节点 |
+
+最近一次真机 trace 的三条用例全部为 `PASS`：
 
 ```text
-0 launch_app
-1 tap update_dialog_cancel
-2 wait_for screen:LSTDynamicHomeViewController
+lst_home_search_back_001: PASS
+lst_smoke_launch_001: PASS
+lst_tab_switch_back_001: PASS
 ```
 
 ## 1. `optional` 修复
@@ -76,9 +90,29 @@ detail = {"optional_skipped": "<Reason>"}
 
 - `perform`、Guard、设备/基础设施等非定位错误**仍然 FAIL**，没有扩大豁免范围。
 
+### 更新弹窗竞态
+
+只把 tap 设为 optional 仍不够：更新弹窗在冷启动后**异步入树**，立即 tap
+可能在弹窗出现前就以 `ElementNotFound` 跳过，随后模态盖住首页，导致
+`screen:LSTDynamicHomeViewController` 超时。三条用例现已统一改为：
+
+```yaml
+- wait_for:
+    target: update_dialog_cancel
+    condition: exists
+    timeout: 15
+  optional: true
+- action: tap
+  target: update_dialog_cancel
+  optional: true
+```
+
+`WaitStep.optional` 只豁免 `WaitTimeout`；`cli/pipeline.py` 将超时记为
+`SUCCESS`，并在 `detail_json` 留下 `optional_skipped=WaitTimeout`。
+
 ### 测试
 
-新增 7 条测试，覆盖：
+上一轮新增 7 条测试，覆盖：
 
 - 0 匹配 → 跳过；
 - find 抛 `ElementNotFound` → 跳过；
@@ -89,6 +123,13 @@ detail = {"optional_skipped": "<Reason>"}
 - `SessionPipeline` 到 `StepRunner` 的真实接线（防止再次只测影子实现）。
 
 全量结果：**2361 passed / 0 failed**。
+
+本轮又新增 2 条测试：
+
+- `test_optional_wait_skips_timeout_through_session_pipeline`
+- `test_wait_step_optional_defaults_false_and_can_be_set`
+
+定向结果 68 passed；全量结果 **2363 passed / 0 failed**。
 
 ## 2. 首页锚点
 
@@ -175,6 +216,46 @@ launch → optional 关弹窗 → 等首页 → 点搜索 → 等搜索页
 完成确认后同一 Appium 会话立即恢复。遇到该报错时先检查手机是否有授权弹窗，
 不要直接重建 WDA 或重启 Appium。
 
+### 3.3 首页 → 服务 → 我的 → 首页
+
+真机运行 `run_24bf6348` 确认 `lst_tab_switch_back_001` 的 13 步全部
+`SUCCESS`：
+
+```text
+launch → optional wait/tap 关弹窗 → 等首页
+→ 点服务 → 等服务页 → 断言首页入口不在
+→ 点我的 → 等我的页 → 断言首页入口不在
+→ 点首页 → 等首页 → 断言首页入口存在
+```
+
+定位要点：
+
+| 节点 | 定位方式 | 说明 |
+|---|---|---|
+| 首页 tab | Button predicate `name == "首页"` | 限定类型，避免同名文本 |
+| 服务 tab | Button predicate `name == "服务"` | 服务页 NavigationBar 同名 |
+| 我的 tab | Button predicate `name == "我的"` | 唯一按钮 |
+| 服务页 marker | accessibility id `ETC发行` | **临时方案**，依赖服务端菜单文案 |
+| 我的页 marker | accessibility id `mineSet` | App 自有设置按钮，camelCase |
+
+`screen wait` 的 marker 固定按 accessibility id 查询，不能直接使用 predicate。
+最初把 `service_nav_bar` predicate 当 marker，导致
+`run_8aad2967` 在服务页报 `CURRENT_SCREEN_UNKNOWN`；改成可查询的
+`ETC发行` 后通过。
+
+⚠️ 服务页 marker 仍有稳定性风险：`ETC发行` 是服务端下发的分区标题。后续应
+在 App 服务页根节点补固定 `accessibilityIdentifier`，再把 screen marker 和
+`service_nav_bar` 元素一起切换到稳定锚点。
+
+同批真机回归结果：
+
+```text
+lst_home_search_back_001: PASS
+lst_smoke_launch_001: PASS
+lst_tab_switch_back_001: PASS
+run: exit 0
+```
+
 ## 4. 提交与工作区
 
 ### MTA 仓库
@@ -214,6 +295,15 @@ a52b322 fix(lst): wire optional through StepRunner and verify home_search smoke
 - `nfcPushOnline.xcodeproj/project.pbxproj`
 - `.codegraph/`、`xcuserdata/`、`.DS_Store`
 
+第二项提交（本文件所在 commit）：
+
+```text
+test(lst): add tab switch navigation smoke
+```
+
+包含 `WaitStep.optional`、更新弹窗竞态修复、服务页 / 我的页 / tab override、
+tab 导航用例及本文件更新。本轮未修改乐速通 App 源码。
+
 ## 5. 复现命令
 
 ```bash
@@ -244,6 +334,8 @@ make lst-smoke-device LST_ENV=uat
   `repository/generated/<build>/`。
 - 乐速通 accessibilityIdentifier 覆盖仍很低（两个 `calendar` + `home_search`），
   后续页面大多仍需结构探测；搜索输入框也尚无独立锚点。
+- 服务页 screen marker 临时使用服务端文案 `ETC发行`，运营改名会假红；需 App
+  补稳定锚点后替换。
 - 两套 runner 仍并存。本轮选择方案 A 修复真实路径；若要根治语义漂移，后续可
   迁移 `run_phase0_demo.py` 与旧 runner 测试后删除 `testcase_runner.py`。
 
@@ -256,6 +348,10 @@ make lst-smoke-device LST_ENV=uat
 | 冒烟用例 | `suites/lst/smoke_launch_001.yaml` |
 | 首页导航用例 | `suites/lst/home_search_back_001.yaml` |
 | 首页 / 搜索页 override | `repository/overrides/{screens,elements}/LSTDynamic{HomeViewController,SearchView}.yaml` |
+| tab 导航用例 | `suites/lst/tab_switch_back_001.yaml` |
+| 服务页 override | `repository/overrides/{screens,elements}/LSTServiceMenuViewController.yaml` |
+| 我的页 override | `repository/overrides/{screens,elements}/LSTMineViewController.yaml` |
+| tab 操作元素 | `repository/overrides/elements/LSTTabBarViewController.yaml` |
 | 真机 trace | `out/lst-smoke.db` |
 | 真机构建/安装/冒烟 | `Makefile` 的 `lst-build-device` / `lst-install-device` / `lst-smoke-device` |
 

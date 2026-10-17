@@ -1,0 +1,18 @@
+# overrides/elements/LSTServiceMenuViewController.yaml — 乐速通服务页元素
+#
+# 服务页 NavigationBar 与底部 tab 同名，必须限定类型；tab 切换元素统一定义
+# 在 LSTTabBarViewController.yaml。当前 screen marker 用 `ETC发行`，此文件
+# 保留一个 NavigationBar predicate 元素，供后续页面内操作复用。
+schema_version: "1.0"
+kind: element
+id: service_nav_bar
+screen: LSTServiceMenuViewController
+type: other
+strategies:
+  - {type: predicate,
+     value: 'type == "XCUIElementTypeNavigationBar" AND name == "服务"',
+     origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC

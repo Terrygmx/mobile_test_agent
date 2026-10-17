@@ -103,6 +103,25 @@ def test_wait_condition_unknown_rejected():
         )
 
 
+def test_wait_step_optional_defaults_false_and_can_be_set():
+    step = WaitStep.model_validate(
+        {"wait_for": {"target": "update_dialog_cancel", "condition": "exists"}}
+    )
+    assert step.optional is False
+
+    step = WaitStep.model_validate(
+        {
+            "wait_for": {
+                "target": "update_dialog_cancel",
+                "condition": "exists",
+                "timeout": 15,
+            },
+            "optional": True,
+        }
+    )
+    assert step.optional is True
+
+
 # --- 枚举（设计 6.3） ---
 
 def test_idempotency_enum_values():

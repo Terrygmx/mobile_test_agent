@@ -358,6 +358,53 @@ steps:
     assert "optional_skipped" in (row[2] or "")
 
 
+def test_optional_wait_skips_timeout_through_session_pipeline(tmp_path):
+    """optional wait 超时 = 可选前置未出现，记 SUCCESS 且留下审计说明。
+
+    冷启动更新弹窗是异步出现的：立即 optional tap 会在弹窗入树前被跳过，
+    随后首页被模态遮住。用例必须先 optional wait 给弹窗一个出现窗口。
+    """
+    from executor.guard import EnvKind, Guard
+    from executor.executor import ElementNotFound
+    from runner.lifecycle import Lifecycle
+    from runner.runner import StepRunner
+    from tracer.storage import TraceStore
+
+    class _NoFind:
+        def find(self, strategies):
+            raise ElementNotFound("update dialog absent")
+
+        def perform(self, action, element, value=None):
+            pass
+
+    store = TraceStore(tmp_path / "trace.db")
+    store.start_run("run_optional_wait")
+    pipe = SessionPipeline(suites_root=None, store=store)
+    case = _load_case("""\
+schema_version: "0.2"
+id: optional_wait_case
+name: optional wait
+steps:
+  - wait_for:
+      target: update_dialog_cancel
+      condition: exists
+      timeout: 0.05
+      polling_interval: 0.01
+    optional: true
+""")
+    runner = StepRunner(_NoFind(), _FakeDS(), Guard(EnvKind.SANDBOX))
+    result = pipe.run_case(runner, Lifecycle(store=store), case,
+                           run_id="run_optional_wait")
+
+    assert result.status == "PASS", result.detail
+    row = store.conn.execute(
+        "SELECT status, failure_type, detail_json FROM steps"
+    ).fetchone()
+    assert row[0] == "SUCCESS"
+    assert row[1] is None
+    assert "optional_skipped" in (row[2] or "")
+
+
 def test_run_case_wait_step_and_assertion_step(tmp_path):
     """wait_for / assertion 步骤也要走新管线（6.2 三形态全覆盖）。"""
     from executor.guard import EnvKind, Guard

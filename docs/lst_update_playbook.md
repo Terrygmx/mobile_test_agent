@@ -430,13 +430,18 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
   - mta 侧 screen id 改成 `LSTDynamicHomeViewController`、marker 改成
     `home_search`；`repository/overrides/{screens,elements}/` 两个文件同步改名，
     用例 `target: screen:LSTDynamicHomeViewController`。
-  - 用例保留一步 **optional** 的 `tap update_dialog_cancel` 点掉弹窗。元素定义用
-    **predicate**（`type == "XCUIElementTypeButton" AND name == "取消"`）而不是
+  - 用例先 **optional wait** `update_dialog_cancel` 最多 15 秒，再 optional tap
+    点掉弹窗。元素定义用 **predicate**
+    （`type == "XCUIElementTypeButton" AND name == "取消"`）而不是
     accessibility_id——`取消` 在树里有**两个同名节点**（Button 和它内部承载
     文字的 StaticText），单策略会 `AmbiguousElement`。
-  - `optional` 的语义：定位不到 = 条件不成立，跳过并记 SUCCESS（不是 FAIL）。
-    App 追上 4.2.31 后弹窗不再出现，普通 tap 会让用例假红。⚠️ optional
-    **只豁免定位失败**，动作执行中途抛的别的错照旧 FAIL。
+  - 为什么不能只保留 optional tap：更新弹窗是冷启动后**异步入树**的，立即
+    tap 可能在弹窗出现前就按 `ElementNotFound` 跳过，随后模态盖住首页，失败
+    被误报成「首页没出来」。optional wait 给出出现窗口，超时才表示条件未成立。
+  - `optional` 的语义：动作步定位不到、或 wait 步抛 `WaitTimeout`，表示条件
+    不成立，跳过并记 SUCCESS（不是 FAIL）。App 追上 4.2.31 后弹窗不再出现，
+    普通步骤会让用例假红。⚠️ optional **不豁免驱动、配置、Guard、perform**
+    等错误，这些仍照旧 FAIL。
   - ⚠️ 已知边界：UITabBarController 不卸载非选中 tab 的 view，切走之后首页元素
     靠祖先 `hidden` 传播成 `visible=false`——与旧 marker 行为一致，非本次引入。
 
@@ -468,6 +473,35 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
 ⚠️ 搜索输入框当前没有独立可访问节点，输入框内「搜索」文案也未进入树；本链路
 只覆盖进入/返回。要覆盖搜索输入，需先在 App 侧补输入框锚点。
 
+### 3.13 tab 切换：screen marker 的查询类型限制
+
+2026-10-17 真机探测确认首页 / 服务 / 我的三个 tab 可连续切换，但踩到了
+`screen wait` 的定位限制：
+
+- screen marker 固定按 **accessibility id** 查询，不能直接写 predicate；
+- 服务页 `NavigationBar` 的 name 是「服务」，底部 tab 按钮也叫「服务」，
+  两者同名，短名查询不唯一；
+- 服务页当前改用分区标题 `ETC发行` 作为 marker，它是**服务端菜单文案**，
+  运营改名就会假红，属于临时方案；更稳妥的做法是 App 在服务页根节点补一个
+  固定的 `accessibilityIdentifier`，再把 marker 换过去；
+- 我的页 marker 使用 App 自有按钮 `mineSet`。真机暴露的是 camelCase
+  `mineSet`，不是元素语义 id `mine_set`；
+- 三个 tab 操作元素都用 `XCUIElementTypeButton` predicate 限定类型，避免
+  命中同名的 NavigationBar / StaticText。
+
+对应文件：
+
+- `repository/overrides/screens/LSTServiceMenuViewController.yaml`
+- `repository/overrides/screens/LSTMineViewController.yaml`
+- `repository/overrides/elements/LSTServiceMenuViewController.yaml`
+- `repository/overrides/elements/LSTMineViewController.yaml`
+- `repository/overrides/elements/LSTTabBarViewController.yaml`
+- `suites/lst/tab_switch_back_001.yaml`
+
+用例共 13 步：冷启动 → 关更新弹窗 → 首页 → 服务 → 我的 → 首页；每次切走后
+断言首页搜索锚点 `not_exists`，切回后断言 `exists`。真机
+`run_24bf6348` 的 13 步全部 `SUCCESS`。
+
 ## 4. 各文件职责速查（接入相关）
 
 | 位置 | 文件 | 职责 | 版本更新时动不动 |
@@ -478,9 +512,13 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
 | mta 仓库 | `Makefile` 的 `lst-install-device` | devicectl 装机 | 否 |
 | mta 仓库 | `session/device_session.py` 的 `resolve_local_caps` | 真机 caps 装配：camelCase 键名 / `platformVersion` 钳到本地 SDK / 预建 WDA 路线（见 §3.10） | 否 |
 | mta 仓库 | `repository/overrides/{screens,elements}/LSTDynamicHomeViewController.yaml` | 首页 screen marker（`home_search`）+ 更新弹窗「取消」按钮的 predicate 定位（见 §3.11） | 否 |
-| mta 仓库 | `suites/lst/smoke_launch_001.yaml` | 冷启动冒烟：launch → optional 点掉更新弹窗 → 等首页可见 | 弹窗行为变时改 |
+| mta 仓库 | `suites/lst/smoke_launch_001.yaml` | 冷启动冒烟：launch → optional wait/tap 点掉更新弹窗 → 等首页可见 | 弹窗行为变时改 |
 | mta 仓库 | `repository/overrides/{screens,elements}/LSTDynamicSearchView.yaml` | 搜索页 screen marker（`LSTDynamicSearchView`）+ 返回/取消按钮（见 §3.12） | 否 |
 | mta 仓库 | `suites/lst/home_search_back_001.yaml` | 首页 → 搜索页 → 返回首页（8 步） | 搜索页导航变时改 |
+| mta 仓库 | `repository/overrides/{screens,elements}/LSTServiceMenuViewController.yaml` | 服务页 screen marker（临时用 `ETC发行`）+ NavigationBar 元素（见 §3.13） | App 补稳定锚点后改 |
+| mta 仓库 | `repository/overrides/{screens,elements}/LSTMineViewController.yaml` | 我的页 screen marker（`mineSet`）+ 设置按钮元素（见 §3.13） | 否 |
+| mta 仓库 | `repository/overrides/elements/LSTTabBarViewController.yaml` | 首页 / 服务 / 我的三个 tab 的 Button predicate（见 §3.13） | tab 文案变化时改 |
+| mta 仓库 | `suites/lst/tab_switch_back_001.yaml` | 首页 → 服务 → 我的 → 首页（13 步） | tab 结构变化时改 |
 | mta 仓库 | `scripts/lst_build_dev.sh` / `lst_build_uat.sh` / `lst_build_prod.sh` | 三环境一键构建+strings 环境验证（+可选装机），内部调 make 目标 | 否（指纹失效时改 VERIFY_PATTERN） |
 | 乐速通仓库 | `AppDelegate.m` ifdef 块 | iOS 27 scene 生命周期最小采纳 | 待 App 正式采纳后删除 |
 | 乐速通仓库 | `Podfile` 顶部两个 spec 源 | pod 拉取 | 否（勿再注释） |

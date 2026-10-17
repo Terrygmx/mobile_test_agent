@@ -26,6 +26,7 @@ from pathlib import Path
 import yaml
 
 from agent.recovery import resolve_deferred_sample
+from executor.wait import WaitTimeout
 from runner.lifecycle import Lifecycle
 from runner.result import RunResult, TestcaseResult, recovered_kind
 from runner.runner import RunStepContext, StepOutcome, StepRunner
@@ -521,6 +522,17 @@ class SessionPipeline:
                         except InfraError:
                             raise
                         except Exception as e:
+                            # optional wait：超时表示可选前置条件未出现
+                            # （如更新弹窗没弹），跳过并保留可审计说明。
+                            # 非 WaitTimeout 异常不豁免，避免把配置/驱动
+                            # 故障伪装成「条件不成立」。
+                            if step.optional and isinstance(e, WaitTimeout):
+                                self._record_aux_step(
+                                    lifecycle, idx, "wait_for",
+                                    _target_label(step.wait_for.target),
+                                    latency_ms=int((time.time() - t1) * 1000),
+                                    detail={"optional_skipped": "WaitTimeout"})
+                                continue
                             # 矩阵 #11/#12：screen 目标超时先做终态分类——
                             # 页面无任何已登记 marker=CURRENT_SCREEN_UNKNOWN、
                             # 多 marker 无 modal=SCREEN_AMBIGUOUS；「别的屏

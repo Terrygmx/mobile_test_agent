@@ -1,0 +1,59 @@
+# suites/lst/tab_switch_back_001.yaml — 首页 → 服务 → 我的 → 首页
+#
+# 覆盖第二项：tab 切换、页面 marker 识别、非选中页面可访问性变化。
+# 真机探测（2026-10-17）：
+# - 三个 tab 按钮各唯一，点击后 selected 状态正确；
+# - 切到服务/我的后，首页 `home_search` 查询为 0；
+# - 切回首页后 `home_search` 恢复为 1。
+# 因此用 not_exists 断言“切走后首页入口不在树里”，切回后断言 exists。
+schema_version: "0.2"
+id: lst_tab_switch_back_001
+name: 乐速通 tab 切换并返回首页
+suite: lst_smoke
+tags: [lst, smoke, navigation, tab]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - wait_for:
+      target: update_dialog_cancel
+      condition: exists
+      timeout: 15
+    optional: true
+  - action: tap
+    target: update_dialog_cancel
+    optional: true
+  - wait_for:
+      target: screen:LSTDynamicHomeViewController
+      condition: active
+      timeout: 15
+  - action: tap
+    target: tab_service
+  - wait_for:
+      target: screen:LSTServiceMenuViewController
+      condition: active
+      timeout: 15
+  - assertion:
+      target: LSTDynamicHomeViewController.home_search
+      condition: not_exists
+      timeout: 5
+  - action: tap
+    target: tab_mine
+  - wait_for:
+      target: screen:LSTMineViewController
+      condition: active
+      timeout: 15
+  - assertion:
+      target: LSTDynamicHomeViewController.home_search
+      condition: not_exists
+      timeout: 5
+  - action: tap
+    target: tab_home
+  - wait_for:
+      target: screen:LSTDynamicHomeViewController
+      condition: active
+      timeout: 15
+  - assertion:
+      target: LSTDynamicHomeViewController.home_search
+      condition: exists
+      timeout: 5

@@ -1,0 +1,14 @@
+# overrides/screens/LSTMineViewController.yaml — 乐速通「我的」页 Screen 定义
+#
+# 真机探测（2026-10-17）：我的页没有 NavigationBar，用户名和服务端菜单
+# 都会变化；`mineSet` 是 App 自己持有的固定图片按钮，适合作为 marker。
+# 注意真机树暴露的是按钮 name/label `mineSet`（camelCase），不是元素语义
+# id `mine_set`；screen wait 按 marker 直接查 accessibility id，必须写前者。
+schema_version: "1.0"
+kind: screen
+id: LSTMineViewController
+marker: mineSet
+kind_hint: page
+metadata:
+  risk: LOW
+  origin: manual
