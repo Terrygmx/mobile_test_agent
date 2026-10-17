@@ -63,6 +63,9 @@ class RunStepContext:
     postcondition_spec: object | None = None
     # 4.2：期望元素类型（9.3-2 类型校验基准），由调用方从 metadata 填。
     expected_type: str | None = None
+    # 条件性前置步：只豁免定位失败（ElementNotFound / AmbiguousElement），
+    # 动作执行、Guard、设备故障等其余错误照旧 FAIL。
+    optional: bool = False
     step_index: int = 0
 
 
@@ -160,6 +163,12 @@ class StepRunner:
             self._record(out, ctx)
             return out
 
+        def _optional_skip(reason: str) -> StepOutcome:
+            return _done(
+                ok=True,
+                error=f"optional step skipped ({reason})",
+                detail={"optional_skipped": reason})
+
         # 1. guard —— 先于设备：被拦的动作连设备都不该碰
         from executor.guard import GuardContext
         try:
@@ -195,6 +204,9 @@ class StepRunner:
             e.effective_idempotency = ctx.idempotency
             raise
         except Exception as e:
+            if ctx.optional and isinstance(e, (ElementNotFound,
+                                               AmbiguousElement)):
+                return _optional_skip(type(e).__name__)
             return _done(ok=False, phase=FailurePhase.PRE_DISPATCH,
                          failure_type=_classify_find_error(e),
                          error=f"{type(e).__name__}: {e}",
@@ -208,6 +220,8 @@ class StepRunner:
         elements = list(found) if isinstance(found, (list, tuple)) else [found]
 
         if not elements:
+            if ctx.optional:
+                return _optional_skip("ElementNotFound")
             return _done(ok=False, phase=FailurePhase.PRE_DISPATCH,
                          failure_type="ELEMENT_NOT_FOUND",
                          error=f"no element matched {ctx.element_id}",
@@ -216,6 +230,8 @@ class StepRunner:
                              ctx.has_postcondition))
         if len(elements) > 1:
             # H3：≥2 个立即 AMBIGUOUS，**禁止取第一个**
+            if ctx.optional:
+                return _optional_skip("AmbiguousElement")
             return _done(ok=False, phase=FailurePhase.PRE_DISPATCH,
                          failure_type="AMBIGUOUS_ELEMENT",
                          error=f"{len(elements)} elements matched "

@@ -1,14 +1,17 @@
 # suites/lst/smoke_launch_001.yaml — 乐速通冒烟：冷启动 → 首页可见
 #
-# 2026-10-16 真机实测修订（两处，都是 dump 无障碍树看出来的，不是猜的）：
-# ① screen marker 从 `home_list` 改成首页搜索框占位文案。原锚点在真机
-#    无障碍树里**根本不存在**——App 把 accessibilityIdentifier 设在容器
-#    （UITableView）上，而 XCUITest 不把容器当可定位节点暴露（实测整棵树
-#    连一个 XCUIElementTypeTable 都没有，列表由 ScrollView/CollectionView
-#    承载，这些容器的 name 全是空串）。详见 playbook §3.11。
-#    新 marker 的唯一性/可见性是实测过的：visible=true、name 全局唯一、
-#    且首页之外不出现。
-# ② 新增 optional 的「取消更新弹窗」步。冷启动后 uat 服务器会弹「更新提示」
+# 2026-10-16 真机实测修订（三处，都是 dump 无障碍树/读源码核出来的，不是猜的）：
+# ① screen 从 `LSTHomeViewController` 换成 `LSTDynamicHomeViewController`。
+#    前者是**死代码**——全仓无 alloc/init/new、无 storyboard/xib 引用、无
+#    NSClassFromString，首页 tab 的真身是后者
+#    （Control/LSTTabBarViewController.m:66）。原先加在死类上的
+#    `home_list` 锚点因此从未生效过（不是「容器不被 XCUITest 暴露」那么简单）。
+#    新 marker `home_search` 由 App 写死在搜索按钮内部的 UILabel 上，
+#    **不是服务端下发的文案**——上一版用搜索框占位文案，运营改一次字就假红。
+#    最初设在外部 UIButton 上，真机 dump 显示按钮节点没有 identifier；
+#    改到叶子 UILabel 后查找唯一命中。
+#    详见 playbook §3.11。
+# ② 保留 optional 的「取消更新弹窗」步。冷启动后 uat 服务器会弹「更新提示」
 #    （服务器 4.2.31 > 装机 4.2.30），模态弹窗把首页内容全部置成
 #    visible=false——不点掉，任何首页断言都过不了（实测点掉前可见且有名的
 #    节点只有 7 个、全是弹窗自己的；点掉后 43 个）。App 追上版本后不再弹，
@@ -26,6 +29,6 @@ steps:
     target: update_dialog_cancel
     optional: true
   - wait_for:
-      target: screen:LSTHomeViewController
+      target: screen:LSTDynamicHomeViewController
       condition: active
       timeout: 15

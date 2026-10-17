@@ -1012,6 +1012,7 @@ class SessionPipeline:
             # make_postcondition_checker / StepRunner.postcondition_checker
             postcondition_spec=step.postcondition,
             expected_type=getattr(eff, "type", None),
+            optional=step.optional,
             step_index=idx)
         return ctx, runner.run_step(ctx)
 

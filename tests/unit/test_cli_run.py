@@ -314,6 +314,50 @@ steps:
     assert row[0] == "FAIL" and row[1] == "ELEMENT_NOT_FOUND"
 
 
+def test_optional_step_skips_through_session_pipeline(tmp_path):
+    """optional 必须经真实 `SessionPipeline` 接线生效，并落可审计的跳过说明。
+
+    只测 `StepRunner` 会漏掉 `cli/pipeline.py` 忘记把 `step.optional` 传进
+    `RunStepContext` 的那类断线——这正是 2026-10-17 真机冒烟的根因。
+    """
+    from executor.executor import ElementNotFound
+    from executor.guard import EnvKind, Guard
+    from runner.lifecycle import Lifecycle
+    from runner.runner import StepRunner
+    from tracer.storage import TraceStore
+
+    class _NoFind:
+        def find(self, strategies):
+            raise ElementNotFound("update dialog absent")
+
+        def perform(self, action, element, value=None):
+            pass
+
+    store = TraceStore(tmp_path / "trace.db")
+    store.start_run("run_optional")
+    pipe = SessionPipeline(suites_root=None, store=store)
+    case = _load_case("""\
+schema_version: "0.2"
+id: optional_case
+name: optional
+steps:
+  - action: tap
+    target: update_dialog_cancel
+    optional: true
+""")
+    runner = StepRunner(_NoFind(), _FakeDS(), Guard(EnvKind.SANDBOX))
+    result = pipe.run_case(runner, Lifecycle(store=store), case,
+                           run_id="run_optional")
+
+    assert result.status == "PASS", result.detail
+    row = store.conn.execute(
+        "SELECT status, failure_type, detail_json FROM steps"
+    ).fetchone()
+    assert row[0] == "SUCCESS"
+    assert row[1] is None
+    assert "optional_skipped" in (row[2] or "")
+
+
 def test_run_case_wait_step_and_assertion_step(tmp_path):
     """wait_for / assertion 步骤也要走新管线（6.2 三形态全覆盖）。"""
     from executor.guard import EnvKind, Guard

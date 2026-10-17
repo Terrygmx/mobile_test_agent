@@ -21,6 +21,7 @@ import pytest
 
 from executor.policy import FailurePhase, Idempotency
 from executor.guard import EnvKind, Guard
+from executor.executor import AmbiguousElement, ElementNotFound
 from runner.runner import StepRunner, RunStepContext
 from session.device_session import InfraError
 from testcase.schema import Idempotency as Idem, Risk
@@ -91,7 +92,7 @@ class FakeRecorder:
 
 def _ctx(driver, element_id="login_button", risk="LOW", idem=None,
          action="tap", value=None, has_postcondition=False,
-         postcondition_spec=None):
+         postcondition_spec=None, optional=False):
     return RunStepContext(
         element_id=element_id,
         screen_id="LoginView",
@@ -102,6 +103,7 @@ def _ctx(driver, element_id="login_button", risk="LOW", idem=None,
         idempotency=(Idem[idem] if isinstance(idem, str) else idem),
         has_postcondition=has_postcondition or postcondition_spec is not None,
         postcondition_spec=postcondition_spec,
+        optional=optional,
     )
 
 
@@ -160,6 +162,76 @@ def test_s1_find_raises_is_pre_dispatch():
     out = r.run_step(_ctx(driver))
     assert out.phase == FailurePhase.PRE_DISPATCH
     assert out.retry_decision.allowed is True
+
+
+# ------------------------------------------------ optional 条件性前置步
+
+def test_optional_find_zero_matches_is_success_and_marks_skipped():
+    """optional + 0 匹配 → 跳过并记 SUCCESS，error 能区分「跳过」与「真做了」。"""
+    driver = FakeDriver(find_result=[])
+    r = _runner(driver)
+    out = r.run_step(_ctx(driver, optional=True))
+    assert out.ok is True
+    assert out.phase is None
+    assert out.error == "optional step skipped (ElementNotFound)"
+    assert out.detail == {"optional_skipped": "ElementNotFound"}
+    assert ACT_LOG == [], "跳过时不该发出动作"
+
+
+def test_optional_find_raises_element_not_found_is_success():
+    """optional + find 抛 ElementNotFound → 同样跳过并记 SUCCESS。"""
+    driver = FakeDriver(find_error=ElementNotFound("no such element"))
+    r = _runner(driver)
+    out = r.run_step(_ctx(driver, optional=True))
+    assert out.ok is True
+    assert out.error == "optional step skipped (ElementNotFound)"
+    assert out.detail == {"optional_skipped": "ElementNotFound"}
+
+
+def test_optional_ambiguous_match_is_success():
+    """optional + 多匹配（定位失败）→ 跳过，不取第一个。"""
+    driver = FakeDriver(find_result=[FakeElement("a"), FakeElement("b")])
+    r = _runner(driver)
+    out = r.run_step(_ctx(driver, optional=True))
+    assert out.ok is True
+    assert out.error == "optional step skipped (AmbiguousElement)"
+    assert out.detail == {"optional_skipped": "AmbiguousElement"}
+    assert ACT_LOG == []
+
+
+def test_optional_perform_error_still_fails():
+    """optional 只豁免定位失败；动作已发出后的错误照旧 FAIL。"""
+    driver = FakeDriver()
+
+    class _TimeoutExecutor(_FakeExecutor):
+        def perform(self, action, element, value=None):
+            raise TimeoutError("act timed out after dispatch")
+
+    r = StepRunner(executor=_TimeoutExecutor(driver),
+                   device_session=FakeDeviceSession(driver),
+                   guard=Guard(env_kind=EnvKind.SANDBOX), recorder=FakeRecorder())
+    out = r.run_step(_ctx(driver, optional=True))
+    assert out.ok is False
+    assert out.phase == FailurePhase.POST_DISPATCH
+    assert out.failure_type == "ACTION_OUTCOME_UNKNOWN"
+
+
+def test_optional_find_value_error_still_fails():
+    """optional 不吞配置/编程错误：未知 locator 策略仍是 FAIL。"""
+    driver = FakeDriver(find_error=ValueError("unknown locator strategy"))
+    r = _runner(driver)
+    out = r.run_step(_ctx(driver, optional=True))
+    assert out.ok is False
+    assert out.failure_type == "ELEMENT_NOT_FOUND"
+
+
+def test_non_optional_zero_matches_still_fails():
+    """未标 optional → 保持原契约：0 匹配仍 FAIL。"""
+    driver = FakeDriver(find_result=[])
+    r = _runner(driver)
+    out = r.run_step(_ctx(driver))
+    assert out.ok is False
+    assert out.failure_type == "ELEMENT_NOT_FOUND"
 
 
 # ------------------------------------------------------------ S2 act 超时

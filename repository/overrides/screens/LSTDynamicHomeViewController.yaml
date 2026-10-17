@@ -1,0 +1,29 @@
+# overrides/screens/LSTDynamicHomeViewController.yaml — 乐速通首页 Screen 定义
+# （2026-10-16 第二次修订）：marker 必须指向**真机上可见、且由 App 自己持有**的
+# accessibility id。
+#
+# 前两版为什么都不行（都记下来，免得第三次再踩）：
+# ① 原 marker `home_list` 从未生效过。它被加在 LSTHomeViewController.m 的
+#    tableView 上，而**那个类根本没有被实例化**——全仓 grep 无 alloc/init/new、
+#    无 storyboard/xib 引用、无 NSClassFromString。首页 tab 的真身是
+#    LSTDynamicHomeViewController（Control/LSTTabBarViewController.m:66）。
+#    往死代码里加锚点 = 加了等于没加。
+# ② 第二版 marker 用首页搜索框的**占位文案**，能过但很脆：那串文字是**服务端
+#    下发的**（LSTDynamicNavigationBar.placeholder ← dynamic 接口的
+#    navigationBar.property，见 LSTDynamicHomeViewController.m:496），运营改文案
+#    自动化就假红。
+# ③ 本版改用 `home_search`：由 App 写死在搜索按钮内部的 UILabel 上
+#    （LSTDynamicNavigationBarView.m）。最初设在外部 UIButton 上，但真机
+#    dump 显示按钮节点没有 identifier；改到叶子 UILabel 后查找唯一命中。
+#    该 NAV 单例只被首页 VC 添加到视图上
+#    （LSTDynamicHomeViewController.m:411），故首页可见时有、其他 tab 无。
+# ⚠️ 已知边界：UITabBarController 不卸载非选中 tab 的 view，切走之后首页元素靠
+# 祖先 hidden 传播成 visible=false——与旧 marker 行为一致，非本次引入。
+schema_version: "1.0"
+kind: screen
+id: LSTDynamicHomeViewController
+marker: home_search
+kind_hint: page
+metadata:
+  risk: LOW
+  origin: manual

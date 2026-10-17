@@ -1,5 +1,8 @@
-# overrides/elements/LSTHomeViewController.yaml — 乐速通首页相关元素
+# overrides/elements/LSTDynamicHomeViewController.yaml — 乐速通首页相关元素
 # （2026-10-16 真机接入）：更新提示弹窗的「取消」按钮。
+#
+# 归属 screen 从 LSTHomeViewController 改为 LSTDynamicHomeViewController
+# ——前者是**死代码**（全仓无实例化），首页 tab 真身见 screens/ 那份的注释。
 #
 # ⚠️ 为什么必须用 predicate 而不是 accessibility_id：弹窗里 Button「取消」
 # 和它内部承载文字的 StaticText「取消」**同名**，`accessibility id` 单策略
@@ -9,7 +12,7 @@
 schema_version: "1.0"
 kind: element
 id: update_dialog_cancel
-screen: LSTHomeViewController
+screen: LSTDynamicHomeViewController
 type: button
 strategies:
   - {type: predicate,

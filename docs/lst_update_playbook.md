@@ -187,16 +187,20 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
   pod 元素，污染 screens）。也不加 `--check`——overrides 是 LoginDemo 的手写
   层，与被测产品无关。
 - **乐速通的 accessibilityIdentifier 覆盖极低**：614 个 .m 原本只有 2 处
-  （两个 CalendarView 的 `calendar`）。2026-10-15 为冒烟用例补了**首页锚点**：
-  `LSTHomeViewController.m` 的 tableView 加 `accessibilityIdentifier =
-  @"home_list"`（对用户不可见、不影响正常打包），mta 侧
-  `repository/overrides/screens/LSTHomeViewController.yaml` 把 screen marker
-  指向它。后续首页流用例可复用该锚点；新增 screen 时照此办理：
+  （两个 CalendarView 的 `calendar`）。2026-10-16 为冒烟用例补了**首页锚点**：
+  `LSTDynamicNavigationBarView.m` 搜索按钮内部的 `UILabel` 加
+  `accessibilityIdentifier = @"home_search"`（对用户不可见、不影响正常打包），mta 侧
+  `repository/overrides/screens/LSTDynamicHomeViewController.yaml` 把 screen
+  marker 指向它。后续首页流用例可复用该锚点；新增 screen 时照此办理：
   **App 加一个真 accessibility id + overrides 声明 marker**（generated 的
   marker 是 `screen.<类名>`，永远匹配不到真机，见 `source/export.py` 注释）。
   （此前一个 schema 失配 bug 曾让 ObjC 分支静默输出 0 元素，已修并有
   round-trip 回归测试。）**坐标驱动/界面结构探测的用例不依赖这个表**，
-  但按 accessibility id 定位的用例目前只有 `calendar` / `home_list` 可用。
+  但按 accessibility id 定位的用例目前只有 `calendar` / `home_search` 可用。
+  ⚠️ 补锚点前先确认**那个类真的被实例化**——`LSTHomeViewController` 是死代码
+  （无 alloc/init/new、无 xib/storyboard、无 NSClassFromString），首页 tab 真身
+  是 `LSTDynamicHomeViewController`（`Control/LSTTabBarViewController.m:66`）。
+  2026-10-15 那版 `home_list` 就是加进了死类，从未生效。详见 §3.11。
 - **含 mta 能力的包只在本项目构建**：App 同事的正常打包（b.sh 等）保持原样，
   **不需要**他们集成 scene 宏 / 身份注入——没有 `MTA_GIT_COMMIT`/`MTA_BUILD_ID`
   的包本来就无法喂 `mta run`（G8 fail-closed），这是设计而非缺陷。给 mta 用的
@@ -296,8 +300,11 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
 - **已知例外 2**：`LSTHomeViewController.m:368` 无条件硬编码内网 URL
   `http://172.20.113.33:8084/osplatpagetest/...`（不在任何宏里）——**连生产
   包的二进制都带这段测试地址**。因此 `osplatpagetest` 不能当环境指纹用
-  （脚本里的 dev 指纹用的是完整 tpark URL）。该行在 prod 包会推一个打内网
-  测试服务器的 webview，同样建议报备 App 同事。
+  （脚本里的 dev 指纹用的是完整 tpark URL）。
+  ⚠️ 2026-10-17 补充：该行所在方法 `passengerAction` **全仓无调用方**，且
+  `LSTHomeViewController` 整个类是死代码（见 §3.11 第 2 条），所以这段 URL
+  实际不会被推到用户面前——但**字符串仍在二进制里**，环境指纹的结论不变。
+  报备优先级相应降低。
 
 ### 3.10 真机 WDA 起不来（iOS 27+：caps / SDK / 隧道三重坑）
 
@@ -379,12 +386,12 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
   `executable.path` 与当前 devicectl 不符（报 `Did you mean 'Executable
   Path'?`）。有隧道时走不到这条分支，不用管；别处撞到同款就是版本错配。
 
-### 3.11 首页锚点找不到：`home_list` 不存在 + 更新弹窗盖住首页
+### 3.11 首页锚点：先后踩了「死代码」和「服务端文案」两个坑
 
 - **症状**：`lst_smoke_launch_001: FAIL (CURRENT_SCREEN_UNKNOWN)`，detail 是
   `WAIT_TIMEOUT: target='LSTHomeViewController' condition='active' timeout=15.0s …
   no element for [{'type': 'accessibility_id', 'value': 'home_list'}]`。
-- **根因是两层，叠在一起**（2026-10-16 真机 dump 无障碍树实测，不是猜的）：
+- **根因是三层**（2026-10-16 真机 dump 无障碍树 + 读源码核实，不是猜的）：
 
   1. **更新弹窗把首页盖住了**。冷启动后 uat 服务器会弹「更新提示」（服务器
      4.2.31 > 装机 4.2.30）。模态弹窗一上，首页内容在无障碍树里全部变成
@@ -392,28 +399,40 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
      只有 **7** 个（全是弹窗自己的：标题、正文、两个按钮及其文字），点掉
      「取消」后跳到 **43** 个。`wait_for screen active` 要求 marker 既找得到又
      **可见**，所以弹窗在时必挂。
-  2. **`home_list` 这个锚点本身不存在**。整棵树上没有任何元素的 accessibility
-     id 是它，而且**连一个 `XCUIElementTypeTable` 都没有**——首页列表由
-     ScrollView/CollectionView 承载，这些容器的 `name` 全是空串。
-     ⚠️ 这是 App 侧那行 `_tableView.accessibilityIdentifier = @"home_list"`
-     的**结构性无效**：`accessibilityIdentifier` 设在**容器**上，XCUITest 根本
-     不把容器当可定位节点暴露（设了也白设，`strings` 二进制能看到串、树里找不到）。
-     要能定位，标识符得设在**叶子**元素上（且不能给容器设
-     `isAccessibilityElement=YES`——那会把整表折成一个节点，VoiceOver 全废）。
+  2. **`home_list` 加进了死代码**（2026-10-17 更正）。原以为是「容器标识符
+     XCUITest 不暴露」，**这个结论是错的**。真因：那行加在
+     `LSTHomeViewController` 上，而该类**根本没有被实例化**——全仓无
+     `alloc/init/new`、无 xib/storyboard 引用、无 `NSClassFromString`。首页 tab
+     的真身是 `LSTDynamicHomeViewController`（`Control/LSTTabBarViewController.m:66`）。
+     往死类里加锚点，加了等于没加。
+     ⚠️ 教训：**给 App 补锚点前，先确认那个类真的会被创建**（grep 实例化点，
+     而不是 grep 类名）。这次是靠「整棵树连一个 `XCUIElementTypeTable` 都没有」
+     才起疑，又去核实例化才发现的。
+  3. **改用搜索框占位文案做 marker 太脆**（第二版）。`请输入「关键词」搜索`
+     确实是真机可见、全局唯一的 name，但它**是服务端下发的**——
+     `LSTDynamicNavigationBar.placeholder` ← dynamic 接口的
+     `navigationBar.property`（`LSTDynamicHomeViewController.m:496`）。运营改一次
+     文案，自动化就假红，而且失败原因会伪装成「首页没出来」。
 
-- **处理**（mta 侧已改，零 App 改动）：
-  - screen marker 从 `home_list` 改成**首页搜索框占位文案**
-    `请输入「关键词」搜索`——实测 `visible=true`、name 全局唯一、且首页之外
-    不出现（弹窗盖住时它倒是 `visible=false`，正好一起被第 1 条挡住，语义自洽）。
-  - 用例加一步 **optional** 的 `tap update_dialog_cancel` 点掉弹窗。元素定义用
+- **处理**（最终版，App 加一行 + mta 改 marker）：
+  - App 侧在**活着的**类上加锚点：`LSTDynamicNavigationBarView.m` 搜索按钮内部的
+    `UILabel` 设 `accessibilityIdentifier = @"home_search"`。最初把标识符设在
+    外层 `UIButton` 上，但真机 dump 显示按钮节点没有 identifier；改到叶子
+    `UILabel` 后查找唯一命中。选它的理由：① App 自己持有，不随服务端文案变；
+    ② 这个 `NAV` 单例只被首页 VC 加进视图
+    （`LSTDynamicHomeViewController.m:411`），天然「首页有、别的 tab 无」。
+  - mta 侧 screen id 改成 `LSTDynamicHomeViewController`、marker 改成
+    `home_search`；`repository/overrides/{screens,elements}/` 两个文件同步改名，
+    用例 `target: screen:LSTDynamicHomeViewController`。
+  - 用例保留一步 **optional** 的 `tap update_dialog_cancel` 点掉弹窗。元素定义用
     **predicate**（`type == "XCUIElementTypeButton" AND name == "取消"`）而不是
     accessibility_id——`取消` 在树里有**两个同名节点**（Button 和它内部承载
     文字的 StaticText），单策略会 `AmbiguousElement`。
   - `optional` 的语义：定位不到 = 条件不成立，跳过并记 SUCCESS（不是 FAIL）。
     App 追上 4.2.31 后弹窗不再出现，普通 tap 会让用例假红。⚠️ optional
     **只豁免定位失败**，动作执行中途抛的别的错照旧 FAIL。
-  - 仍待 App 同事处理：`LSTHomeViewController.m:1134` 那行要么删，要么挪到叶子
-    元素上；挪之前 mta 侧不依赖它。
+  - ⚠️ 已知边界：UITabBarController 不卸载非选中 tab 的 view，切走之后首页元素
+    靠祖先 `hidden` 传播成 `visible=false`——与旧 marker 行为一致，非本次引入。
 
 ## 4. 各文件职责速查（接入相关）
 
@@ -424,7 +443,7 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
 | mta 仓库 | `Makefile` 的 `lst-build-device` | 构建+注入 scene 宏/manifest+身份键+重签 | 否（自动化吸收） |
 | mta 仓库 | `Makefile` 的 `lst-install-device` | devicectl 装机 | 否 |
 | mta 仓库 | `session/device_session.py` 的 `resolve_local_caps` | 真机 caps 装配：camelCase 键名 / `platformVersion` 钳到本地 SDK / 预建 WDA 路线（见 §3.10） | 否 |
-| mta 仓库 | `repository/overrides/{screens,elements}/LSTHomeViewController.yaml` | 首页 screen marker（搜索框占位文案）+ 更新弹窗「取消」按钮的 predicate 定位（见 §3.11） | 否 |
+| mta 仓库 | `repository/overrides/{screens,elements}/LSTDynamicHomeViewController.yaml` | 首页 screen marker（`home_search`）+ 更新弹窗「取消」按钮的 predicate 定位（见 §3.11） | 否 |
 | mta 仓库 | `suites/lst/smoke_launch_001.yaml` | 冷启动冒烟：launch → optional 点掉更新弹窗 → 等首页可见 | 弹窗行为变时改 |
 | mta 仓库 | `scripts/lst_build_dev.sh` / `lst_build_uat.sh` / `lst_build_prod.sh` | 三环境一键构建+strings 环境验证（+可选装机），内部调 make 目标 | 否（指纹失效时改 VERIFY_PATTERN） |
 | 乐速通仓库 | `AppDelegate.m` ifdef 块 | iOS 27 scene 生命周期最小采纳 | 待 App 正式采纳后删除 |
