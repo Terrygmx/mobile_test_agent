@@ -391,7 +391,14 @@ class RecoveryEngine:
         if self.guard is None or self.repo is None:
             return None
         try:
-            eff = self.repo.resolve(exp.strategy.value, build=ctx.app_build)
+            if callable(getattr(self.repo, "resolve_locator", None)):
+                eff = self.repo.resolve_locator(
+                    exp.strategy.type, exp.strategy.value,
+                    build=ctx.app_build)
+            else:
+                # 兼容只实现 resolve() 的测试替身/旧 Repository。
+                eff = self.repo.resolve(exp.strategy.value,
+                                        build=ctx.app_build)
         except Exception:  # noqa: BLE001 — UnknownReference 等 → 未登记
             return None
         from executor.guard import GuardContext
@@ -1097,7 +1104,14 @@ class RecoveryEngine:
         candidate_screen = risk = None
         eff = None
         try:
-            eff = self.repo.resolve(candidate["value"], build=ctx.app_build)
+            if callable(getattr(self.repo, "resolve_locator", None)):
+                eff = self.repo.resolve_locator(
+                    candidate["type"], candidate["value"],
+                    build=ctx.app_build)
+            else:
+                # 兼容只实现 resolve() 的测试替身/旧 Repository。
+                eff = self.repo.resolve(candidate["value"],
+                                        build=ctx.app_build)
             candidate_screen, risk = eff.screen, eff.risk
         except Exception:  # noqa: BLE001 — UnknownReference 等 → 未登记
             pass

@@ -1,0 +1,27 @@
+# 恢复演练的首页元素与更新弹窗取消按钮。真实链路定义见正式 overrides；
+# 这里复制最小闭包，确保本套件可单独 lint / run，不依赖正式目录。
+schema_version: "1.0"
+kind: element
+id: home_search
+screen: LSTDynamicHomeViewController
+type: text
+strategies:
+  - {type: accessibility_id, value: home_search, origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: update_dialog_cancel
+screen: LSTDynamicHomeViewController
+type: button
+strategies:
+  - {type: predicate,
+     value: 'type == "XCUIElementTypeButton" AND name == "取消"',
+     origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC

@@ -456,3 +456,49 @@ def test_from_dirs_loads_real_overrides(tmp_path):
     # 对照：低层注入路径结果一致
     low = _repo(override_elements=OVERRIDE_SCREENLESS)
     assert low.resolve("login_button", build="b1") == eff
+
+
+def test_resolve_locator_maps_strategy_value_to_registered_element(tmp_path):
+    """LLM/Experience 候选给的是定位值，不一定等于元素 id。"""
+    gen = tmp_path / "generated"
+    (gen / "elements").mkdir(parents=True)
+    (gen / "screens").mkdir(parents=True)
+    (gen / "elements" / "Search.yaml").write_text(
+        "schema_version: '1.0'\nkind: element\nid: search_back\n"
+        "screen: Search\ntype: button\nstrategies:\n"
+        "- type: accessibility_id\n  value: return\n  origin: source\n"
+        "metadata:\n  risk: LOW\n",
+        encoding="utf-8")
+    (gen / "screens" / "Search.yaml").write_text(
+        "schema_version: '1.0'\nkind: screen\nid: Search\n"
+        "marker: Search\nkind_hint: page\nmetadata:\n  risk: LOW\n",
+        encoding="utf-8")
+    repo = Repository.from_dirs(generated_root=str(gen))
+
+    eff = repo.resolve_locator("accessibility_id", "return", build="local")
+    assert (eff.screen, eff.id, eff.type) == ("Search", "search_back", "button")
+    assert repo.resolve_locator(
+        "accessibility_id", "return", build="local", screen="Search").id \
+        == "search_back"
+
+
+def test_resolve_locator_rejects_unknown_and_ambiguous_values(tmp_path):
+    """未登记 fail-loud；跨屏同值同样拒绝运行时猜。"""
+    gen = tmp_path / "generated"
+    (gen / "elements").mkdir(parents=True)
+    (gen / "screens").mkdir(parents=True)
+    for screen in ("One", "Two"):
+        (gen / "elements" / f"{screen}.yaml").write_text(
+            "schema_version: '1.0'\nkind: element\nid: back\n"
+            f"screen: {screen}\ntype: button\nstrategies:\n"
+            "- type: accessibility_id\n  value: return\n  origin: source\n"
+            "metadata:\n  risk: LOW\n",
+            encoding="utf-8")
+    repo = Repository.from_dirs(generated_root=str(gen))
+
+    with pytest.raises(AmbiguousReferenceError, match="matches multiple"):
+        repo.resolve_locator("accessibility_id", "return", build="local")
+    with pytest.raises(UnknownReferenceError):
+        repo.resolve_locator("accessibility_id", "missing", build="local")
+    assert repo.resolve_locator(
+        "accessibility_id", "return", build="local", screen="One").id == "back"

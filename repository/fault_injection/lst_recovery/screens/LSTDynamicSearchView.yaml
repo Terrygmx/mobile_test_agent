@@ -1,0 +1,9 @@
+# 搜索页 marker 由系统 NavigationBar 暴露，不依赖服务端文案。
+schema_version: "1.0"
+kind: screen
+id: LSTDynamicSearchView
+marker: LSTDynamicSearchView
+kind_hint: page
+metadata:
+  risk: LOW
+  origin: manual

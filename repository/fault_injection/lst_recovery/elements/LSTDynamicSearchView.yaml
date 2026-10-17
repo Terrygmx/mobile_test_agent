@@ -1,0 +1,28 @@
+# 恢复演练的搜索页元素。
+#
+# 故障设计：lst_recovery_search_back 的 accessibility id 故意写成不存在的
+# 值，代表一次“定位漂移”。真实目标 search_back 仍指向 `return`；LLM 需要
+# 从脱敏后的运行时树中找到它，恢复重试后才能返回首页。
+schema_version: "1.0"
+kind: element
+id: lst_recovery_search_back
+screen: LSTDynamicSearchView
+type: button
+strategies:
+  - {type: accessibility_id, value: lst_recovery_search_back, origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: search_back
+screen: LSTDynamicSearchView
+type: button
+strategies:
+  - {type: accessibility_id, value: return, origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC

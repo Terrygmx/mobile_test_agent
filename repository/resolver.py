@@ -352,6 +352,43 @@ class Repository:
         return sorted((self._element(i, screen=screen) for i in ids),
                       key=lambda e: e.id)
 
+    def resolve_locator(
+        self, strategy_type: str, value: str, *, build: str,
+        screen: str | None = None,
+    ) -> EffectiveElement:
+        """按**定位策略值**解析登记元素（LLM/Experience 候选的屏校验入口）。
+
+        `resolve()` 的 ref 是元素 id，而 LLM 返回、Experience 保存的是
+        locator（如 `accessibility_id=return`）。两者在真实业务里未必同名
+        （`search_back` 的值是 `return`）——拿值当 id 会把已登记候选误判成
+        `TARGET_UNREGISTERED`。
+
+        匹配的是**合并后的有效策略**，因此 override 已替换掉的 generated
+        策略不会误命中。未指定 screen 时跨屏查找；同一策略值命中多个元素
+        仍按 4.1 fail-loud，不允许运行时猜。
+        """
+        screens = [screen] if screen is not None else sorted({
+            s for s, _ in self.generated_elements
+        } | {
+            s for s, _ in self.override_elements if s is not None
+        })
+        matches: list[EffectiveElement] = []
+        for screen_id in screens:
+            for eff in self.elements_of(screen_id):
+                if any(s.type == strategy_type and s.value == value
+                       for s in eff.strategies):
+                    matches.append(eff)
+        if not matches:
+            raise UnknownReferenceError(
+                f"no registered element with {strategy_type}={value!r}"
+                + (f" on screen {screen!r}" if screen is not None else ""))
+        if len(matches) > 1:
+            where = sorted(f"{e.screen}.{e.id}" for e in matches)
+            raise AmbiguousReferenceError(
+                f"locator {strategy_type}={value!r} matches multiple elements "
+                f"{where}; use an element id or narrow the screen")
+        return matches[0]
+
     # --- lint（Repository 侧静态检查；全量 6.4 在 Task 1.3 testcase.lint） ---
 
     def lint(self, testcases: list[TestCase]) -> list[LintIssue]:

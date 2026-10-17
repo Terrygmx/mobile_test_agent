@@ -212,3 +212,29 @@ lst-smoke-device:
 	  --metadata repository/generated/local-$(LST_ENV)/source_metadata.json \
 	  --db out/lst-smoke.db'
 
+# 第三项：可重复的真实恢复演练。故意把搜索返回按钮的定位写成不存在的值，
+# 首次运行应走 ELEMENT_NOT_FOUND → DRIFT → LLM → RECOVERED；人工 accept
+# 生成 Experience 后，再跑应走 RECOVERED_EXPERIENCE 且 LLM 零调用。
+#
+# 故障定义只读 repository/fault_injection/lst_recovery，不污染正式
+# overrides；metadata 仍取真实 generated build，否则 Build Identity Gate
+# 会把故障目录误当成另一个构建。
+lst-recovery-device:
+	@bash -c 'set -e; \
+	export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer; \
+	UDID=$${MTA_DEVICE_UDID:-$$(xcrun devicectl list devices 2>/dev/null | grep physical | grep -Ei "connected|available" | grep -oE "[0-9A-F]{8}-[0-9A-F]{12,16}" | head -1)}; \
+	test -n "$$UDID" || { echo "lst-recovery-device: 未找到 USB 连接的 physical 设备"; exit 1; }; \
+	test -d "$(LST_WDA_PREBUILT_APP)" || { echo "lst-recovery-device: 预建 WDA 不存在（$(LST_WDA_PREBUILT_APP)）"; exit 1; }; \
+	test -n "$${LLM_API_KEY:-}" || { echo "lst-recovery-device: 首次演练需要 LLM_API_KEY（或先人工 accept 已有经验）"; exit 1; }; \
+	echo "lst-recovery-device: $$UDID env=$(LST_ENV)"; \
+	MTA_XCODE_ORG_ID=$(LST_XCODE_ORG_ID) \
+	MTA_WDA_PREBUILT_APP="$(LST_WDA_PREBUILT_APP)" \
+	$(CURDIR)/.venv/bin/python -m cli.main run \
+	  --suite lst_recovery --suites-root suites \
+	  --udid "$$UDID" --bundle-id com.etc.nfcPushOnline \
+	  --app-path "$(LST_DEVICE_APP)" \
+	  --overrides repository/fault_injection/lst_recovery \
+	  --generated repository/generated/local-$(LST_ENV) \
+	  --metadata repository/generated/local-$(LST_ENV)/source_metadata.json \
+	  --db out/lst-recovery.db \
+	  --exp-db out/lst-recovery-experience.db'

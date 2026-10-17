@@ -1,0 +1,10 @@
+# 乐速通恢复演练的隔离 Screen 定义。只供 lst_recovery 套件使用，不进入
+# 正式 repository/overrides；正式链路仍由 repository/overrides 提供定义。
+schema_version: "1.0"
+kind: screen
+id: LSTDynamicHomeViewController
+marker: home_search
+kind_hint: page
+metadata:
+  risk: LOW
+  origin: manual

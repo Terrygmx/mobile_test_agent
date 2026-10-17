@@ -354,6 +354,7 @@ make lst-smoke-device LST_ENV=uat
 | tab 操作元素 | `repository/overrides/elements/LSTTabBarViewController.yaml` |
 | 真机 trace | `out/lst-smoke.db` |
 | 真机构建/安装/冒烟 | `Makefile` 的 `lst-build-device` / `lst-install-device` / `lst-smoke-device` |
+| 失败恢复演练 | `docs/lst_recovery_playbook.md`、`suites/lst_recovery/`、`repository/fault_injection/lst_recovery/` |
 
 查 trace 时注意：`steps` 表用 `testcase_run_id`（没有 `run_id` 列），错误与跳过
 说明在 `detail_json` 中。

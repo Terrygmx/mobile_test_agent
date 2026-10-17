@@ -74,6 +74,14 @@ class FakeRepo:
             raise KeyError(f"unknown reference: {rid!r}")
         return self._els[rid]
 
+    def resolve_locator(self, strategy_type, value, *, build, screen=None):
+        for el in self._els.values():
+            if getattr(el, "strategy_type", "accessibility_id") == strategy_type \
+                    and getattr(el, "strategy_value", el.id) == value \
+                    and (screen is None or el.screen == screen):
+                return el
+        raise KeyError(f"unknown locator: {strategy_type}={value!r}")
+
 
 def _repo():
     return FakeRepo([
@@ -274,6 +282,24 @@ def test_chain_unregistered_candidate_fail_closed():
     engine, c, llm = _ctx(llm_out=[_llm_json(value="not_registered")])
     r = engine.recover(c)
     assert not r.recovered and r.failure_type == "LLM_TARGET_SCREEN_MISMATCH"
+
+
+def test_chain_locator_value_resolves_to_registered_element():
+    """候选给 accessibility 值，元素 id 可与值不同（search_back/return）。"""
+    repo = _repo()
+    repo._els["search_back"] = SimpleNamespace(
+        id="search_back", screen="HomeView", type="button", risk=Risk.LOW,
+        strategy_type="accessibility_id", strategy_value="return")
+    engine, c, llm = _ctx(
+        llm_out=[_llm_json(value="return")], repo=repo,
+        element_id="lst_recovery_search_back")
+    r = engine.recover(c)
+    assert r.recovered and r.kind == "llm"
+    assert r.detail["candidate"] == {
+        "type": "accessibility_id", "value": "return"}
+    validate = [s for s in r.detail["stages"]
+                if s.get("stage") == "validate"]
+    assert validate[-1]["outcome"] == "EXECUTE"
 
 
 def test_chain_risk_blocked_matrix7():

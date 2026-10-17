@@ -1,0 +1,48 @@
+# suites/lst_recovery/recovery_drift_001.yaml — 真实恢复演练（第三项）
+#
+# 这不是扩页面：用例先正常进入搜索页，再点击一个故意漂移的定位。
+# 第一次运行应走 ELEMENT_NOT_FOUND → local reconcile DRIFT → LLM 候选
+# `return` → RECOVERED；人工 accept 生成 Experience 后，第二次运行应走
+# Experience 且 LLM 零调用。
+#
+# 故障定义只在 repository/fault_injection/lst_recovery 下，不污染正式
+# overrides。运行命令见 Makefile 的 lst-recovery-device。
+schema_version: "0.2"
+id: lst_recovery_drift_001
+name: 乐速通搜索返回定位漂移恢复
+suite: lst_recovery
+tags: [lst, recovery, fault_injection]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - wait_for:
+      target: update_dialog_cancel
+      condition: exists
+      timeout: 15
+    optional: true
+  - action: tap
+    target: update_dialog_cancel
+    optional: true
+  - wait_for:
+      target: screen:LSTDynamicHomeViewController
+      condition: active
+      timeout: 15
+  - action: tap
+    target: LSTDynamicHomeViewController.home_search
+  - wait_for:
+      target: screen:LSTDynamicSearchView
+      condition: active
+      timeout: 15
+  # 故意漂移：真实返回按钮的 accessibility id 是 `return`。
+  - action: tap
+    target: LSTDynamicSearchView.lst_recovery_search_back
+    idempotency: IDEMPOTENT
+  - wait_for:
+      target: screen:LSTDynamicHomeViewController
+      condition: active
+      timeout: 15
+  - assertion:
+      target: LSTDynamicHomeViewController.home_search
+      condition: exists
+      timeout: 5
