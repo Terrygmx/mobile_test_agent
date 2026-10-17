@@ -213,9 +213,10 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
   `--build local-uat` 生成）。中间拉了新代码或换了环境 → 注入的身份与 metadata
   不一致 → `mta run` fail-closed（exit 3）。被拦了就重跑第 2、3 步，**不要**用
   `--allow-metadata-mismatch` 绕（它只豁免「可关联但不一致」，且 CI 下需第二开关）。
-- **工作区脏树**：`AppDelegate.m` 的 `#ifdef MTA_SCENE_LIFECYCLE` 改动目前在
-  乐速通仓库是未提交状态。建议尽快提交（需 App 同事评审），否则任何一次
-  `git pull` 撞冲突或 `git checkout` 都会把它冲掉，构建会退化成启动闪退。
+- **scene 生命周期补丁**：`AppDelegate.m` 的 `#ifdef MTA_SCENE_LIFECYCLE`
+  改动已提交到乐速通 `dev` 本地分支（`5196852c`，尚未推送）。正常打包不定义
+  该宏，产物行为不变；仍需 App 同事评审后再推送。若回退掉这段，mta 测试构建
+  在 iOS 27 上会启动即闪退。
 
 ## 3. 版本更新可能撞上的结构性变化（排错表）
 
