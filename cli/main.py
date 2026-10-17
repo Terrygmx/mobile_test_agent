@@ -2666,7 +2666,9 @@ def cmd_repo(args: argparse.Namespace) -> int:
     counts = export_generated(meta, gen_dir)
     print(f"exported: {gen_dir}/elements + /screens "
           f"({counts['elements']} elements, {counts['screens']} screens, "
-          f"origin: source)")
+          f"origin: source; removed stale: "
+          f"{counts['removed_elements']} elements, "
+          f"{counts['removed_screens']} screens)")
 
     if args.check:
         report = check(meta, args.overrides)

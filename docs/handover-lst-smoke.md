@@ -330,8 +330,9 @@ make lst-smoke-device LST_ENV=uat
 
 - `LSTHTTPManager.m:32/150` 硬编码 `svipcard-new/`，uat 包的市场请求仍可能走
   生产路径；属于 App 侧问题，修前不覆盖市场模块。
-- `source/export.py` 不会清理 stale 生成物；改名/删除元素后需手动清理
-  `repository/generated/<build>/`。
+- `source/export.py` 已按目标 build 清理 stale 的顶层 `elements/screens/*.yaml`
+  （非 YAML、子目录和 build 外文件保留）；若曾手工改过 generated，仍需按 H16
+  重新执行 `mta repo generate`，不要依赖手工清理。
 - 乐速通 accessibilityIdentifier 覆盖仍很低（两个 `calendar` + `home_search`），
   后续页面大多仍需结构探测；搜索输入框也尚无独立锚点。
 - 服务页 screen marker 临时使用服务端文案 `ETC发行`，运营改名会假红；需 App

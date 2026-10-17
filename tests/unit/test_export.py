@@ -7,7 +7,8 @@
   3. 产出目录可被 loader 直接消费（round-trip：export → from_dirs →
      resolve 成功）——这是 TODO(M3, R10-5.2) 的核心闭环；
   4. type 归一化（SwiftUI 的 list/toggle → loader 白名单或 other）；
-  5. 屏幕双源（元素 container 名 + metadata screens 顶层名）。
+  5. 屏幕双源（元素 container 名 + metadata screens 顶层名）；
+  6. 重新导出时只清理目标 build 的 stale YAML，保留无关文件。
 """
 
 from __future__ import annotations
@@ -133,3 +134,133 @@ def test_duplicate_ids_deduped(tmp_path):
     out = tmp_path / "gen"
     counts = export_generated(meta, out)
     assert counts["elements"] == 1
+
+
+def test_reexport_prunes_stale_yaml_but_keeps_unrelated_files(tmp_path):
+    out = tmp_path / "generated" / "local"
+    export_generated(_meta(), out)
+    (out / "elements" / "OldScreen.yaml").write_text("stale: true\n")
+    (out / "screens" / "OldScreen.yaml").write_text("stale: true\n")
+    (out / "elements" / "keep.txt").write_text("keep\n")
+    (out / "elements" / "nested").mkdir()
+    (out / "elements" / "nested" / "OldScreen.yaml").write_text("keep\n")
+
+    renamed = {
+        "screens": ["LoginView"],
+        "screen_elements": [{
+            "name": "LoginView",
+            "elements": [{
+                "id": "login_button", "type": "button",
+                "accessibility_id": "login_button",
+                "source": {"file": "a.swift", "line": 25},
+            }],
+        }],
+    }
+    counts = export_generated(renamed, out)
+
+    assert counts["removed_elements"] == 1
+    assert counts["removed_screens"] == 2
+    assert not (out / "elements" / "OldScreen.yaml").exists()
+    assert not (out / "screens" / "OldScreen.yaml").exists()
+    assert not (out / "screens" / "SpikeTab.yaml").exists()
+    assert (out / "elements" / "keep.txt").read_text() == "keep\n"
+    assert (out / "elements" / "nested" / "OldScreen.yaml").exists()
+    assert (out / "elements" / "LoginView.yaml").exists()
+    assert (out / "screens" / "LoginView.yaml").exists()
+
+
+def test_reexport_is_idempotent(tmp_path):
+    out = tmp_path / "generated" / "local"
+    export_generated(_meta(), out)
+    first = {
+        p.relative_to(out): p.read_bytes()
+        for p in out.rglob("*.yaml")
+    }
+
+    counts = export_generated(_meta(), out)
+    second = {
+        p.relative_to(out): p.read_bytes()
+        for p in out.rglob("*.yaml")
+    }
+
+    assert counts["removed_elements"] == 0
+    assert counts["removed_screens"] == 0
+    assert second == first
+
+
+def test_empty_export_prunes_all_generated_yaml(tmp_path):
+    out = tmp_path / "generated" / "local"
+    export_generated(_meta(), out)
+
+    counts = export_generated({}, out)
+
+    assert counts == {
+        "elements": 0,
+        "screens": 0,
+        "removed_elements": 1,
+        "removed_screens": 2,
+    }
+    assert list((out / "elements").glob("*.yaml")) == []
+    assert list((out / "screens").glob("*.yaml")) == []
+
+
+def test_prune_only_touches_target_build(tmp_path):
+    root = tmp_path / "generated"
+    target = root / "local"
+    sibling = root / "local-uat"
+    export_generated(_meta(), target)
+    export_generated(_meta(), sibling)
+
+    export_generated({}, target)
+
+    assert list((target / "elements").glob("*.yaml")) == []
+    assert (sibling / "elements" / "LoginView.yaml").exists()
+    assert (sibling / "screens" / "LoginView.yaml").exists()
+
+
+@pytest.mark.parametrize("name", ["../escape", "nested/name", r"nested\name"])
+def test_unsafe_screen_name_does_not_write_outside_build(tmp_path, name):
+    out = tmp_path / "generated" / "local"
+    meta = {"screens": [name], "screen_elements": []}
+
+    with pytest.raises(ValueError, match="invalid screen name"):
+        export_generated(meta, out)
+
+    assert not (tmp_path / "generated" / "escape.yaml").exists()
+    assert not (tmp_path / "generated" / "nested").exists()
+
+
+def test_symlinked_output_subdir_is_rejected(tmp_path):
+    out = tmp_path / "generated" / "local"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    out.mkdir(parents=True)
+    (out / "elements").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="escapes build root"):
+        export_generated(_meta(), out)
+
+    assert list(outside.glob("*.yaml")) == []
+
+
+@pytest.mark.parametrize("field", ["screens", "screen_elements"])
+def test_case_insensitive_filename_collision_is_rejected(tmp_path, field):
+    out = tmp_path / "generated" / "local"
+    meta = {"screens": [], "screen_elements": []}
+    if field == "screens":
+        meta["screens"] = ["Home", "home"]
+    else:
+        meta["screen_elements"] = [
+            {"name": "Home", "elements": [{
+                "accessibility_id": "home_a", "type": "button",
+            }]},
+            {"name": "home", "elements": [{
+                "accessibility_id": "home_b", "type": "button",
+            }]},
+        ]
+
+    with pytest.raises(ValueError, match="filename collision"):
+        export_generated(meta, out)
+
+    assert not (out / "elements" / "Home.yaml").exists()
+    assert not (out / "screens" / "Home.yaml").exists()

@@ -8,7 +8,9 @@
   - **只导出 literal/constant**（dynamic/unknown 无 accessibility_id 可定位，
     导出会造出假 ID——12.2 不得猜值，宁缺毋滥）；
   - 落盘到 `generated/<build>/`（12.4），与 metadata.json 同址；
-  - H16：generated 不手改，只能由 `mta repo generate` 重新生成（覆盖写）。
+  - H16：generated 不手改，只能由 `mta repo generate` 重新生成（覆盖写）；
+  - 同一 build 重新生成时，清理本批未产出的旧 `elements/screens/*.yaml`，
+    避免源码里已改名/删除的 screen 继续以 stale 定义参与合并。
 
 屏幕导出策略：Screen 名取元素实际 container_type（12.1 归属）；marker
 由 `mta repo generate` 侧从 `screens` 顶层名（mtaScreen marker 声明的
@@ -41,14 +43,13 @@ def _normalize_type(t: str | None) -> str:
 def export_generated(metadata: dict, out_dir: str | Path) -> dict[str, int]:
     """12.3 metadata → generated/<build>/{elements,screens}/*.yaml。
 
-    返回 {"elements": n, "screens": n}（n = **去重后**导出数）。已存在文件
-    覆盖写（H16：本目录的唯一写者是本命令）。
+    返回导出数与 stale 清理数。已存在文件覆盖写（H16：本目录的唯一写者是
+    本命令）。清理范围**严格限制**在目标 build 的 `elements/`、`screens/`
+    顶层 `*.yaml`：非 YAML、子目录和 build 外的文件都不动。
     """
     out = Path(out_dir)
     elements_dir = out / "elements"
     screens_dir = out / "screens"
-    elements_dir.mkdir(parents=True, exist_ok=True)
-    screens_dir.mkdir(parents=True, exist_ok=True)
 
     # --- 元素：按 screen 分组，一个 screen 一个文件（多文档 YAML）---
     # id 去重（同 screen 同 id 多次出现：scanner 对重复赋值的覆盖已在
@@ -58,6 +59,7 @@ def export_generated(metadata: dict, out_dir: str | Path) -> dict[str, int]:
         name = screen.get("name")
         if not name:
             continue
+        _validate_export_name(name, kind="screen")
         bucket = by_screen.setdefault(name, {})
         for el in screen.get("elements", []):
             a11y = el.get("accessibility_id")
@@ -79,29 +81,119 @@ def export_generated(metadata: dict, out_dir: str | Path) -> dict[str, int]:
                 "metadata": _element_metadata(),
             }
 
-    element_count = 0
+    element_files: dict[Path, list[dict]] = {}
     for name, bucket in sorted(by_screen.items()):
-        _write_yaml(elements_dir / f"{name}.yaml",
-                    [bucket[k] for k in sorted(bucket)])
-        element_count += len(bucket)
+        if bucket:
+            _add_export_file(
+                element_files, _yaml_target(elements_dir, name),
+                [bucket[k] for k in sorted(bucket)],
+                kind="element", name=name,
+            )
 
     # --- 屏幕：**只从顶层 screens（mtaScreen marker 声明名）生成** ---
     # 教训（review P3-6）：元素 container struct 名不是 marker 名——
     # SpikeTabScreen(struct) vs SpikeTab(.mtaScreen 声明) 导出的 screen
     # 条目 marker 永远匹配不到真机，属猜值（12.2 同源纪律）。container 名
     # 仅用于元素归属，screen 定义必须来自 marker 声明。
-    screen_names: set[str] = {n for n in metadata.get("screens", []) if n}
+    screen_names: set[str] = set()
+    for name in metadata.get("screens", []):
+        if not name:
+            continue
+        _validate_export_name(name, kind="screen")
+        screen_names.add(name)
+    screen_files: dict[Path, list[dict]] = {}
     for name in sorted(screen_names):
-        _write_yaml(screens_dir / f"{name}.yaml", [{
+        _add_export_file(screen_files, _yaml_target(screens_dir, name), [{
             "schema_version": "1.0",
             "kind": "screen",
             "id": name,
             "marker": f"screen.{name}",
             "kind_hint": "page",
             "metadata": {"risk": "LOW", "origin": "source"},
-        }])
+        }], kind="screen", name=name)
 
-    return {"elements": element_count, "screens": len(screen_names)}
+    # 先完成全部写入，再删 stale。导出中途失败时旧产物仍在，不会出现
+    # 「一半新、一半旧、缺口还被提前清掉」的更难诊断状态。
+    _prepare_output_dir(out, elements_dir)
+    _prepare_output_dir(out, screens_dir)
+    for path, docs in sorted(element_files.items()):
+        _write_yaml(path, docs)
+    for path, docs in sorted(screen_files.items()):
+        _write_yaml(path, docs)
+
+    removed_elements = _prune_stale_yaml(elements_dir, set(element_files))
+    removed_screens = _prune_stale_yaml(screens_dir, set(screen_files))
+    return {
+        "elements": sum(len(docs) for docs in element_files.values()),
+        "screens": len(screen_names),
+        "removed_elements": removed_elements,
+        "removed_screens": removed_screens,
+    }
+
+
+def _validate_export_name(name: object, *, kind: str) -> None:
+    """Screen 名会直接成为 YAML 文件名，拒绝任何可越出目标目录的值。"""
+    if (not isinstance(name, str) or not name or name in {".", ".."}
+            or "/" in name or "\\" in name or "\x00" in name):
+        raise ValueError(
+            f"invalid {kind} name for generated YAML: {name!r}"
+        )
+
+
+def _yaml_target(directory: Path, name: str) -> Path:
+    """返回目录内的 YAML 目标；即使目录已存在为 symlink 也不得越界。"""
+    _validate_export_name(name, kind="screen")
+    target = directory / f"{name}.yaml"
+    root = directory.resolve()
+    try:
+        target.resolve().relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            f"generated YAML target escapes {directory}: {target}"
+        ) from exc
+    return target
+
+
+def _add_export_file(
+    files: dict[Path, list[dict]], path: Path, docs: list[dict], *,
+    kind: str, name: str,
+) -> None:
+    """同一目录内 screen 名映射到同一文件时必须报错，不能静默后写覆盖。"""
+    previous = next(
+        (existing for existing in files
+         if str(existing).casefold() == str(path).casefold()),
+        None,
+    )
+    if previous is not None:
+        previous_name = previous.stem
+        raise ValueError(
+            f"generated {kind} YAML filename collision: "
+            f"{previous_name!r} and {name!r} both map to {path.name!r}"
+        )
+    files[path] = docs
+
+
+def _prepare_output_dir(root: Path, directory: Path) -> None:
+    """创建 elements/screens；拒绝通过目录 symlink 写到目标 build 之外。"""
+    directory.mkdir(parents=True, exist_ok=True)
+    # 先比较未解析的路径，再比较解析后的路径。只做后者时 root 与 directory
+    # 会一起经 symlink 解析，`elements -> outside` 反而得到两个相同路径。
+    expected = root.resolve() / directory.name
+    if directory.resolve() != expected:
+        raise ValueError(
+            f"generated directory escapes build root {root}: {directory}"
+        )
+
+
+def _prune_stale_yaml(directory: Path, expected: set[Path]) -> int:
+    """删除本批未产出的顶层 YAML；保留非 YAML、子目录和 symlink 目标。"""
+    removed = 0
+    for path in sorted(directory.glob("*.yaml")):
+        if path in expected or not (path.is_file() or path.is_symlink()):
+            continue
+        path.unlink()
+        removed += 1
+    return removed
 
 
 def _element_metadata() -> dict:
