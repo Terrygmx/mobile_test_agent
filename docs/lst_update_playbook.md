@@ -92,6 +92,11 @@ console 里看到 `[MTA] scene willConnect` 且进程不退出即链路健康。
    「永不」，或让屏幕常亮。两者的详细区分见 §3.10 第 5 / 7 条。
 5. **App 已装机**：`make lst-install-device LST_ENV=<env>`（§1 上文）。
    冒烟整条走 `make lst-smoke-device LST_ENV=<env>`。
+6. **首次连接/系统更新后可能要求手机端输入密码**：WDA 拉起过程中 iOS 会弹
+   XCUITest 授权确认，需在手机上输入密码并确认。若无人操作，Appium 60 秒后
+   报 `Failed to start the preinstalled WebDriverAgent in 60000 ms`。这与锁屏
+   报错相似，但 `devicectl device info lockState` 会显示已解锁；重试时守在
+   手机旁完成授权即可，不需要重建 WDA 或重启 Appium。
 
 **喂给 `mta run`（真机路线，2026-10-15 起可用）**：G8 身份校验走
 `--app-path` 从**本地产物**读 Info.plist（物理设备没有 simctl 等价物），
@@ -435,6 +440,34 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
   - ⚠️ 已知边界：UITabBarController 不卸载非选中 tab 的 view，切走之后首页元素
     靠祖先 `hidden` 传播成 `visible=false`——与旧 marker 行为一致，非本次引入。
 
+### 3.12 首页 → 搜索页 → 返回：可复用锚点
+
+2026-10-17 真机探测确认了第一条业务导航链路，无需再改 App：
+
+- 首页点击搜索入口后 push `LSTDynamicSearchViewController`；
+- 搜索页唯一可见的 `NavigationBar` name 是 `LSTDynamicSearchView`，可直接作为
+  screen marker；
+- 系统返回按钮的 name/label 均为 `return`；
+- 右上角「取消」按钮也能返回，但树里另有一个同名可访问节点，必须用 predicate
+  限定 `XCUIElementTypeButton`；
+- 返回首页后 `home_search` 恢复唯一可见。
+
+对应文件：
+
+- `repository/overrides/screens/LSTDynamicSearchView.yaml`
+- `repository/overrides/elements/LSTDynamicSearchView.yaml`
+- `suites/lst/home_search_back_001.yaml`
+
+⚠️ `home_search` 同时出现在 generated metadata 的
+`LSTDynamicNavigationBarView` 与 overrides 的
+`LSTDynamicHomeViewController` 中。真机运行合并两源后，短名会触发
+`ambiguous_target`；用例必须写全限定名
+`LSTDynamicHomeViewController.home_search`。只跑 override lint 发现不了这个
+冲突，lint 时要同时带 `--generated repository/generated/local-<env>`。
+
+⚠️ 搜索输入框当前没有独立可访问节点，输入框内「搜索」文案也未进入树；本链路
+只覆盖进入/返回。要覆盖搜索输入，需先在 App 侧补输入框锚点。
+
 ## 4. 各文件职责速查（接入相关）
 
 | 位置 | 文件 | 职责 | 版本更新时动不动 |
@@ -446,6 +479,8 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
 | mta 仓库 | `session/device_session.py` 的 `resolve_local_caps` | 真机 caps 装配：camelCase 键名 / `platformVersion` 钳到本地 SDK / 预建 WDA 路线（见 §3.10） | 否 |
 | mta 仓库 | `repository/overrides/{screens,elements}/LSTDynamicHomeViewController.yaml` | 首页 screen marker（`home_search`）+ 更新弹窗「取消」按钮的 predicate 定位（见 §3.11） | 否 |
 | mta 仓库 | `suites/lst/smoke_launch_001.yaml` | 冷启动冒烟：launch → optional 点掉更新弹窗 → 等首页可见 | 弹窗行为变时改 |
+| mta 仓库 | `repository/overrides/{screens,elements}/LSTDynamicSearchView.yaml` | 搜索页 screen marker（`LSTDynamicSearchView`）+ 返回/取消按钮（见 §3.12） | 否 |
+| mta 仓库 | `suites/lst/home_search_back_001.yaml` | 首页 → 搜索页 → 返回首页（8 步） | 搜索页导航变时改 |
 | mta 仓库 | `scripts/lst_build_dev.sh` / `lst_build_uat.sh` / `lst_build_prod.sh` | 三环境一键构建+strings 环境验证（+可选装机），内部调 make 目标 | 否（指纹失效时改 VERIFY_PATTERN） |
 | 乐速通仓库 | `AppDelegate.m` ifdef 块 | iOS 27 scene 生命周期最小采纳 | 待 App 正式采纳后删除 |
 | 乐速通仓库 | `Podfile` 顶部两个 spec 源 | pod 拉取 | 否（勿再注释） |

@@ -1,11 +1,11 @@
-# 交接：乐速通真机冒烟（P4-1015-mta）
+# 交接：乐速通真机冒烟与首页导航（P4-1017-mta）
 
-> 本文记录 **2026-10-17 收尾时的真实状态**。平台整体设计见
+> 本文记录 **2026-10-17 首页 → 搜索页链路接入后的真实状态**。平台整体设计见
 > `docs/handover.md`；真机接入与排错细节见 `docs/lst_update_playbook.md`。
 
 ## 0. 结论
 
-本轮 1–5 项已完成：
+上一轮 1–5 项已完成：
 
 1. 把 `optional` 语义接进真实执行路径 `StepRunner`；
 2. 全量单测通过；
@@ -24,6 +24,21 @@
 | 真机身份 | App 与 metadata 均为 `fef2f1e8` |
 | 真机冒烟 | **PASS**，`run_5b8b4a89` / `run_45c906b5` |
 | 推送 | **未推送**（仅本地 commit） |
+
+本轮在此基础上继续完成第一项业务主链路：
+
+- 首页 → 搜索页 → 返回首页；
+- 新增搜索页 screen/element override；
+- 真机 8 步全部 `SUCCESS`。
+
+| 本轮项目 | 结果 |
+|---|---|
+| MTA 分支 | `P4-1017-mta` |
+| 新链路真机 run | `run_084b6924` / PASS |
+| 新链路步骤 | 8/8 `SUCCESS` |
+| 原冒烟回归 | `lst_smoke_launch_001` / PASS |
+| 全量单测 | **2361 passed，0 failed**（72.94s） |
+| App 源码改动 | 无；复用现有 `home_search` 与系统导航节点 |
 
 最近一次真机 trace 的三步全部为 `SUCCESS`：
 
@@ -127,6 +142,39 @@ commit 均为 `fef2f1e8`，三个步骤全部 `SUCCESS`。
 `optional_skipped=ElementNotFound`，随后在旧锚点上暴露了独立的
 `home_search` 问题；该问题已由叶子 `UILabel` 方案修复。
 
+### 3.1 首页 → 搜索页 → 返回
+
+真机探测与最终运行（`run_084b6924`）确认：
+
+| 节点 | 定位方式 | 结果 |
+|---|---|---|
+| 首页搜索入口 | `accessibility id = home_search` | 唯一命中 |
+| 搜索页 marker | NavigationBar name `LSTDynamicSearchView` | 唯一可见 |
+| 返回按钮 | `accessibility id = return` | 唯一命中 |
+| 右上角「取消」 | predicate + Button 类型 | 唯一命中 |
+
+用例 `lst_home_search_back_001` 的 8 步全部 `SUCCESS`：
+
+```text
+launch → optional 关弹窗 → 等首页 → 点搜索 → 等搜索页
+→ 点 return → 等首页 → 断言 home_search 存在
+```
+
+真机同时跑原冷启动冒烟，两条均 PASS，`run: exit 0`。
+
+⚠️ 真机合并 generated 与 overrides 后，`home_search` 短名有歧义，用例必须用
+`LSTDynamicHomeViewController.home_search`。lint 也必须带
+`--generated repository/generated/local-uat`。
+
+搜索输入框尚未暴露独立节点，因此本轮只覆盖进入与返回，不覆盖输入。
+
+### 3.2 WDA 手机端授权
+
+本轮再次遇到 `Failed to start the preinstalled WebDriverAgent in 60000 ms`。
+设备实际已解锁、WDA 也已安装，真因是手机端需要输入密码确认 XCUITest 授权。
+完成确认后同一 Appium 会话立即恢复。遇到该报错时先检查手机是否有授权弹窗，
+不要直接重建 WDA 或重启 Appium。
+
 ## 4. 提交与工作区
 
 ### MTA 仓库
@@ -195,7 +243,7 @@ make lst-smoke-device LST_ENV=uat
 - `source/export.py` 不会清理 stale 生成物；改名/删除元素后需手动清理
   `repository/generated/<build>/`。
 - 乐速通 accessibilityIdentifier 覆盖仍很低（两个 `calendar` + `home_search`），
-  后续页面大多仍需结构探测。
+  后续页面大多仍需结构探测；搜索输入框也尚无独立锚点。
 - 两套 runner 仍并存。本轮选择方案 A 修复真实路径；若要根治语义漂移，后续可
   迁移 `run_phase0_demo.py` 与旧 runner 测试后删除 `testcase_runner.py`。
 
@@ -206,7 +254,8 @@ make lst-smoke-device LST_ENV=uat
 | `optional` 实现 | `runner/runner.py`、`cli/pipeline.py` |
 | 首页锚点与排错 | `docs/lst_update_playbook.md` §3.11 |
 | 冒烟用例 | `suites/lst/smoke_launch_001.yaml` |
-| Screen / 元素 override | `repository/overrides/{screens,elements}/LSTDynamicHomeViewController.yaml` |
+| 首页导航用例 | `suites/lst/home_search_back_001.yaml` |
+| 首页 / 搜索页 override | `repository/overrides/{screens,elements}/LSTDynamic{HomeViewController,SearchView}.yaml` |
 | 真机 trace | `out/lst-smoke.db` |
 | 真机构建/安装/冒烟 | `Makefile` 的 `lst-build-device` / `lst-install-device` / `lst-smoke-device` |
 

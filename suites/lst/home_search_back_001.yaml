@@ -1,0 +1,40 @@
+# suites/lst/home_search_back_001.yaml — 首页 → 搜索页 → 返回首页
+#
+# 真机探测（2026-10-17）：
+# - 首页点击搜索按钮内部 UILabel 的 `home_search` 后 push 搜索页；
+# - 搜索页 NavigationBar name 为 `LSTDynamicSearchView`；
+# - 返回按钮 name 为 `return`，点击后首页 `home_search` 恢复可见；
+# - 右上角「取消」也能返回，但输入框内另有一个同名可访问节点，需 predicate
+#   限定 Button 类型。本用例走系统返回按钮，覆盖最常见的返回路径。
+schema_version: "0.2"
+id: lst_home_search_back_001
+name: 乐速通首页进入搜索页并返回
+suite: lst_smoke
+tags: [lst, smoke, navigation]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - action: tap
+    target: update_dialog_cancel
+    optional: true
+  - wait_for:
+      target: screen:LSTDynamicHomeViewController
+      condition: active
+      timeout: 15
+  - action: tap
+    target: LSTDynamicHomeViewController.home_search
+  - wait_for:
+      target: screen:LSTDynamicSearchView
+      condition: active
+      timeout: 15
+  - action: tap
+    target: search_back
+  - wait_for:
+      target: screen:LSTDynamicHomeViewController
+      condition: active
+      timeout: 15
+  - assertion:
+      target: LSTDynamicHomeViewController.home_search
+      condition: exists
+      timeout: 5

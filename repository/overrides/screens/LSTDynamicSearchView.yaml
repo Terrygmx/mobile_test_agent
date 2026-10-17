@@ -1,0 +1,13 @@
+# overrides/screens/LSTDynamicSearchView.yaml — 乐速通搜索页 Screen 定义
+#
+# 真机探测（2026-10-17）：push 搜索页后，唯一可见的 NavigationBar
+# name 是 `LSTDynamicSearchView`，与页面一一对应；返回首页后该节点消失。
+# 这是系统导航栏自动暴露的 name，不依赖服务端文案或搜索框内容。
+schema_version: "1.0"
+kind: screen
+id: LSTDynamicSearchView
+marker: LSTDynamicSearchView
+kind_hint: page
+metadata:
+  risk: LOW
+  origin: manual

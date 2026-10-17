@@ -1,5 +1,5 @@
 # overrides/elements/LSTDynamicHomeViewController.yaml — 乐速通首页相关元素
-# （2026-10-16 真机接入）：更新提示弹窗的「取消」按钮。
+# （2026-10-17 业务主链路接入）：搜索入口 + 更新提示弹窗的「取消」按钮。
 #
 # 归属 screen 从 LSTHomeViewController 改为 LSTDynamicHomeViewController
 # ——前者是**死代码**（全仓无实例化），首页 tab 真身见 screens/ 那份的注释。
@@ -9,6 +9,18 @@
 # find 会返回 2 个 → mta 判 AmbiguousElement（唯一性校验内嵌在 find）。
 # 用 predicate 限定 type 后实测唯一匹配（2026-10-16 真机 dump：
 # `取消 button matches: 1`）。
+schema_version: "1.0"
+kind: element
+id: home_search
+screen: LSTDynamicHomeViewController
+type: text
+strategies:
+  - {type: accessibility_id, value: home_search, origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
 schema_version: "1.0"
 kind: element
 id: update_dialog_cancel

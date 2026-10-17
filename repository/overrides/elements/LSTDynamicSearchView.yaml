@@ -1,0 +1,32 @@
+# overrides/elements/LSTDynamicSearchView.yaml — 乐速通搜索页元素
+#
+# 真机探测（2026-10-17）：
+# - 系统返回按钮 name/label 均为 `return`；
+# - 右上角「取消」按钮唯一，但页面同时存在一个无名的输入框清除按钮，
+#   所以不能用 accessibility id `取消`（会命中 2 个节点）；
+# - 搜索输入框本身没有独立节点，输入框内文字也未暴露，暂不做输入链路。
+schema_version: "1.0"
+kind: element
+id: search_back
+screen: LSTDynamicSearchView
+type: button
+strategies:
+  - {type: accessibility_id, value: return, origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: search_cancel
+screen: LSTDynamicSearchView
+type: button
+strategies:
+  - {type: predicate,
+     value: 'type == "XCUIElementTypeButton" AND name == "取消"',
+     origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
