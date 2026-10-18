@@ -1,7 +1,7 @@
-# 交接：乐速通真机冒烟与首页 / tab 导航（P4-1017-mta）
+# 交接：乐速通真机冒烟、tab 导航与登录链路（P4-1017-mta）
 
-> 本文记录 **2026-10-17 首页搜索与 tab 导航链路接入后的真实状态**。平台整体
-> 设计见 `docs/handover.md`；真机接入与排错细节见
+> 本文记录 **2026-10-18 畅行慧览 tab 与账号密码登录链路接入后的真实状态**。
+> 平台整体设计见 `docs/handover.md`；真机接入与排错细节见
 > `docs/lst_update_playbook.md`。
 
 ## 0. 结论
@@ -61,6 +61,69 @@ lst_home_search_back_001: PASS
 lst_smoke_launch_001: PASS
 lst_tab_switch_back_001: PASS
 ```
+
+### 1.1 第四项 tab「畅行慧览」（2026-10-18，commit `159a282`）
+
+真机探测（`out/lst-probe/probe_journey*.py`，两次 dump 交叉验证）：
+
+- tab 栏共 4 个：首页 / 畅行慧览 / 服务 / 我的，第四个此前未覆盖；
+- 「畅行慧览」tab 是 Button、name/label 与标题一致，但畅行慧览页自己的
+  NavigationBar 标题也同名，故沿用 Button predicate 限定类型；
+- 页面 marker 选 `附近服务`（`LSTDynamicNearServiceView` 分区标题，服务端
+  文案）：首页存在同名节点但**恒 visible=false**（属首页「出行服务」宫格内
+  的隐藏项），实测首页/服务/我的三页 visible 计数为 0、畅行慧览页为 1，
+  因此 screen wait 只在目标页成立；
+- ⚠️ 环境依赖：该 tab 由服务端开关 `sys_journey_tabbar_status` 控制
+  （`LSTTabBarViewController.m:338`），关闭时 tab 整体消失，用例会红。
+
+真机 `run_696bea68`（prod 包）：`lst_tab_journey_001` PASS，10/10 SUCCESS；
+同批三条既有用例均 PASS，`run: exit 0`。
+
+### 1.2 账号密码登录链路（2026-10-18，commit `057efd4`）
+
+真机探测（`out/lst-probe/probe_login*.py`，生产包，账号由用户提供、经环境
+变量注入、**不写入仓库**）：
+
+| 节点 | 定位方式 | 说明 |
+|---|---|---|
+| 我的页登录入口 | predicate `StaticText name == "登录/注册"` | 头像 Cell 内叶子节点，点击透传到 Cell |
+| 登录页 marker | accessibility id `LSTLoginView` | 系统导航栏暴露的 View 类名，登录成功后消失 |
+| 用户名输入框 | predicate `TextField AND placeholderValue CONTAINS "请输入手机号"` | 无 accessibilityIdentifier，tag=100/101 对 XCTest 不可见 |
+| 密码输入框 | predicate `SecureTextField AND placeholderValue CONTAINS "请输入密码"` | 同上 |
+| 协议勾选框 | accessibility id `loginRememberPass0` | **必须勾选**，否则点登录无任何反应 |
+| 登录按钮 | predicate `Button AND name == "立即登录"` | 与内部 StaticText 同名，必须限定类型 |
+
+三个非显然结论（都写进用例注释，避免下次重踩）：
+
+1. **不勾协议点登录是完全静默的**：只弹一个 `SVProgressHUD` toast，
+   页面与状态 32s 无任何变化（`LSTLoginView.m:181` 的 agree 判断）。
+2. **登录成功后 App 回落到首页 tab**，不是留在「我的」——wait 目标写
+   `LSTMineViewController` 会 30s 超时（首轮真机失败即因此）。
+3. **元素策略里的 `${TEST_USERNAME}` 不会被解析**：`cli/pipeline.py`
+   的 `_resolve_secret_refs` 只作用于 `step.value`，仓库 YAML 的策略值
+   原样下发。「登录成功」判据因此改用登录态独有的会员角标
+   `mine staff new`（未登录时整个头像 Cell 只有「登录/注册」）。
+
+两个 marker 踩坑：
+
+- 设置页第一版用 NavigationBar `设置`，真机 wait 10s 全超时——同名节点
+  有 2 个（NavigationBar + 内部标题 StaticText），唯一性校验判
+  AmbiguousElement。与「服务」页当年选 `ETC发行` 同一类坑：**中文标题在
+  NavBar 上必然成对出现**。改用分区首行 `更改读卡模式`（页内唯一）。
+- 「退出登录」是 Cell 里的 StaticText，且**未登录时该 cell 被 App 移除**
+  （`LSTSetViewController.m:30`），因此它本身就是「当前已登录」的判据，
+  用例用 optional 步做「已登录则先登出」，天然自洽。
+
+真机 `run_8088da28`（prod 包）：`lst_login_001` PASS，20/20 SUCCESS；
+同批四条既有用例均 PASS，`run: exit 0`。全量单测 2366 passed / 0 failed。
+
+账号密码运行方式（**不要写进任何文件**）：
+
+```bash
+TEST_USERNAME='<账号>' TEST_PASSWORD='<密码>'   .venv/bin/python -m cli.main lint --overrides repository/overrides     --generated repository/generated/local-prod suites/lst/login_001.yaml
+```
+
+未注入时 lint 报 `unknown_secret`（exit 3），明文也不会进 trace。
 
 ## 1. `optional` 修复
 
@@ -436,10 +499,14 @@ trace 现在记录**真正命中**的策略：`Executor.find` 在返回元素上
 | 首页导航用例 | `suites/lst/home_search_back_001.yaml` |
 | 首页 / 搜索页 override | `repository/overrides/{screens,elements}/LSTDynamic{HomeViewController,SearchView}.yaml` |
 | tab 导航用例 | `suites/lst/tab_switch_back_001.yaml` |
+| 畅行慧览用例 / override | `suites/lst/tab_journey_001.yaml`、`repository/overrides/screens/LSTDynamicNearServiceViewController.yaml` |
 | 服务页 override | `repository/overrides/{screens,elements}/LSTServiceMenuViewController.yaml` |
 | 我的页 override | `repository/overrides/{screens,elements}/LSTMineViewController.yaml` |
-| tab 操作元素 | `repository/overrides/elements/LSTTabBarViewController.yaml` |
-| 真机 trace | `out/lst-smoke.db` |
+| tab 操作元素（含 `tab_journey`） | `repository/overrides/elements/LSTTabBarViewController.yaml` |
+| 登录用例 / override | `suites/lst/login_001.yaml`、`repository/overrides/{screens,elements}/LSTLoginViewController.yaml` |
+| 设置页（登出）override | `repository/overrides/{screens,elements}/LSTSetViewController.yaml` |
+| 真机探测脚本与 dump | `out/lst-probe/`（不入库） |
+| 真机 trace | `out/lst-smoke.db`、`out/lst-probe.db` |
 | 真机构建/安装/冒烟 | `Makefile` 的 `lst-build-device` / `lst-install-device` / `lst-smoke-device` |
 | 失败恢复演练 | `docs/lst_recovery_playbook.md`、`suites/lst_recovery/`、`repository/fault_injection/lst_recovery/` |
 | Promotion 后验证 | `make lst-recovery-promoted-device`、`suites/lst_recovery/recovery_promoted_001.yaml`、`out/lst-recovery-promoted.db` |
