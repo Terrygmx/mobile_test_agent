@@ -67,21 +67,25 @@ def main() -> int:
     ).fetchall()
     print(f"[2] steps 表 {len(rows)} 条:")
     for r in rows:
-        print(f"    {r}")
+        # sqlite3.Row 的 repr 不含列名，落库判据要看得到字段
+        print(f"    {dict(r)}")
     assert rows, "新管线没有写入 steps"
     detail_rows = store.conn.execute(
-        "SELECT detail_json FROM steps s JOIN testcase_runs tc"
+        "SELECT s.detail_json FROM steps s JOIN testcase_runs tc"
         " ON tc.id=s.testcase_run_id WHERE tc.run_id=?", (run_id,)
     ).fetchall()
     assert all("{{SECRET_" not in (r[0] or "") for r in detail_rows), \
         "secret 占位符不得原样落 trace"
 
-    run = store.conn.execute(
-        "SELECT run_id, status FROM runs WHERE run_id=?", (run_id,)
-    ).fetchone()
-    print(f"[3] runs 表: {run}")
-    assert run[1] == "PASS"
+    # 判据是**这条用例的终态**，不是 runs 行——runs 行在 end_run 之前恒为
+    # RUNNING（start_run 只写 RUNNING）。先落终态再读，顺序不能反。
+    assert result.status == "PASS", result.status
     store.end_run(run_id, status="PASS", exit_code=0)
+    run = store.conn.execute(
+        "SELECT run_id, status, exit_code FROM runs WHERE run_id=?", (run_id,)
+    ).fetchone()
+    print(f"[3] runs 表: {dict(run)}")
+    assert run["status"] == "PASS"
 
     print("\n✅ Stage 5 PASS — YAML 用例 + trace + secrets 全链路通过")
     return 0
