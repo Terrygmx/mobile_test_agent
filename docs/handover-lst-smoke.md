@@ -313,7 +313,10 @@ cd ~/PycharmProjects/Mobile_test_agent
 # 前置：RemoteXPC 隧道（需 sudo，保持常驻）
 sudo appium driver run xcuitest tunnel-creation
 
-# 前置：Appium server（本轮未重启现有实例）
+# 前置：Appium server。⚠️ 必须带 DEVELOPER_DIR 启动（2026-10-18 实测）：
+# 不带时 Appium 只看到 CommandLineTools，模拟器/真机设备发现会报
+# `Unknown device or simulator UDID`，看起来像设备坏了。
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 node ~/.local/bin/appium --allow-cors > out/appium.log 2>&1 &
 
 # 改了 App 源码时：构建 + 装机
@@ -326,6 +329,27 @@ make lst-smoke-device LST_ENV=uat
 
 `make lst-build-device` 会打印 `bash: inherited: command not found`，但构建和
 身份注入成功；这是 Makefile 里既有的无害告警。
+
+## 5.1 生产包验证路径（2026-10-18，测试/验证环境不可达时）
+
+断网时 uat 包跑不动，但框架侧链路仍能验。改用 `prod` 走同一套流水线：
+
+```bash
+make lst-build-device LST_ENV=prod
+make lst-repo-generate LST_ENV=prod
+make lst-install-device LST_ENV=prod
+make lst-smoke-device LST_ENV=prod
+```
+
+实测（`7edab59` 之后）：三条冒烟全 PASS，`run_de36423c` 的
+`app_build=local-prod`、`metadata_build=local-prod`、`metadata_mismatch=0`，
+App 与 metadata 同为 `5196852c`。完整步骤与边界见
+`docs/lst_update_playbook.md` §1.6。
+
+恢复演练的完整闭环仍需 `LLM_API_KEY`；没有 key 时用
+`make lst-recovery-no-llm LST_ENV=prod` 只验故障注入（预期
+`lst_recovery_drift_001 FAIL (ELEMENT_NOT_FOUND)`，且 trace 的
+`reconcile.outcome=DRIFT`）。
 
 ## 6. 遗留项
 
@@ -342,6 +366,17 @@ make lst-smoke-device LST_ENV=uat
   删除，`run_phase0_demo.py` 与 `phase0/verify_stage5.py` 迁到新管线，旧 runner
   单测由 `tests/unit/test_cli_run.py` 与故障矩阵接管，并新增
   `tests/unit/test_legacy_runner_retired.py` 守卫其不得复活。
+- **Phase 0 演示脚本的迁移遗留已修（`7edab59`）**：旧 runner 退役后第一次
+  端到端实跑暴露三处——① `run_id` 硬编码 → 第二次跑
+  `UNIQUE constraint failed`；② 漂移段不产生漂移（基础用例的 `REINSTALL`
+  装回 DerivedData 旧包 + 漂移目标带 predicate 兜底），表现是「用例 PASS
+  但没有 RECOVERED 步骤」的**假绿**；③ `verify_stage5.py` 的 SQL 列名歧义 +
+  在 `end_run` 之前断言 `runs.status == PASS`。新增守卫
+  `tests/unit/test_phase0_demo_drift.py` 钉住「漂移段必须有 RECOVERED 步骤」，
+  A/B 探针 3/5 有效（漂移目标错 / 恢复引擎缺席 / 候选未登记都会红）。
+- **失败恢复演练的 LLM 首跑仍是待办**：本机无 `LLM_API_KEY`，生产包上只验到
+  `reconcile=DRIFT`（`make lst-recovery-no-llm`），RECOVERED → accept →
+  Experience 这段等 key 再跑。
 
 ## 7. 快速索引
 

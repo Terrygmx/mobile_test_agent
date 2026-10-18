@@ -238,3 +238,28 @@ lst-recovery-device:
 	  --metadata repository/generated/local-$(LST_ENV)/source_metadata.json \
 	  --db out/lst-recovery.db \
 	  --exp-db out/lst-recovery-experience.db'
+
+# 只验证「故障确实注入了」——不带 LLM，预期在漂移那一步 FAIL
+# （ELEMENT_NOT_FOUND / TARGET_UNREGISTERED 一类）。用于没有 LLM_API_KEY 时
+# 确认用例与故障定义仍然成立，把「演练没跑起来」和「LLM 不可用」分开。
+# 判据：exit != 0 且失败步骤是漂移那一步（不是环境/前置失败）。
+lst-recovery-no-llm:
+	@bash -c 'set -e; \
+	export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer; \
+	UDID=$${MTA_DEVICE_UDID:-$$(xcrun devicectl list devices 2>/dev/null | grep physical | grep -Ei "connected|available" | grep -oE "[0-9A-F]{8}-[0-9A-F]{12,16}" | head -1)}; \
+	test -n "$$UDID" || { echo "lst-recovery-no-llm: 未找到 USB 连接的 physical 设备"; exit 1; }; \
+	test -d "$(LST_WDA_PREBUILT_APP)" || { echo "lst-recovery-no-llm: 预建 WDA 不存在（$(LST_WDA_PREBUILT_APP)）"; exit 1; }; \
+	echo "lst-recovery-no-llm: $$UDID env=$(LST_ENV)（预期漂移步骤失败）"; \
+	MTA_XCODE_ORG_ID=$(LST_XCODE_ORG_ID) \
+	MTA_WDA_PREBUILT_APP="$(LST_WDA_PREBUILT_APP)" \
+	$(CURDIR)/.venv/bin/python -m cli.main run \
+	  --suite lst_recovery --suites-root suites \
+	  --udid "$$UDID" --bundle-id com.etc.nfcPushOnline \
+	  --app-path "$(LST_DEVICE_APP)" \
+	  --overrides repository/fault_injection/lst_recovery \
+	  --generated repository/generated/local-$(LST_ENV) \
+	  --metadata repository/generated/local-$(LST_ENV)/source_metadata.json \
+	  --db out/lst-recovery-no-llm.db \
+	  --exp-db out/lst-recovery-no-llm-experience.db \
+	  --no-llm || true; \
+	echo "lst-recovery-no-llm: 结束（非零退出是预期：漂移步骤应失败）"'

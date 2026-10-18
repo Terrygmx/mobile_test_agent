@@ -179,6 +179,51 @@ BASE_URL 实际是 `svipcard/`）；裸 `osplatpagetest` 也不能当 prod 反�
 - 设备上**同 bundle id 只能装一个环境**，换环境前先卸载旧包（设置里删 App 即可）；
 - 切环境/切分支后宏变化会触发全量重编译，属预期。
 
+### 1.6 测试/验证环境不可达时：用生产包验证（2026-10-18 实测）
+
+**什么时候走这条路**：内网/VPN 断了，测试机访问不到 dev/uat 域名。此时 uat
+包装上去也会卡在请求上，但**框架侧的链路照样可以验证**——真机执行、screen
+识别、恢复引擎、trace 落库都不依赖业务域名。
+
+**做法**：把环境换成 `prod` 重跑三步流水线（命令与 §1 同构，只换 `LST_ENV`）：
+
+```bash
+curl -sS -m 6 -o /dev/null -w '%{http_code}\n' https://www.bjetc.cn/      # 期望 200
+curl -sS -m 6 -o /dev/null -w '%{http_code}\n' https://svipcarduat.tpark.etcstk.cn/  # 期望 000/超时
+
+make lst-build-device LST_ENV=prod          # 产物 build/lst-device-prod，注入 local-prod
+make lst-repo-generate LST_ENV=prod         # metadata → repository/generated/local-prod
+make lst-install-device LST_ENV=prod
+make lst-smoke-device LST_ENV=prod          # 三条冒烟
+```
+
+**验收点**（别只看 PASS）：
+
+- 环境指纹：二进制 `strings ... | rg 'www\.bjetc\.cn|svipcarduat'` 应只见
+  `www.bjetc.cn`、不见 `svipcarduat`；
+- 身份同源：App 的 `MTA_GIT_COMMIT` == `repository/generated/local-prod/
+  source_metadata.json` 的 `git_commit`，否则 G8 会 exit 3；
+- trace 行：`runs.app_build` / `metadata_build` 都应是 `local-prod`，
+  `metadata_mismatch=0`。
+
+**已知边界（不是退化，别当 bug 查）**：
+
+- `LSTHTTPManager.m:32/150` 硬编码 `svipcard-new/`，生产包的市场模块仍可能
+  走同一路径；市场相关链路不在生产包验证范围内。
+- 恢复演练的**完整闭环**（LLM 候选 → RECOVERED → accept → Experience）需要
+  `LLM_API_KEY`；没有 key 时可用 `make lst-recovery-no-llm LST_ENV=prod`
+  只验「故障确实注入」：
+
+  ```bash
+  make lst-recovery-no-llm LST_ENV=prod
+  # 预期：lst_recovery_drift_001 FAIL (ELEMENT_NOT_FOUND)，exit 1
+  ```
+
+  判据是 trace 的 `recovery_attempted.stages` 走到了
+  `screen:FOUND … → reconcile:DRIFT`，候选里含真实的 `return`，
+  而 `llm.outcome=disabled`。若 `screen` 不是 `FOUND` 或 `reconcile` 不是
+  `DRIFT`，那是定位/故障定义坏了，不是 LLM 缺失。
+
 ## 2. 注意事项（做第 3 步之前先看）
 
 - **metadata 的 commit 取自乐速通仓库**（2026-10-15 修）：`repo generate` 的
