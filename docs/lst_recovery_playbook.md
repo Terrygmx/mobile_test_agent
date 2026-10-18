@@ -65,11 +65,28 @@ make lst-recovery-device LST_ENV=uat
 预期：
 
 - 用例终态 `RECOVERED`，退出码 `5`；
+- `make` 目标正常结束（`0`/`5` 都算成功；其他退出码才失败）；
 - trace 步骤的 `detail_json.recovery.stages` 含
   `reconcile.outcome=DRIFT`、`llm.outcome=candidate`、
   `validate.outcome=EXECUTE`；
 - `recoveries` 有一条 `kind=LLM`；
 - `recovery_reviews` 有一条 `PENDING`。
+
+2026-10-18 生产包实测（`local-prod`，App/metadata commit 均为
+`5196852c`）：
+
+```text
+模型: group/auto-gpt-6-luna
+run_6da4010e: RECOVERED / llm_calls=1 / exit 5
+LLM candidate: return / confidence 0.98 / latency 4804.6 ms
+recoveries: kind=LLM
+review #1: PENDING
+```
+
+模型选择注意事项：`group/group` 在同一恢复 prompt 上仅 1/3 命中
+（置信度 0.3/0.7/0.0），不适合作为本演练的默认模型。
+`group/auto-gpt-6-luna` 实测 2/3 命中（0.98/0.0/0.93），本次成功。
+`min_confidence=0.85` 是 fail-closed 安全阈值，不要为跑绿而调低。
 
 ## 3. 人工确认并生成 Experience
 
@@ -96,12 +113,28 @@ make lst-recovery-device LST_ENV=uat
 预期：
 
 - 用例终态 `RECOVERED`，退出码 `5`；
+- `make` 目标正常结束（`0`/`5` 都算成功）；
 - `recovered_kinds == ["RECOVERED_EXPERIENCE"]`；
 - `runs.llm_calls = 0`；
 - `recoveries.kind = EXPERIENCE`，不再新建 review。
 
 即使环境里没有 `LLM_API_KEY`，已有 Experience 时仍可走第二条路径；
-但 Makefile 目标会在首次演练时提前拒绝，避免误以为 LLM 已参与。
+此时 trace 会如实记录 `llm_enabled=0`。首次演练仍需配置 LLM；未配置时
+恢复链会停在 `llm.outcome=disabled`，不会被误报为 LLM 已参与。
+
+2026-10-18 实测：
+
+```text
+run_5d05c94a: RECOVERED / llm_calls=0 / exit 5
+recovered_kind=RECOVERED_EXPERIENCE
+recoveries: kind=EXPERIENCE
+recovery_reviews: 仍只有 #1（未新增）
+
+# Makefile exit 5 语义修复后，无 LLM_API_KEY 再跑两次：
+run_4e7209b7 / run_2ba80509: RECOVERED / llm_enabled=0 / llm_calls=0
+make 正常退出 0
+Experience: sample=3, success=3, success_rate=1.0
+```
 
 ## 5. 离线回归
 

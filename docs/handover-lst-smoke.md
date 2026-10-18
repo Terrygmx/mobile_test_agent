@@ -351,6 +351,28 @@ App 与 metadata 同为 `5196852c`。完整步骤与边界见
 `lst_recovery_drift_001 FAIL (ELEMENT_NOT_FOUND)`，且 trace 的
 `reconcile.outcome=DRIFT`）。
 
+### 5.2 失败恢复真机闭环（2026-10-18）
+
+生产包上已完成首次 LLM 恢复、人工 ACCEPT、Experience 二次复用：
+
+| 阶段 | run / 证据 | 结果 |
+|---|---|---|
+| 首跑 LLM 恢复 | `run_6da4010e` | `RECOVERED`，`llm_calls=1`，exit 5 |
+| LLM 候选 | `return`，confidence `0.98` | `reconcile=DRIFT`，`validate=EXECUTE` |
+| 人工审核 | review #1 | `ACCEPT`，生成 `exp_02c5849a5f91`（`CANDIDATE`） |
+| 二跑 Experience | `run_5d05c94a` | `RECOVERED_EXPERIENCE`，`llm_calls=0` |
+| 无 Key 复用 | `run_4e7209b7` / `run_2ba80509` | `llm_enabled=0`，仍恢复成功 |
+| Experience 统计 | 同一 Candidate | `sample=3`，`success=3`，`rate=1.0` |
+
+`group/group` 在同一恢复 prompt 上仅 1/3 命中，改用
+`group/auto-gpt-6-luna` 完成实测（2/3 命中，本次 confidence 0.98）。
+`min_confidence=0.85` 是安全阈值，不得为跑绿调低。
+
+`make lst-recovery-device` 已修正退出码语义：`mta run` 的 exit 5 是
+`RECOVERED` 的预期结果，Make 目标接受 0/5，其他退出码原样失败。
+同时移除了“必须先有 `LLM_API_KEY`”的前置检查——已有 Experience 时无 Key
+也能复用，trace 会如实记录 `llm_enabled=0`。
+
 ## 6. 遗留项
 
 - `LSTHTTPManager.m:32/150` 硬编码 `svipcard-new/`，uat 包的市场请求仍可能走
@@ -374,9 +396,10 @@ App 与 metadata 同为 `5196852c`。完整步骤与边界见
   在 `end_run` 之前断言 `runs.status == PASS`。新增守卫
   `tests/unit/test_phase0_demo_drift.py` 钉住「漂移段必须有 RECOVERED 步骤」，
   A/B 探针 3/5 有效（漂移目标错 / 恢复引擎缺席 / 候选未登记都会红）。
-- **失败恢复演练的 LLM 首跑仍是待办**：本机无 `LLM_API_KEY`，生产包上只验到
-  `reconcile=DRIFT`（`make lst-recovery-no-llm`），RECOVERED → accept →
-  Experience 这段等 key 再跑。
+- **失败恢复演练闭环已完成（2026-10-18）**：生产包上首跑
+  `RECOVERED_LLM`（`run_6da4010e`，confidence 0.98）→ 人工 ACCEPT →
+  二跑 `RECOVERED_EXPERIENCE`（`run_5d05c94a`，LLM 0 调用）；修复
+  Makefile 的 exit 5 语义后，无 Key 再跑两次也均命中 Experience。详见 §5.2。
 
 ## 7. 快速索引
 
