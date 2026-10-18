@@ -1,0 +1,109 @@
+# suites/lst/login_001.yaml — 乐速通账号密码登录
+#
+# 真机探测（2026-10-18，out/lst-probe/probe_login*.py，生产包）：
+# - 我的页未登录时头像 Cell 显示「登录/注册」，点它 present 登录页
+#   （LSTLoginTools.m:12，FullScreen modal）；
+# - 登录页 marker：NavigationBar name `LSTLoginView`（登录成功后消失）；
+# - 用户名/密码输入框均无 accessibilityIdentifier（LSTLoginView.m 用
+#   tag=100/101 区分，XCTest 看不到 tag），name/label 为空，唯一可用身份
+#   信息是 placeholderValue，故用 predicate + placeholderValue 限定，
+#   实测两个输入框各唯一命中；
+# - 「立即登录」按钮与其内部 StaticText 同名（accessibility id 命中 2 个 →
+#   AmbiguousElement），必须用 predicate 限定 Button 类型；
+# - **必须先勾选协议勾选框**（name `loginRememberPass0`）：不勾选时点击
+#   登录只弹「请先阅读并勾选协议」SVProgressHUD，页面与状态都不变
+#   （实测 32s 无任何变化）；
+# - 登录成功后我的页出现用户名 StaticText，与输入值一致。
+#
+# 账号密码走 `${TEST_USERNAME}` / `${TEST_PASSWORD}` secret 占位符
+# （EnvSecretProvider 从环境变量取），**不落库**；未注入时 lint 报
+# unknown_secret（exit 3），明文也不会进 trace。
+#
+# 自洽性：设备可能已是登录态（登录成功后会保持），用例先用 optional 步探测
+# 并登出，再走登录链路。登出入口在设置页「退出登录」——未登录时该 cell 被
+# App 移除（LSTSetViewController.m:30），所以 optional 步天然只在已登录时
+# 执行。
+schema_version: "0.2"
+id: lst_login_001
+name: 乐速通账号密码登录
+suite: lst_smoke
+tags: [lst, smoke, login, account]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - wait_for:
+      target: update_dialog_cancel
+      condition: exists
+      timeout: 15
+    optional: true
+  - action: tap
+    target: update_dialog_cancel
+    optional: true
+  - wait_for:
+      target: screen:LSTDynamicHomeViewController
+      condition: active
+      timeout: 15
+  # --- 已登录则先登出，保证链路从登录页开始 ---
+  - action: tap
+    target: tab_mine
+  - wait_for:
+      target: screen:LSTMineViewController
+      condition: active
+      timeout: 15
+  - action: tap
+    target: mine_set
+    optional: true
+  - wait_for:
+      target: screen:LSTSetViewController
+      condition: active
+      timeout: 10
+    optional: true
+  - action: tap
+    target: set_logout
+    optional: true
+  - wait_for:
+      target: screen:LSTMineViewController
+      condition: active
+      timeout: 15
+    optional: true
+  # --- 登录链路 ---
+  - action: tap
+    target: mine_login_entry
+  - wait_for:
+      target: screen:LSTLoginViewController
+      condition: active
+      timeout: 15
+  - action: input
+    target: login_username
+    value: "${TEST_USERNAME}"
+    sensitive: true
+  - action: input
+    target: login_password
+    value: "${TEST_PASSWORD}"
+    sensitive: true
+  - action: tap
+    target: login_agree_checkbox
+  - action: tap
+    target: login_submit
+    idempotency: NON_IDEMPOTENT
+    postcondition:
+      target: screen:LSTLoginViewController
+      condition: not_exists
+      timeout: 30
+  # 登录成功后 modal 关闭，App 回到**首页** tab（真机实测：登录完
+  # selected_tab=首页，不是留在「我的」），所以这里等首页而不是我的页。
+  - wait_for:
+      target: screen:LSTDynamicHomeViewController
+      condition: active
+      timeout: 30
+  - action: tap
+    target: tab_mine
+  - wait_for:
+      target: screen:LSTMineViewController
+      condition: active
+      timeout: 15
+  - assertion:
+      target: mine_staff_badge
+      condition: exists
+      timeout: 10

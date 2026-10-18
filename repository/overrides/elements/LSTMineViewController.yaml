@@ -2,6 +2,12 @@
 #
 # `mineSet` 是 App 内图片名直接暴露成按钮 name 的稳定锚点；不依赖用户名、
 # 积分、菜单等动态内容。
+#
+# `mine_login_entry` / `mine_user_name`（2026-10-18 登录链路接入）：我的页
+# 头像 Cell 里的 StaticText，未登录时文案「登录/注册」，登录后变成用户名
+# （真机 dump：x=114 y=175，与未登录时的 y=121 不同，因为登录态多了
+# 「会员等级」行）。两者都是 Cell 内叶子节点，点击 StaticText 会透传到
+# 可点的 Cell（实测两种状态点击都生效）。
 schema_version: "1.0"
 kind: element
 id: mine_set
@@ -9,6 +15,37 @@ screen: LSTMineViewController
 type: button
 strategies:
   - {type: accessibility_id, value: mineSet, origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: mine_login_entry
+screen: LSTMineViewController
+type: button
+strategies:
+  - {type: predicate,
+     value: 'type == "XCUIElementTypeStaticText" AND name == "登录/注册"',
+     origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+# `mine_staff_new` 是登录态才出现的会员角标按钮（LSTMineInfoCell.m:202 的
+# 占位图），未登录时整个头像 Cell 只有「登录/注册」文本。选它而不是用户名
+# 文本做「登录成功」判据，是因为用户名是账号数据、会随测试账号变化，
+# 且元素策略里的 `${TEST_USERNAME}` **不会**被 SecretProvider 解析
+# （cli/pipeline.py 只对 step.value 做占位符替换）。
+schema_version: "1.0"
+kind: element
+id: mine_staff_badge
+screen: LSTMineViewController
+type: button
+strategies:
+  - {type: accessibility_id, value: 'mine staff new', origin: manual}
 metadata:
   risk: LOW
   idempotency: IDEMPOTENT

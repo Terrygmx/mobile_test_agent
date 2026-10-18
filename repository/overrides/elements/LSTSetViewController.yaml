@@ -1,0 +1,22 @@
+# overrides/elements/LSTSetViewController.yaml — 乐速通设置页元素
+#
+# 真机探测（2026-10-18，out/lst-probe/probe_login*.py）：
+# - 「退出登录」是 UITableViewCell 里的 StaticText（x=20 y=543 w=390 h=58），
+#   整行可点；**未登录时该 cell 被 App 移除**（LSTSetViewController.m:30
+#   `if(!USER.authToken) [self.menuArr removeLastObject]`），所以它本身就是
+#   「当前已登录」的身份判据。
+# - 首次探测时该行在可视区外（y=543 附近，需滚动），后续 dump 已可见；
+#   本元素仅用于登录态下的登出，不覆盖滚动场景。
+schema_version: "1.0"
+kind: element
+id: set_logout
+screen: LSTSetViewController
+type: cell
+strategies:
+  - {type: predicate,
+     value: 'type == "XCUIElementTypeStaticText" AND name == "退出登录"',
+     origin: manual}
+metadata:
+  risk: MEDIUM
+  idempotency: NON_IDEMPOTENT
+  data_class: SECRET

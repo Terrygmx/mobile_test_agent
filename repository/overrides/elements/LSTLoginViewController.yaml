@@ -1,0 +1,65 @@
+# overrides/elements/LSTLoginViewController.yaml — 乐速通登录页元素
+#
+# 真机探测（2026-10-18，out/lst-probe/probe_login*.py）：
+# - 用户名/密码输入框都没有 accessibilityIdentifier（LSTLoginView.m 用
+#   tag=100/101 区分，XCTest 看不到 tag），name/label 均为空；唯一可用的
+#   身份信息是 placeholderValue，故用 predicate + placeholderValue 限定。
+#   实测两个 predicate 各唯一命中。
+# - 「立即登录」按钮与其内部 StaticText 同名（accessibility id 命中 2 个），
+#   必须用 predicate 限定 Button 类型；这与首页「取消」按钮同源。
+# - 协议勾选框的 name 是 `loginRememberPass0`（图片资源名），**必须先勾选**
+#   否则点击登录只弹「请先阅读并勾选协议」且页面不变（LSTLoginView.m:181
+#   的 agree 判断），实测不勾选时登录无任何反应。
+schema_version: "1.0"
+kind: element
+id: login_username
+screen: LSTLoginViewController
+type: textfield
+strategies:
+  - {type: predicate,
+     value: 'type == "XCUIElementTypeTextField" AND placeholderValue CONTAINS "请输入手机号"',
+     origin: manual}
+metadata:
+  risk: MEDIUM
+  idempotency: IDEMPOTENT
+  data_class: SECRET
+---
+schema_version: "1.0"
+kind: element
+id: login_password
+screen: LSTLoginViewController
+type: securetextfield
+strategies:
+  - {type: predicate,
+     value: 'type == "XCUIElementTypeSecureTextField" AND placeholderValue CONTAINS "请输入密码"',
+     origin: manual}
+metadata:
+  risk: MEDIUM
+  idempotency: IDEMPOTENT
+  data_class: SECRET
+---
+schema_version: "1.0"
+kind: element
+id: login_agree_checkbox
+screen: LSTLoginViewController
+type: button
+strategies:
+  - {type: accessibility_id, value: loginRememberPass0, origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: login_submit
+screen: LSTLoginViewController
+type: button
+strategies:
+  - {type: predicate,
+     value: 'type == "XCUIElementTypeButton" AND name == "立即登录"',
+     origin: manual}
+metadata:
+  risk: MEDIUM
+  idempotency: NON_IDEMPOTENT
+  data_class: SECRET

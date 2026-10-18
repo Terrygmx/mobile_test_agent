@@ -1,0 +1,19 @@
+# overrides/screens/LSTSetViewController.yaml — 乐速通设置页 Screen 定义
+#
+# 真机探测（2026-10-18，out/lst-probe/probe_login*.py）：
+# - 入口：我的 tab → `mineSet` 按钮 push（LSTMineViewController.m 的 mineSet）；
+# - ⚠️ 第一版 marker 用 NavigationBar 的 `设置`，**真机跑失败**：
+#   同名节点有 2 个（NavigationBar + 其内部标题 StaticText），
+#   Executor.find 的唯一性校验判 AmbiguousElement，`wait_for screen active`
+#   轮询 10s 全部不满足（optional 步被记 WaitTimeout 跳过）。与「服务」页
+#   当年选 `ETC发行` 是同一类坑：**中文标题在 NavBar 上必然成对出现**。
+# - 改用分区首行 `更改读卡模式`：它是设置页独有的服务端/固定菜单文案，
+#   在我的页/首页均不存在（实测 0 命中），且页内唯一。
+schema_version: "1.0"
+kind: screen
+id: LSTSetViewController
+marker: 更改读卡模式
+kind_hint: page
+metadata:
+  risk: LOW
+  origin: manual

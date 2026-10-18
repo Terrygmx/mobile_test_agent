@@ -1,0 +1,19 @@
+# overrides/screens/LSTLoginViewController.yaml — 乐速通登录页 Screen 定义
+#
+# 真机探测（2026-10-18，out/lst-probe/probe_login*.py，生产包未登录态）：
+# - 入口：我的 tab → 头像 Cell 里的「登录/注册」StaticText（点击透传到
+#   Cell，LSTMineViewController 的 headerCell）；登录页以
+#   modalPresentationStyle=FullScreen present（LSTLoginTools.m:12）。
+# - 页面 NavigationBar 的 name 是 `LSTLoginView`（App 的 View 类名，由系统
+#   导航栏自动暴露），与页面一一对应；登录成功后该节点消失。
+# - 其他候选均不适用：`立即登录` 同时存在 Button + StaticText 两个同名节点
+#   （accessibility id 命中 2 个 → AmbiguousElement）；`LoginClose` 可用但
+#   语义上是关闭而非页面身份。
+schema_version: "1.0"
+kind: screen
+id: LSTLoginViewController
+marker: LSTLoginView
+kind_hint: page
+metadata:
+  risk: LOW
+  origin: manual
