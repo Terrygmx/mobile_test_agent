@@ -1,0 +1,24 @@
+# overrides/screens/LSTDynamicNearServiceViewController.yaml — 乐速通「畅行慧览」页
+#
+# 真机探测（2026-10-18，out/lst-probe/probe_journey*.py 两次 dump 交叉验证）：
+# - tab 栏共 4 个：首页 / 畅行慧览 / 服务 / 我的。前三者与「我的」已在
+#   LSTTabBarViewController.yaml 定义，本文件补齐第四个 tab 的页面覆盖。
+# - 「畅行慧览」不是 App 常驻 tab：LSTTabBarViewController.m:338 的
+#   getNearServiceConfigByKey（key sys_journey_tabbar_status）返回 1 时才插入
+#   LSTDynamicNearServiceViewController。本机 prod 包实测开关为开，但服务端
+#   一关这个 tab 就整体消失，属已知环境依赖。
+# - marker 选 `附近服务`：它是 LSTDynamicNearServiceView 的分区标题
+#   （LSTDynamicNearServiceView.m 的 titleLabel ← 服务端 titleText）。
+#   首页也存在同名节点，但恒为 visible=false（首页「出行服务」宫格内的隐藏
+#   项，两次 dump 均为 false），因此 screen wait 的 visible 判定只在畅行慧览
+#   页成立——实测首页/服务/我的三页 visible 计数为 0，畅行慧览页为 1。
+# ⚠️ 与 `ETC发行` 同类的临时 marker：文案由服务端下发，运营改名会假红。
+#   后续应让 App 给 titleLabel 补 accessibilityIdentifier 后替换。
+schema_version: "1.0"
+kind: screen
+id: LSTDynamicNearServiceViewController
+marker: 附近服务
+kind_hint: page
+metadata:
+  risk: LOW
+  origin: manual

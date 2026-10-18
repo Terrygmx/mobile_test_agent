@@ -1,0 +1,54 @@
+# suites/lst/tab_journey_001.yaml — 首页 → 畅行慧览 → 首页
+#
+# 真机探测（2026-10-18，out/lst-probe/probe_journey*.py）：
+# - tab 栏共 4 个（首页 / 畅行慧览 / 服务 / 我的），第四个 tab 之前未覆盖；
+# - 「畅行慧览」tab 是 Button、name/label 与标题一致，但畅行慧览页自己的
+#   NavigationBar 标题也叫「畅行慧览」，所以沿用 Button predicate 限定类型；
+# - 畅行慧览页 marker 为 `附近服务`（LSTDynamicNearServiceView 分区标题）：
+#   首页存在同名节点但恒 visible=false，实测首页/服务/我的三页 visible 计数
+#   为 0、畅行慧览页为 1，因此 screen wait 只在目标页成立；
+# - 切回首页后 `home_search` 恢复存在，`附近服务` 恢复不可见。
+#
+# ⚠️ 环境依赖：该 tab 由服务端开关 sys_journey_tabbar_status 控制
+# （LSTTabBarViewController.m:338），关闭时 tab 整体消失，本用例会红。
+schema_version: "0.2"
+id: lst_tab_journey_001
+name: 乐速通进入畅行慧览并返回首页
+suite: lst_smoke
+tags: [lst, smoke, navigation, tab]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - wait_for:
+      target: update_dialog_cancel
+      condition: exists
+      timeout: 15
+    optional: true
+  - action: tap
+    target: update_dialog_cancel
+    optional: true
+  - wait_for:
+      target: screen:LSTDynamicHomeViewController
+      condition: active
+      timeout: 15
+  - action: tap
+    target: tab_journey
+  - wait_for:
+      target: screen:LSTDynamicNearServiceViewController
+      condition: active
+      timeout: 15
+  - assertion:
+      target: LSTDynamicHomeViewController.home_search
+      condition: not_exists
+      timeout: 5
+  - action: tap
+    target: tab_home
+  - wait_for:
+      target: screen:LSTDynamicHomeViewController
+      condition: active
+      timeout: 15
+  - assertion:
+      target: LSTDynamicHomeViewController.home_search
+      condition: exists
+      timeout: 5
