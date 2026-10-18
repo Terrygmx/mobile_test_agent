@@ -62,11 +62,16 @@ steps:
   - action: tap
     target: set_logout
     optional: true
+  # ⚠️ 未登录时「退出登录」cell 被 App 移除（LSTSetViewController.m:30），
+  # 上一步会以 ElementNotFound 跳过——但**设置页还开着**。如果不回退，
+  # 下一步 tap mine_login_entry 在设置页里找不到，用例假红
+  # （run_af079971 / run_cc1fbf6c 的失败即因此）。probe_back.py 实测
+  # driver.back() 能把 ObjC UINavigationController 的设置页 pop 回我的页。
+  - action: back
   - wait_for:
       target: screen:LSTMineViewController
       condition: active
       timeout: 15
-    optional: true
   # --- 登录链路 ---
   - action: tap
     target: mine_login_entry

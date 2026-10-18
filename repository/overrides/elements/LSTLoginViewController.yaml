@@ -10,6 +10,10 @@
 # - 协议勾选框的 name 是 `loginRememberPass0`（图片资源名），**必须先勾选**
 #   否则点击登录只弹「请先阅读并勾选协议」且页面不变（LSTLoginView.m:181
 #   的 agree 判断），实测不勾选时登录无任何反应。
+# - 登录失败提示统一走 `SVProgressHUD+LST.m` 的 `showMessage:`（2 秒后
+#   dismissWithDelay:2 自动消失）。HUD 节点的 name/label **都等于消息文案**
+#   （真机 dump：name="SVProgressHUD" label="密码不能为空"），因此既能断言
+#   「HUD 出现过」也能断言文案本身——见 `login_toast_hud`。
 schema_version: "1.0"
 kind: element
 id: login_username
@@ -63,3 +67,32 @@ metadata:
   risk: MEDIUM
   idempotency: NON_IDEMPOTENT
   data_class: SECRET
+
+---
+# `login_toast_hud`：登录失败提示（SVProgressHUD）节点本体。
+#
+# 真机探测（2026-10-18，out/lst-probe/probe_hud.py + probe_hud2.py，生产包）：
+# - 空密码点登录 → HUD 出现于 t+0.48s，`.text` 返回「密码不能为空」
+#   （客户端校验，LSTLoginViewController.m:311，**不请求服务端、不锁账号**）；
+# - 未勾协议点登录 → HUD 出现于 t+0.49s，`.text` 返回「请先阅读并勾选协议」
+#   （LSTLoginView.m:183）。
+# - 两条路径下页面始终停留在登录页（LSTLoginView marker 仍在）。
+#
+# 关键时序事实：HUD 只显示约 2s，而**动作步不做 settle**（executor/wait.py 的
+# wait_for_settle 只被 wait_for 触发），所以 tap 登录后立刻轮询能稳定抓到；
+# 用例断言超时给 5s（默认 10s 会拖长失败时的等待）。
+#
+# 断言形态：HUD 的 name 是固定的 `SVProgressHUD`，文案在 label/.text 上，
+# 没有独立的 StaticText 子节点承载文案（真机 dump 已确认），所以
+# `text_equals` 直接打在本节点上。文案是客户端硬编码，不随账号/环境变化。
+schema_version: "1.0"
+kind: element
+id: login_toast_hud
+screen: LSTLoginViewController
+type: other
+strategies:
+  - {type: accessibility_id, value: SVProgressHUD, origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC

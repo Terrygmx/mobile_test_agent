@@ -62,6 +62,58 @@ lst_smoke_launch_001: PASS
 lst_tab_switch_back_001: PASS
 ```
 
+### 1.2 登录失败路径与登出自洽（2026-10-18，本轮补充）
+
+在前述登录链路（§「第二项业务主链路」后的 1.1 登录段落）基础上补充：
+
+**失败路径用例 `lst_login_negative_001`**（新文件）：
+
+- 覆盖两条**不请求服务端、不会锁定账号**的客户端校验失败：
+  A. 已填账号 + 密码为空 + 已勾协议 → HUD「密码不能为空」；
+  B. 已填账号 + 未勾协议 → HUD「请先阅读并勾选协议」；
+- 提示是 `SVProgressHUD+LST.m` 的 `showMessage:`，**消息文案在节点的
+  label 上**（`name="SVProgressHUD"`，无独立 StaticText 子节点承载文案），
+  `accessibility id` 查找 + `.text` 可直接断言——新增元素
+  `login_toast_hud`（`repository/overrides/elements/LSTLoginViewController.yaml`）；
+- **HUD 只显示约 2s**（`dismissWithDelay:2`），实测点击后 t+0.48s 出现；
+  提交步**有意不带 postcondition**——带 postcondition 时该步耗时 3174ms
+  （screen wait 后的 settle 判定），会吃光 2s 窗口，断言开始时 HUD 已消失
+  （首跑 `run_a96835e4` 失败即因此）。去掉后提交步回到约 750ms，窗口够用；
+  lint 因此报 `missing_postcondition` WARNING（exit 0），是 H7 非幂等动作
+  需要 postcondition 与瞬时提示必须在窗口内观测的真实冲突，已如实记录；
+- **路径 B 不填密码**（run_22277fb0 首跑失败的根因）：probe_pathb vs
+  probe_pathb3 逐变量对照确认，untick 后再 input 密码真机上 HUD 不出现；
+  保持密码为空时稳定弹出。附带安全收益：账号+密码+已勾选三者同时成立会
+  **真实发起登录**（probe_pathb2 抓到 `Loading` 且 App 离开登录页），不填
+  密码排除了误触真实登录的可能；
+- 账号只走 `${TEST_USERNAME}`（本用例不需要密码），不落库。
+
+**登出自洽前置修复**（`lst_login_001` / `lst_login_negative_001` 共同）：
+
+- 未登录时设置页「退出登录」cell 被 App 移除（`LSTSetViewController.m:30`），
+  optional tap 跳过后**设置页还开着**，直接 tap `mine_login_entry` 会
+  ElementNotFound（`run_af079971` / `run_cc1fbf6c` / `run_35f5f9ab` 三次
+  失败同一根因）；
+- 修复：登出步之后加 `action: back`（`driver.back()`，probe_back.py 实测
+  能把 ObjC UINavigationController 的设置页 pop 回我的页），再等
+  `screen:LSTMineViewController`——wait 改为**非 optional**（登出成功或
+  back 后都必须回到我的页，失败就该红）；
+- 负用例补同款 optional 登出前置（batch 里紧跟 login_001 跑时 App 是
+  已登录态，`mine_login_entry` 不存在，必须先登出）。
+
+真机验证（prod 包，`run_...` 见 `out/lst-smoke.db`）：
+
+| 用例 | 结果 | 备注 |
+|---|---|---|
+| `lst_login_001` | PASS 21/21 | 加 back 步后修复 |
+| `lst_login_negative_001` | PASS 23/23 | 新用例（含登出自洽前置） |
+| 全量 `lst_smoke` batch | **6/6 PASS**（`run: exit 0`） | 含上述两条 |
+| 全量单测 | **2366 passed / 0 failed**（70.5s） | 与基线一致，零新增测试 |
+
+已知边界：错误密码路径**不测**（账号锁定风险，用户明确要求跳过）；未勾
+协议时 App 端**有** toast（源码 `LSTLoginView.m:183`），修正了此前交接里
+「未勾协议静默」的错误结论。
+
 ### 1.1 第四项 tab「畅行慧览」（2026-10-18，commit `159a282`）
 
 真机探测（`out/lst-probe/probe_journey*.py`，两次 dump 交叉验证）：

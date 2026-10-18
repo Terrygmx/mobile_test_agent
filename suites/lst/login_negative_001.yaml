@@ -1,0 +1,159 @@
+# suites/lst/login_negative_001.yaml — 乐速通登录失败路径（客户端校验）
+#
+# 覆盖两条**不请求服务端、不会锁定账号**的失败路径（账号锁定风险是明确的
+# 边界：错误密码路径不在本用例范围内）：
+#   A. 已填账号、密码为空、已勾协议 → 预期「密码不能为空」HUD；
+#   B. 已填账号密码、未勾协议 → 预期「请先阅读并勾选协议」HUD。
+#
+# 真机探测（2026-10-18，out/lst-probe/probe_login_negative.py /
+# probe_hud.py / probe_hud2.py / probe_hud3.py / probe_pathb3.py，生产包）：
+# - 提示统一是 `SVProgressHUD+LST.m` 的 `showMessage:`，节点 name 固定
+#   `SVProgressHUD`，**消息文案在 label 上**（Appium `.text` 同样返回它），
+#   没有独立的 StaticText 子节点承载文案；
+# - HUD 生命周期（probe_hud3 连续 6 轮实测，同一失败路径重复触发）：
+#   click() 阻塞约 750ms，HUD 在点击后约 940ms 出现、约 2s 后自动消失
+#   （dismissWithDelay:2）→ click 返回后仍有约 2.2s 可观测窗口；
+# - 两条路径下页面都**停留在登录页**（LSTLoginView marker 仍在），
+#   不会 dismiss modal、不会回落到 tab；
+# - 客户端校验源码：LSTLoginViewController.m:311（空密码）、
+#   LSTLoginView.m:183（未勾协议）。
+#
+# ⚠️ **提交步不能带 postcondition**：run_a96835e4 首跑失败即因此。带
+# postcondition（screen active）时该步耗时 3174ms——screen wait 之后的
+# settle 判定要连续拉 page_source（真机单次 0.5~2s），直接把 2s 的 HUD
+# 窗口吃光，断言开始轮询时 HUD 早已消失 → ASSERTION_TARGET_DRIFT。
+# 去掉 postcondition 后提交步回到约 750ms，HUD 可被稳定断言。
+# 「仍停留在登录页」由用例末尾的 screen wait 兜底，不需要 postcondition。
+#
+# 因此本用例**有意**不为提交步声明 postcondition，lint 会报两条
+# `missing_postcondition` WARNING（exit 仍为 0）。这是 H7「非幂等动作
+# 需要 postcondition 判定结果」与「瞬时提示必须在窗口内观测」之间的真实
+# 冲突：加了 postcondition 就永远看不到 HUD。选择如实记录 WARNING，而不是
+# 把提交步谎报成 IDEMPOTENT 来消警告。
+#
+# **路径 B 的实测顺序**（run_22277fb0 首跑失败的根因）：
+# 第一版让路径 B 在「取消勾选」之后 input 密码，真机上 HUD 不出现（8s 内
+# 树上没有任何 SVProgressHUD，页面停在登录页、键盘还开着）。
+# 逐变量对照（probe_pathb vs probe_pathb3，唯一差别就是 untick 后是否填密码）
+# 确认：保持密码为空时 HUD 稳定弹出。因此路径 B 不填密码。
+# 附带的安全收益：账号+密码+已勾选三者同时成立会真实发起登录
+# （probe_pathb2 抓到 `Loading` HUD 且 App 离开登录页），不填密码顺带
+# 排除了误触真实登录的可能。
+#
+# 断言形态：HUD 是**异步出现的瞬时节点**，用 `wait_for text_equals` 而不是
+# `assertion text_equals`——前者轮询到文案出现即满足，后者遇到「元素还没出现」
+# 虽也轮询，但语义上 assertion 面向终态。文案是客户端硬编码，不随账号/环境
+# 变化，故可以直接字面量断言。
+#
+# 与 login_001.yaml 的关系：那条覆盖成功路径（含登出自洽前置），本条覆盖
+# 失败路径。两条都从「我的 → 登录/注册」进入登录页。
+#
+# 账号走 `${TEST_USERNAME}` secret 占位符（EnvSecretProvider 从环境变量
+# 取），**不落库**；未注入时 lint 报 unknown_secret（exit 3），明文也不会
+# 进 trace。本用例只填账号、**不填密码**——两条路径都靠密码为空来保证
+# 不会发出真实登录请求（见上方「路径 B 的实测顺序」）。
+schema_version: "0.2"
+id: lst_login_negative_001
+name: 乐速通登录失败提示
+suite: lst_smoke
+tags: [lst, smoke, login, negative]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - wait_for:
+      target: update_dialog_cancel
+      condition: exists
+      timeout: 15
+    optional: true
+  - action: tap
+    target: update_dialog_cancel
+    optional: true
+  - wait_for:
+      target: screen:LSTDynamicHomeViewController
+      condition: active
+      timeout: 15
+  # --- 进入登录页（与 login_001 同一条入口链路）---
+  - action: tap
+    target: tab_mine
+  - wait_for:
+      target: screen:LSTMineViewController
+      condition: active
+      timeout: 15
+  # --- 已登录则先登出（与 login_001 同款自洽前置）---
+  # ⚠️ batch 里本用例紧跟 lst_login_001 跑，而后者登录成功后 App 保持
+  # 已登录态：此时 mine_login_entry 不存在（头像 Cell 显示的是用户名），
+  # tap 会直接 ElementNotFound（run_35f5f9ab 失败即因此）。所以必须先
+  # 探测设置页 → 登出 → pop 回我的页。三条 optional 步在未登录时全部
+  # 跳过（退出登录 cell 被 App 移除 + 设置页未打开），不影响主链路。
+  - action: tap
+    target: mine_set
+    optional: true
+  - wait_for:
+      target: screen:LSTSetViewController
+      condition: active
+      timeout: 10
+    optional: true
+  - action: tap
+    target: set_logout
+    optional: true
+  # 未登录时「退出登录」cell 被 App 移除（LSTSetViewController.m:30），
+  # 上一步会以 ElementNotFound 跳过——但设置页还开着，必须 pop 回来。
+  # driver.back() 实测能把 ObjC UINavigationController 的设置页 pop
+  # （见 suites/lst/login_001.yaml 同一行的注释，probe_back.py）。
+  - action: back
+  - wait_for:
+      target: screen:LSTMineViewController
+      condition: active
+      timeout: 15
+  - action: tap
+    target: mine_login_entry
+  - wait_for:
+      target: screen:LSTLoginViewController
+      condition: active
+      timeout: 15
+  # --- 路径 A：勾协议 + 密码为空 → 「密码不能为空」---
+  - action: input
+    target: login_username
+    value: "${TEST_USERNAME}"
+    sensitive: true
+  - action: tap
+    target: login_agree_checkbox
+  - action: tap
+    target: login_submit
+    idempotency: NON_IDEMPOTENT
+  - wait_for:
+      target: login_toast_hud
+      condition: text_equals
+      expected: "密码不能为空"
+      timeout: 5
+  # HUD 只显示约 2s，路径 B 前等它消失，避免上一条提示干扰下一轮判定
+  - wait_for:
+      target: login_toast_hud
+      condition: not_exists
+      timeout: 5
+  # --- 路径 B：取消勾选协议 → 「请先阅读并勾选协议」---
+  # ⚠️ **这里刻意不填密码**：见文件头「路径 B 的实测顺序」。untick 之后
+  # 再往密码框输入，真机上 HUD 不出现（run_22277fb0 首跑失败即因此）；
+  # 保持密码为空时 HUD 稳定弹出（probe_pathb3 实测）。账号+密码+已勾选
+  # 三者同时成立会**真实发起登录**（probe_pathb2 抓到 Loading HUD 且 App
+  # 离开登录页），本用例必须避免进入该组合。
+  - action: tap
+    target: login_agree_checkbox
+  - action: tap
+    target: login_submit
+    idempotency: NON_IDEMPOTENT
+  - wait_for:
+      target: login_toast_hud
+      condition: text_equals
+      expected: "请先阅读并勾选协议"
+      timeout: 5
+  - wait_for:
+      target: login_toast_hud
+      condition: not_exists
+      timeout: 5
+  # 终态：两条失败路径都不该把用户带离登录页
+  - wait_for:
+      target: screen:LSTLoginViewController
+      condition: active
+      timeout: 5
