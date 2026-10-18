@@ -5,6 +5,12 @@
 # - 右上角「取消」按钮唯一，但页面同时存在一个无名的输入框清除按钮，
 #   所以不能用 accessibility id `取消`（会命中 2 个节点）；
 # - 搜索输入框本身没有独立节点，输入框内文字也未暴露，暂不做输入链路。
+#
+# 恢复演练目标登记（2026-10-18）：`lst_recovery_search_back` 是隔离故障
+# 目录里的漂移目标，正式 overrides 也登记同名元素，目的是让
+# `experience verify` 的 E4 资格解析能拿到与真实 `search_back` 相同的
+# LOW/IDEMPOTENT 元数据；运行时仍以 `--overrides repository/fault_injection/
+# lst_recovery` 为准，故障注入效果不变。
 schema_version: "1.0"
 kind: element
 id: search_back
@@ -12,6 +18,21 @@ screen: LSTDynamicSearchView
 type: button
 strategies:
   - {type: accessibility_id, value: return, origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+---
+schema_version: "1.0"
+kind: element
+id: lst_recovery_search_back
+screen: LSTDynamicSearchView
+type: button
+strategies:
+  - {type: accessibility_id, value: lst_recovery_search_back, origin: manual}
+  - type: accessibility_id
+    value: return
+    origin: experience
 metadata:
   risk: LOW
   idempotency: IDEMPOTENT
