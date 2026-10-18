@@ -396,6 +396,38 @@ def test_success_path_records_locator_strategy():
     assert out.dispatch_reached is True
 
 
+def test_locator_strategy_is_the_strategy_that_actually_matched():
+    """trace 记的是**真正命中**的策略，不是首条策略。
+
+    Promotion 后的元素形如 manual（旧漂移值）+ experience（新值）两条策略：
+    首条在设备上找不到，第二条才命中。若记首条，trace 会把「experience
+    策略生效」写成 manual——Gate M4 的「正常 find 命中」就无从审计。
+    测试替身按生产契约在命中的元素上标 `_mta_strategy`。
+    """
+    class _SecondStrategyExecutor(FakeExecutor):
+        def find(self, strategies):
+            self.calls.append(("find", tuple(strategies)))
+            el = FakeElement("hit")
+            # 生产契约：存 Appium 的 by 串（executor.BY_MAP 的输出）
+            el._mta_strategy = "accessibility id"
+            return [el]
+
+    out = _runner(_SecondStrategyExecutor()).run_step(
+        _ctx(strategies=({"type": "accessibility_id", "value": "old_drift"},
+                         {"type": "accessibility_id", "value": "return"})))
+    assert out.ok
+    assert out.locator_strategy == "accessibility id"
+    assert out.element_id == "login_button", "元素 id 仍来自用例目标"
+
+
+def test_locator_strategy_falls_back_to_first_strategy_without_tag():
+    """没有 `_mta_strategy`（测试替身 / 未标注驱动）→ 沿用首条策略口径，
+    不猜值也不留空。"""
+    out = _runner(FakeExecutor()).run_step(_ctx())
+    assert out.ok
+    assert out.locator_strategy == "accessibility id"
+
+
 def test_success_marks_non_idempotent_dispatched():
     """成功发出也算「已派发」——7.5 的判据是「到达过 POST_DISPATCH」，
     不是「失败了」。"""

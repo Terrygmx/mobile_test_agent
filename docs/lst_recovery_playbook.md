@@ -136,6 +136,33 @@ make 正常退出 0
 Experience: sample=3, success=3, success_rate=1.0
 ```
 
+## 4.1 升级 VERIFIED（4.4 资格 + 4.5 门槛）
+
+自动升级门槛：`min_samples=10` / `min_success_rate>=0.95` /
+`min_distinct_runs>=3`，且目标元素必须解析出 `idempotency=IDEMPOTENT` 与
+`risk=LOW`（E4）。
+
+真机补跑到 10 个不同 run 后（累计 `sample=10 / distinct=10 / rate=1.0`）：
+
+```bash
+.venv/bin/python -m cli.main experience verify \
+  --exp-db out/lst-recovery-experience.db \
+  --overrides repository/overrides \
+  --generated repository/generated/local-prod
+```
+
+实测 `PROMOTE_TO_VERIFIED/THRESHOLD_MET`，状态事件
+`CANDIDATE→VERIFIED`，operator=`cli-verify`。
+
+⚠️ E4 资格经 Repository 解析目标元素。故障演练的
+`lst_recovery_search_back` 只存在于隔离的
+`repository/fault_injection/lst_recovery` 里，正式 overrides 没有同名
+登记时 `experience verify` 会判 `ELEMENT_UNRESOLVED`（fail-closed）。
+正式 `LSTDynamicSearchView.yaml` 因此登记了同名元素（策略值仍是那个
+不存在的故障值），让资格判定拿到与真实 `search_back` 相同的
+LOW/IDEMPOTENT 元数据；运行时演练仍用 `--overrides
+repository/fault_injection/lst_recovery`，故障注入效果不变。
+
 ## 5. 离线回归
 
 ```bash
@@ -146,6 +173,63 @@ Experience: sample=3, success=3, success_rate=1.0
 
 离线测试覆盖同一语义：LLM 首轮恢复、人工 ACCEPT、Experience 次轮恢复，
 并断言次轮 LLM 零调用。
+
+Promotion 与升级门槛的离线覆盖：
+
+```bash
+.venv/bin/python -m pytest \
+  tests/fault_injection/test_p2_matrix_m4.py \
+  tests/unit/test_promoter.py \
+  tests/integration/test_runner_fakedriver.py -q
+```
+
+其中矩阵 #13/#14 覆盖「DEGRADED 不自动撤销 Promotion」与
+「`git revert` 回滚后 Experience Store 历史不受影响」；runner 集成测试
+钉住 `locator_strategy` 记录的是**真正命中**的策略（Promotion 后链尾
+experience 策略生效时不能写成 manual）。
+
+## 5.1 Promotion（9.1–9.3）与 Promotion 后验证
+
+两段式，中间是人工：
+
+```bash
+# 第一段：只落 proposal 表，不写任何文件
+.venv/bin/python -m cli.main experience promote exp_02c5849a5f91 \
+  --exp-db out/lst-recovery-experience.db --operator <你的名字>
+
+# 人工 review diff 与 evidence_summary 后，第二段落地
+.venv/bin/python -m cli.main experience promote exp_02c5849a5f91 \
+  --approve <proposal_id> \
+  --exp-db out/lst-recovery-experience.db \
+  --repo-root <git 仓库根> --operator <你的名字>
+```
+
+approve 写 `repository/overrides/elements/<Screen>.yaml`（同 id 并入
+strategies 链尾，`origin: experience`）+ git commit + `promoted` 记账；
+**不改** Experience.status（9.4 两条独立时间线）。撤销 = `git revert
+<sha>`（E10）。
+
+2026-10-18 实测：
+
+```text
+proposal: prop_6d2c291ab89e APPROVED
+commit:   b82dd1266b3c3ca7d74633bba65ff16223215a6f
+experience: status=VERIFIED, promoted=True, sample=10, rate=1.0
+```
+
+Promotion 后用 `make lst-recovery-promoted-device LST_ENV=prod`
+（正式 overrides、不加载故障目录）验证 Gate M4：
+
+```text
+run_745717d6: PASS / llm_calls=0 / recoveries=0 / reviews=0
+steps: 9/9 SUCCESS
+steps.locator_strategy = {"strategy": "accessibility id", ...}
+```
+
+用例是 `PASS`（exit 0）而不是 `RECOVERED`——experience 策略已进正常
+Locator 链，第二次（`return`）命中，不再触发 Recovery。命中的策略值
+由 `Executor.find` 标注在返回元素上，StepRunner 落 trace；没有该标注
+（测试替身）时回落首条策略，与 P1 口径一致。
 
 ## 6. 排错
 

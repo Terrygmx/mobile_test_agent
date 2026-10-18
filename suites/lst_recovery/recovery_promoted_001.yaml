@@ -1,0 +1,44 @@
+# suites/lst_recovery/recovery_promoted_001.yaml — Promotion 后正常 find 验证
+#
+# 与 recovery_drift_001 走同一页面路径，但**不使用**隔离故障目录：
+# 正式 overrides 的 `lst_recovery_search_back` 已含 manual（漂移值）+
+# experience（`return`）策略链。正常 find 应在第一条失败后直接命中第二条，
+# 用例 PASS、LLM 0 调用、不产生 recoveries 行——这是 Gate M4 的头条语义。
+schema_version: "0.2"
+id: lst_recovery_promoted_001
+name: 乐速通恢复经验 Promotion 后正常定位
+suite: lst_recovery_promoted
+tags: [lst, recovery, promotion]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - wait_for:
+      target: update_dialog_cancel
+      condition: exists
+      timeout: 15
+    optional: true
+  - action: tap
+    target: update_dialog_cancel
+    optional: true
+  - wait_for:
+      target: screen:LSTDynamicHomeViewController
+      condition: active
+      timeout: 15
+  - action: tap
+    target: LSTDynamicHomeViewController.home_search
+  - wait_for:
+      target: screen:LSTDynamicSearchView
+      condition: active
+      timeout: 15
+  - action: tap
+    target: LSTDynamicSearchView.lst_recovery_search_back
+    idempotency: IDEMPOTENT
+  - wait_for:
+      target: screen:LSTDynamicHomeViewController
+      condition: active
+      timeout: 15
+  - assertion:
+      target: LSTDynamicHomeViewController.home_search
+      condition: exists
+      timeout: 5

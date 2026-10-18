@@ -364,6 +364,31 @@ App 与 metadata 同为 `5196852c`。完整步骤与边界见
 | 无 Key 复用 | `run_4e7209b7` / `run_2ba80509` | `llm_enabled=0`，仍恢复成功 |
 | Experience 统计 | 同一 Candidate | `sample=3`，`success=3`，`rate=1.0` |
 
+### 5.3 升级 VERIFIED 与人工 Promotion（2026-10-18）
+
+| 阶段 | 命令 / 证据 | 结果 |
+|---|---|---|
+| 补跑样本 | 真机再跑 7 次（累计 10 个不同 run） | `sample=10`，`success=10`，`distinct=10` |
+| 升级门槛 | `mta experience verify` | `PROMOTE_TO_VERIFIED/THRESHOLD_MET` → `VERIFIED` |
+| E4 资格 | 正式 overrides 解析 `lst_recovery_search_back` | `risk=LOW`、`idempotency=IDEMPOTENT` |
+| Proposal | `prop_6d2c291ab89e` | `PENDING`（不写文件），人工 review diff |
+| Approve | commit `b82dd12` | 写 overrides（`origin: experience`）+ `promoted=True` |
+| Promotion 后验证 | `make lst-recovery-promoted-device`，`run_745717d6` | `PASS`，`llm_calls=0`，`recoveries=0` |
+
+两条状态时间线（9.4）保持独立：approve 后 `status` 仍是 `VERIFIED`，
+`promoted/promoted_commit` 是 Experience 行上的独立字段；撤销走
+`git revert b82dd12`（E10），不影响 Experience Store 历史。
+
+E4 资格解析不到目标时 `experience verify` 会判 `ELEMENT_UNRESOLVED`
+（fail-closed）——正式 `LSTDynamicSearchView.yaml` 因此登记了演练目标
+同名元素，策略值仍是故障值，运行时演练仍加载隔离故障目录。
+
+trace 现在记录**真正命中**的策略：`Executor.find` 在返回元素上标注
+`_mta_strategy`，`StepRunner` 落 `steps.locator_strategy`（Appium by 串，
+如 `accessibility id`）。Promotion 后链尾 experience 策略生效时，trace
+不会再把它写成首条 manual 策略。新增钉子测试
+`tests/integration/test_runner_fakedriver.py::test_locator_strategy_is_the_strategy_that_actually_matched`。
+
 `group/group` 在同一恢复 prompt 上仅 1/3 命中，改用
 `group/auto-gpt-6-luna` 完成实测（2/3 命中，本次 confidence 0.98）。
 `min_confidence=0.85` 是安全阈值，不得为跑绿调低。
@@ -417,6 +442,7 @@ App 与 metadata 同为 `5196852c`。完整步骤与边界见
 | 真机 trace | `out/lst-smoke.db` |
 | 真机构建/安装/冒烟 | `Makefile` 的 `lst-build-device` / `lst-install-device` / `lst-smoke-device` |
 | 失败恢复演练 | `docs/lst_recovery_playbook.md`、`suites/lst_recovery/`、`repository/fault_injection/lst_recovery/` |
+| Promotion 后验证 | `make lst-recovery-promoted-device`、`suites/lst_recovery/recovery_promoted_001.yaml`、`out/lst-recovery-promoted.db` |
 
 查 trace 时注意：`steps` 表用 `testcase_run_id`（没有 `run_id` 列），错误与跳过
 说明在 `detail_json` 中。

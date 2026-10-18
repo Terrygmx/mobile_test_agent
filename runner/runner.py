@@ -163,6 +163,16 @@ class StepRunner:
             self._record(out, ctx)
             return out
 
+        def _located(element) -> str | None:
+            """实际命中元素的那条策略 type（trace 的 locator_strategy）。
+
+            生产 Executor 会在命中的元素上留 `_mta_strategy`；拿不到
+            （测试替身 / 没标注）时回落首条策略 type——**不猜值**，只是
+            沿用 P1 起「首条策略」的口径。
+            """
+            return getattr(element, "_mta_strategy", None) \
+                or self._first_strategy_type(ctx)
+
         def _optional_skip(reason: str) -> StepOutcome:
             return _done(
                 ok=True,
@@ -241,6 +251,7 @@ class StepRunner:
                              ctx.has_postcondition))
 
         element = elements[0]
+        hit_strategy = _located(element)
 
         # 4. perform —— POST_DISPATCH：已发出，失败时结果未知
         non_idem_dispatched = ctx.idempotency in (
@@ -300,7 +311,7 @@ class StepRunner:
             post_detail["postcondition_skipped"] = "no checker injected"
 
         return _done(ok=True, non_idempotent_dispatched=non_idem_dispatched,
-                     locator_strategy=self._first_strategy_type(ctx),
+                     locator_strategy=hit_strategy,
                      detail=post_detail)
 
     def _dispatch_action(self, ctx: RunStepContext, element) -> None:

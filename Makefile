@@ -246,6 +246,28 @@ lst-recovery-device:
 	fi; \
 	echo "lst-recovery-device: 结束（exit $${STATUS}, 5=RECOVERED, 0=PASS）"'
 
+# Promotion 后验证：同一页面路径使用**正式** overrides，不加载隔离故障
+# 目录。预期 PASS（exit 0）、LLM 0 调用、recoveries 不新增——证明 experience
+# 策略已进入正常 Locator 链，而不是又走了一次 Recovery。
+lst-recovery-promoted-device:
+	@bash -c 'set -e; \
+	export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer; \
+	UDID=$${MTA_DEVICE_UDID:-$$(xcrun devicectl list devices 2>/dev/null | grep physical | grep -Ei "connected|available" | grep -oE "[0-9A-F]{8}-[0-9A-F]{12,16}" | head -1)}; \
+	test -n "$$UDID" || { echo "lst-recovery-promoted-device: 未找到 USB 连接的 physical 设备"; exit 1; }; \
+	test -d "$(LST_WDA_PREBUILT_APP)" || { echo "lst-recovery-promoted-device: 预建 WDA 不存在（$(LST_WDA_PREBUILT_APP)）"; exit 1; }; \
+	echo "lst-recovery-promoted-device: $$UDID env=$(LST_ENV)"; \
+	MTA_XCODE_ORG_ID=$(LST_XCODE_ORG_ID) \
+	MTA_WDA_PREBUILT_APP="$(LST_WDA_PREBUILT_APP)" \
+	$(CURDIR)/.venv/bin/python -m cli.main run \
+	  --suite lst_recovery_promoted --suites-root suites \
+	  --udid "$$UDID" --bundle-id com.etc.nfcPushOnline \
+	  --app-path "$(LST_DEVICE_APP)" \
+	  --overrides repository/overrides \
+	  --generated repository/generated/local-$(LST_ENV) \
+	  --metadata repository/generated/local-$(LST_ENV)/source_metadata.json \
+	  --db out/lst-recovery-promoted.db \
+	  --exp-db out/lst-recovery-experience.db'
+
 # 只验证「故障确实注入了」——不带 LLM，预期在漂移那一步 FAIL
 # （ELEMENT_NOT_FOUND / TARGET_UNREGISTERED 一类）。用于没有 LLM_API_KEY 时
 # 确认用例与故障定义仍然成立，把「演练没跑起来」和「LLM 不可用」分开。

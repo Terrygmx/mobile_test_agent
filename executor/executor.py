@@ -66,11 +66,23 @@ class Executor:
 
         Phase 1 改造：真实 App 是 ObjC/UIKit，元素无 accessibility id，
         依赖 label（按钮文案）与 class+label 组合定位，故增加 class_chain 策略。
+
+        命中的元素会带 `_mta_strategy`（真正起作用的那条策略）——
+        StepRunner 用它落 trace 的 `locator_strategy`，所以 Promotion 后
+        「链尾 experience 策略生效」在 trace 上是可查的事实，而不是靠
+        「步骤成功」推断。存的是 **Appium 的 by 串**（`_by_for` 的输出），
+        与 P1 起 trace 里的既有口径一致（`accessibility id` 而非 schema
+        侧的 `accessibility_id`）。属性标注只发生在返回的元素上，不改
+        变 find 的返回契约。
         """
         self.ds.ensure_alive()
         for strat in locator:
             elements = self.driver.find_elements(_by_for(strat), strat["value"])
             if len(elements) == 1:
+                # 标注命中策略（见 docstring）：Promotion 后 experience 策略
+                # 排链尾，首条 manual 失败后由第二条命中——trace 记录首条
+                # 会把证据写反。
+                elements[0]._mta_strategy = _by_for(strat)
                 return elements[0]
             if len(elements) > 1:
                 raise AmbiguousElement(f"{strat}: {len(elements)} matches, fail closed")
