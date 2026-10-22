@@ -230,6 +230,41 @@ launch → optional 关弹窗 → 等首页 → 点 home_search → 等搜索页
 uat 包上会红——这是**账号数据**问题，不是用例或 App 缺陷。登录链路请在
 prod 包验证（prod 上 21/21 PASS）。
 
+### 1.4 用例级截图（2026-10-22）
+
+新增 `action: screenshot` 用例步骤（schema 0.2 扩展），可带可选 `name`：
+
+```yaml
+- action: screenshot
+  name: home            # 可选；省略则自动命名
+```
+
+落盘与 trace：
+
+- 文件：`out/screenshots/<run_id>_step<idx>[_<name>]_<epoch_ms>.png`
+- trace：`steps.screenshot_path` 写同一路径，报告可直接打开
+- `name` 会被收敛为 `[A-Za-z0-9_-]`，路径分隔符替换成 `_`（防目录穿越）
+- 时间戳保证同一步骤多次执行不互相覆盖
+
+设计取舍：**没有**把标签放进 `value`。`value` 的语义是「输入值」，会走
+`sensitive` / secret 脱敏逻辑；截图标签不是被测数据，混用会让 redact 误判。
+
+实现改动 5 处（都很小）：
+
+| 文件 | 改动 |
+|---|---|
+| `testcase/schema.py` | `action` 增加 `screenshot`；新增可选 `name` |
+| `runner/runner.py` | `StepOutcome.screenshot_path` |
+| `runner/lifecycle.py` | 透传到 `TraceStore.record_step` |
+| `cli/pipeline.py` | app-level 分支 + `_screenshot_path()` 生成安全路径 |
+| `docs/mobile-test-agent-phase1-design.md` | 6.2/6.3 契约同步 |
+
+真机 `run_870a2475`（uat 包）：`lst_screenshot_001` PASS，11/11 SUCCESS，
+三张图分别落在 step4（首页）、step7（搜索页）、step10（回首页），
+人工核对图片内容与页面一致；trace 三条 `screenshot_path` 均非空。
+新增单测 `test_screenshot_action_writes_path_into_trace` 钉住路径规则与
+穿越收敛。
+
 ## 1. `optional` 修复
 
 ### 根因
@@ -606,6 +641,7 @@ trace 现在记录**真正命中**的策略：`Executor.find` 在返回元素上
 | 冒烟用例 | `suites/lst/smoke_launch_001.yaml` |
 | 首页导航用例 | `suites/lst/home_search_back_001.yaml` |
 | 搜索输入用例 | `suites/lst/search_input_001.yaml`（输入/实时过滤/清空/取消） |
+| 截图用例 / 能力 | `suites/lst/screenshot_001.yaml`（`action: screenshot`） |
 | 首页 / 搜索页 override | `repository/overrides/{screens,elements}/LSTDynamic{HomeViewController,SearchView}.yaml` |
 | tab 导航用例 | `suites/lst/tab_switch_back_001.yaml` |
 | 畅行慧览用例 / override | `suites/lst/tab_journey_001.yaml`、`repository/overrides/screens/LSTDynamicNearServiceViewController.yaml` |

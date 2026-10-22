@@ -1,0 +1,47 @@
+# suites/lst/screenshot_001.yaml — 截图步骤能力验证
+#
+# 验证 `action: screenshot` 能在用例中落盘并写进 trace：
+# - 首页截一张（name: home）
+# - 进搜索页截一张（name: search）
+# - 回首页再截一张（不填 name，走自动命名）
+#
+# 产出：out/screenshots/<run_id>_step<idx>[_<name>]_<ts>.png
+# trace：steps.screenshot_path 指向同一路径。
+schema_version: "0.2"
+id: lst_screenshot_001
+name: 乐速通截图步骤验证
+suite: lst_smoke
+tags: [lst, smoke, screenshot]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - wait_for:
+      target: update_dialog_cancel
+      condition: exists
+      timeout: 15
+    optional: true
+  - action: tap
+    target: update_dialog_cancel
+    optional: true
+  - wait_for:
+      target: screen:LSTDynamicHomeViewController
+      condition: active
+      timeout: 15
+  - action: screenshot
+    name: home
+  - action: tap
+    target: LSTDynamicHomeViewController.home_search
+  - wait_for:
+      target: screen:LSTDynamicSearchView
+      condition: active
+      timeout: 15
+  - action: screenshot
+    name: search
+  - action: tap
+    target: search_back
+  - wait_for:
+      target: screen:LSTDynamicHomeViewController
+      condition: active
+      timeout: 15
+  - action: screenshot

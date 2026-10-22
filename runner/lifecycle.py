@@ -242,7 +242,8 @@ class Lifecycle:
             failure_type=out.failure_type,
             failure_phase=(out.phase.value if out.phase else None),
             latency_ms=out.latency_ms,
-            detail=out.detail or None)
+            detail=out.detail or None,
+            screenshot_path=out.screenshot_path)
         # 返回 steps 行 id：恢复成功的步骤要落 recoveries 行（9.2），行关联
         # 需要精确 id（P0-2 教训：不要拿 MAX(id) 猜）。
         return row_id

@@ -126,10 +126,18 @@ class ActionStep(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["launch_app", "terminate_app", "tap", "input", "swipe", "back"]
+    action: Literal[
+        "launch_app", "terminate_app", "tap", "input", "swipe", "back",
+        "screenshot",
+    ]
     target: TargetRef | None = None
     value: str | None = None
     direction: Literal["up", "down", "left", "right"] | None = None
+    # `screenshot` 专用：可选的文件名后缀（不含扩展名）。为空时由执行层
+    # 按 run_id + 步骤序号自动命名（`<run_id>_step<idx>_<timestamp>.png`）。
+    # 不放进 value：value 的语义是「输入值」，截图标签不是被测数据，
+    # 混用会让 trace 的 sensitive/redact 逻辑误判。
+    name: str | None = None
     sensitive: bool = False
     idempotency: Idempotency | None = None  # None = 未声明 → Executor 按 7.4 推导
     risk: Risk | None = None

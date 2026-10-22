@@ -87,6 +87,9 @@ class StepOutcome:
     effective_idempotency: Idempotency | None = None
     locator_strategy: str | None = None
     step_schema_version: str | None = None
+    # 截图步骤产出的文件路径（相对 CWD）。只有 `action: screenshot` 会填；
+    # 其余步骤为 None。落 steps.screenshot_path 供报告/排障直接打开。
+    screenshot_path: str | None = None
     detail: dict = field(default_factory=dict)
 
     @property

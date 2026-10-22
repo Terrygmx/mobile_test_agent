@@ -1099,6 +1099,59 @@ steps:
     assert result.status == "PASS", result.detail
 
 
+def test_screenshot_action_writes_path_into_trace(tmp_path, monkeypatch):
+    """`action: screenshot` 走 app-level 通道：调 executor.screenshot，
+    并把落盘路径写进 steps.screenshot_path（报告/排障直接可打开）。
+
+    同时钉住文件名规则：run_id + step<idx> + 可选 name + 时间戳。
+    `name` 里的路径分隔符必须被收敛掉（防写出 out/screenshots）。
+    """
+    from executor.guard import EnvKind, Guard
+    from runner.lifecycle import Lifecycle
+    from runner.runner import StepRunner
+    from tracer.storage import TraceStore
+
+    calls = []
+
+    class _ShotEx(_StubOKExecutor):
+        def screenshot(self, path):
+            calls.append(path)
+
+    store = TraceStore(tmp_path / "trace.db")
+    store.start_run("run_shot")
+    pipe = SessionPipeline(suites_root=None, store=store)
+    case = _load_case("""\
+schema_version: "0.2"
+id: shot
+name: screenshot action
+steps:
+  - action: screenshot
+    name: home
+  - action: screenshot
+  - action: screenshot
+    name: ../../escape/attempt
+""")
+    runner = StepRunner(_ShotEx(), _FakeDS(), Guard(EnvKind.SANDBOX))
+    result = pipe.run_case(runner, Lifecycle(store=store), case,
+                           run_id="run_shot")
+    assert result.status == "PASS", result.detail
+
+    rows = [tuple(r) for r in store.conn.execute(
+        "SELECT step_type, status, screenshot_path FROM steps "
+        "ORDER BY step_index").fetchall()]
+    assert len(rows) == 3
+    assert all(r[0] == "screenshot" and r[1] == "SUCCESS" for r in rows)
+    assert all(r[2] for r in rows), "每步都要有 screenshot_path"
+    assert calls == [r[2] for r in rows], "trace 与 executor 收到的路径必须一致"
+
+    # 文件名：run_id + step<idx> + 可选 name + 时间戳
+    assert "run_shot_step0_home_" in rows[0][2]
+    assert "run_shot_step1_" in rows[1][2] and "home" not in rows[1][2]
+    # 路径穿越被收敛：不得出现 ".." 或子目录
+    assert ".." not in rows[2][2]
+    assert rows[2][2].count("/") == 2, rows[2][2]   # out/screenshots/<file>
+
+
 def test_strategies_are_dict_locator_contract(tmp_path):
     """2.7 M2 Gate 真机实锤：Executor.find 的 Locator 契约是
     list[dict]（strat["type"] 下标访问）。pipeline 过去传

@@ -52,7 +52,12 @@ from source.build_identity import DEFAULT_APP_BUILD  # noqa: E402
 # find/perform 元素管线。launch/terminate 归 AppSession，back 归 driver，
 # swipe 归 Executor——与 P0 旧 runner 的 _do_* 分流同形（已退役）。
 _APP_LEVEL_ACTIONS = frozenset(
-    {"launch_app", "terminate_app", "back", "swipe"})
+    {"launch_app", "terminate_app", "back", "swipe", "screenshot"})
+
+# 截图落点：与 `agents/tools.py` 的 `screenshot_dir` 同款（相对 CWD 的
+# 项目约定）。用 `out/screenshots/` 而不是 out/ 根目录——截图会累积，
+# 与 trace 库/日志分开才不会被误当产物。
+_SCREENSHOT_DIR = "out/screenshots"
 
 # 14.4：`${VAR}` 占位符（与 testcase.lint.SECRET_REF 同形态——两处不得分叉）
 _SECRET_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -447,15 +452,17 @@ class SessionPipeline:
                         # ELEMENT_NOT_FOUND（App 级动作压根没有 target）。
                         if step.action in _APP_LEVEL_ACTIONS:
                             t1 = time.time()
-                            ok, err = self._run_app_level_action(
-                                runner, step.action, step)
-                            self._record_aux_step(
+                            ok, err, shot = self._run_app_level_action(
+                                runner, step.action, step,
+                                run_id=run_id, step_index=idx)
+                            aux_row = self._record_aux_step(
                                 lifecycle, idx, step.action, "",
                                 latency_ms=int((time.time() - t1) * 1000),
                                 ok=ok,
                                 failure_type=(None if ok
                                               else "ACTION_FAILED"),
-                                detail=({"error": err} if err else None))
+                                detail=({"error": err} if err else None),
+                                screenshot_path=shot)
                             if not ok:
                                 status = "FAIL"
                                 failure_type = "ACTION_FAILED"
@@ -898,7 +905,10 @@ class SessionPipeline:
             step_index=step_ctx.step_index)
 
     def _run_app_level_action(self, runner: StepRunner, action: str,
-                              step: ActionStep) -> tuple[bool, str | None]:
+                              step: ActionStep,
+                              *, run_id: str = "",
+                              step_index: int = 0,
+                              ) -> tuple[bool, str | None, str | None]:
         """App/driver 级动作执行（M2 Gate 真机实锤后新增）。
 
         分流（与旧 runner 的 _do_* 一致）：
@@ -906,9 +916,10 @@ class SessionPipeline:
           terminate_app → deps.app.terminate()
           back          → device session 的 driver.back()
           swipe         → executor.swipe(step.direction)
+          screenshot    → executor.screenshot(自动生成路径)
 
-        返回 (ok, error)。FAIL 语义：普通 FAIL + ACTION_FAILED（8.4 exit 1）
-        ——这是用例动作执行失败，不是环境问题。
+        返回 (ok, error, screenshot_path)。FAIL 语义：普通 FAIL +
+        ACTION_FAILED（8.4 exit 1）——这是用例动作执行失败，不是环境问题。
         """
         try:
             if action == "launch_app":
@@ -921,14 +932,38 @@ class SessionPipeline:
                 if hasattr(runner.ex, "swipe"):
                     runner.ex.swipe(step.direction or "up")
                 else:
-                    return False, "executor has no swipe()"
+                    return False, "executor has no swipe()", None
+            elif action == "screenshot":
+                if not hasattr(runner.ex, "screenshot"):
+                    return False, "executor has no screenshot()", None
+                path = self._screenshot_path(
+                    run_id=run_id, step_index=step_index, name=step.name)
+                runner.ex.screenshot(path)
+                return True, None, path
             else:
-                return False, f"unknown app-level action {action!r}"
+                return False, f"unknown app-level action {action!r}", None
         except SessionPipeline.PreflightError:
             raise
         except Exception as e:  # noqa: BLE001 — 步骤失败如实上报
-            return False, f"{type(e).__name__}: {e}"
-        return True, None
+            return False, f"{type(e).__name__}: {e}", None
+        return True, None, None
+
+    def _screenshot_path(self, *, run_id: str, step_index: int,
+                         name: str | None) -> str:
+        """截图落盘路径：`out/screenshots/<run>_step<idx>[_<name>]_<ts>.png`。
+
+        时间戳保证同一步骤多次执行不互相覆盖；`name` 由用例提供（可选），
+        用于给关键画面起可读标签（如 `home`、`login_error`）。
+        `name` 会被收敛成安全文件名（只保留字母数字/下划线/连字符），
+        防止用例里的标签带路径分隔符写出目录。
+        """
+        Path(_SCREENSHOT_DIR).mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "_", name or "").strip("_")
+        parts = [run_id or "run", f"step{step_index}"]
+        if safe:
+            parts.append(safe)
+        parts.append(str(int(time.time() * 1000)))
+        return str(Path(_SCREENSHOT_DIR) / ("_".join(parts) + ".png"))
 
     def _app_or_stub(self, stub_cls):
         """deps.app 存在用之；否则走 no-op 桩（fake-driver 模式）。
@@ -1081,7 +1116,8 @@ class SessionPipeline:
                          target_id: str, *, ok: bool = True,
                          failure_type: str | None = None,
                          latency_ms: int = 0, detail: dict | None = None,
-                         status: str | None = None
+                         status: str | None = None,
+                         screenshot_path: str | None = None,
                          ) -> int | None:
         """wait/assert 步骤也落 steps 表（P3-1：TraceStore 全步可见）。
 
@@ -1092,7 +1128,8 @@ class SessionPipeline:
         return lifecycle.record_step(StepOutcome(
             ok=ok, step_index=idx, action=step_type, element_id=target_id,
             failure_type=failure_type, latency_ms=latency_ms,
-            detail=detail or {}), step_index=idx, status=status)
+            detail=detail or {},
+            screenshot_path=screenshot_path), step_index=idx, status=status)
 
     def _write_recovery_row(self, step_row_id: int | None, target_id: str,
                             rec, context: str | None = None) -> None:

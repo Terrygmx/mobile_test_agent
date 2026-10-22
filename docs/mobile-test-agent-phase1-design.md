@@ -286,7 +286,7 @@ cleanup:
 
 | 类别 | 类型 |
 |------|------|
-| Action | `launch_app`, `terminate_app`, `tap`, `input`, `swipe`, `back` |
+| Action | `launch_app`, `terminate_app`, `tap`, `input`, `swipe`, `back`, `screenshot` |
 | Wait | `wait_for`：condition ∈ `exists / not_exists / visible / enabled / disabled / text_equals / text_contains / active(仅 screen)` |
 | Assertion | `exists / not_exists / text_equals / text_contains / element_count / enabled / disabled` |
 
@@ -307,10 +307,11 @@ class Postcondition(BaseModel):
     target: TargetRef; condition: str; timeout: float = 10
 
 class ActionStep(BaseModel):
-    action: Literal["launch_app","terminate_app","tap","input","swipe","back"]
+    action: Literal["launch_app","terminate_app","tap","input","swipe","back","screenshot"]
     target: TargetRef | None = None
     value: str | None = None
     direction: Literal["up","down","left","right"] | None = None
+    name: str | None = None                      # 仅 screenshot：可选文件名标签
     sensitive: bool = False
     idempotency: Idempotency | None = None      # None = 未声明，走默认推导（7.4）
     risk: Risk | None = None
