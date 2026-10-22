@@ -107,7 +107,7 @@ lst_tab_switch_back_001: PASS
 |---|---|---|
 | `lst_login_001` | PASS 21/21 | 加 back 步后修复 |
 | `lst_login_negative_001` | PASS 23/23 | 新用例（含登出自洽前置） |
-| 全量 `lst_smoke` batch | **6/6 PASS**（`run: exit 0`） | 含上述两条 |
+| 全量 `lst_smoke` batch | **6/6 PASS**（`run: exit 0`） | 含上述两条（prod） |
 | 全量单测 | **2366 passed / 0 failed**（70.5s） | 与基线一致，零新增测试 |
 
 已知边界：错误密码路径**不测**（账号锁定风险，用户明确要求跳过）；未勾
@@ -176,6 +176,59 @@ TEST_USERNAME='<账号>' TEST_PASSWORD='<密码>'   .venv/bin/python -m cli.main
 ```
 
 未注入时 lint 报 `unknown_secret`（exit 3），明文也不会进 trace。
+
+### 1.3 搜索输入与实时过滤（2026-10-22，遗留项 1）
+
+补上了此前「搜索输入框没有独立锚点、只能覆盖进入/返回」的缺口。
+
+**新增用例 `suites/lst/search_input_001.yaml`**（17 步）：
+
+```text
+launch → optional 关弹窗 → 等首页 → 点 home_search → 等搜索页
+→ 断言空列表 → 输入 ETC → 等清除按钮出现 → 等空列表消失
+→ 断言 ETC新办 出现 → 点清除文本 → 等空列表恢复
+→ 断言 ETC新办 消失 → 点取消 → 等首页 → 断言 home_search
+```
+
+**新增元素**（`repository/overrides/elements/LSTDynamicSearchView.yaml`）：
+
+| 元素 | 定位 | 说明 |
+|---|---|---|
+| `search_input` | `type == TextField` | 页内唯一；输入框**无** name/label/placeholderValue |
+| `search_clear_text` | accessibility id `清除文本` | 输入非空才出现（系统本地化文案） |
+| `search_empty_list` | `Table name="空列表"` | 未输入时的空态 |
+| `search_result_etc` | `StaticText name="ETC新办"` | 输入 ETC 后的结果项（服务端文案） |
+
+**关键技术事实**：
+
+- 搜索框是 `LSTDynamicSearchViewController.searchTF`（`UITextField`，放在
+  `navigationItem.titleView`），**没有任何可读身份**——name/label/
+  placeholderValue 全空。页内 `TextField` 唯一，故用类型谓词；
+  固定坐标 `x=76 y=64 w=278 h=34` 也在 dump 中确认，但未绑定（更耐布局微调）。
+- 过滤是**纯客户端**的：`shouldChangeCharactersInRange` 逐字符过滤本地
+  `menuArr`，**不发网络请求**——所以这条链路在断网时也能跑。
+- `Executor.input` 是 `clear(); send_keys(value)` 整串下发；真机实测整串
+  与逐字符都能生效（`send_keys` 本身约 1.9s，WDA 逐字符敲键盘），输入后
+  `.text` 回读 `ETC`。
+- 空态/结果判据是**互斥**的：未输入时 `空列表` 存在且 `ETC新办` 不存在；
+  输入后反过来；点清除文本后回到初始态（probe_search11 四态实测）。
+- 两条返回路径都已覆盖：本用例点「取消」，`home_search_back_001` 点
+  `return`。
+
+真机 `run_792715e2`（uat 包）：`lst_search_input_001` PASS，17/17 SUCCESS。
+
+⚠️ **uat 包必须强制重建**（本轮踩到的坑）：`build/lst-device-uat` 里的
+`LSTDynamicNavigationBarView.o` 时间戳是 10-17 13:52，而 `home_search`
+锚点的 commit 是 13:56——增量构建复用了旧目标文件，导致 uat 包**没有**
+`home_search` 节点，所有依赖它的用例都会红（`lst_smoke_launch_001`
+`CURRENT_SCREEN_UNKNOWN`）。prod 包（10-18 15:41 构建）正常。
+排查方式：`find build/lst-device-<env> -name '*.o' | xargs ls -la` 对比
+源码 commit 时间；确认是旧产物后移走 build 目录强制全量重建即可。
+
+**uat 环境账号差异**：`TerryOnPro` 在测试环境返回
+`用户名不存在或密码错误`（probe_uat_login），因此 `lst_login_001` 在
+uat 包上会红——这是**账号数据**问题，不是用例或 App 缺陷。登录链路请在
+prod 包验证（prod 上 21/21 PASS）。
 
 ## 1. `optional` 修复
 
@@ -323,7 +376,8 @@ launch → optional 关弹窗 → 等首页 → 点搜索 → 等搜索页
 `LSTDynamicHomeViewController.home_search`。lint 也必须带
 `--generated repository/generated/local-uat`。
 
-搜索输入框尚未暴露独立节点，因此本轮只覆盖进入与返回，不覆盖输入。
+~~搜索输入框尚未暴露独立节点，因此本轮只覆盖进入与返回~~ —— 已于
+2026-10-22 补齐输入链路，见 §1.3 `suites/lst/search_input_001.yaml`。
 
 ### 3.2 WDA 手机端授权
 
@@ -521,7 +575,9 @@ trace 现在记录**真正命中**的策略：`Executor.find` 在返回元素上
   （非 YAML、子目录和 build 外文件保留）；若曾手工改过 generated，仍需按 H16
   重新执行 `mta repo generate`，不要依赖手工清理。
 - 乐速通 accessibilityIdentifier 覆盖仍很低（两个 `calendar` + `home_search`），
-  后续页面大多仍需结构探测；搜索输入框也尚无独立锚点。
+  后续页面大多仍需结构探测。~~搜索输入框也尚无独立锚点~~ —— 输入链路已用
+  「页内 TextField 唯一 + 类型谓词」补齐（§1.3），但仍是结构探测，App 若
+  在搜索页再加第二个 TextField 就会歧义，需 App 补 identifier 才彻底稳。
 - 服务页 screen marker 临时使用服务端文案 `ETC发行`，运营改名会假红；需 App
   补稳定锚点后替换。
 - ~~两套 runner 并存~~ **已收口（2026-10-17）**：`runner/testcase_runner.py`
@@ -549,6 +605,7 @@ trace 现在记录**真正命中**的策略：`Executor.find` 在返回元素上
 | 首页锚点与排错 | `docs/lst_update_playbook.md` §3.11 |
 | 冒烟用例 | `suites/lst/smoke_launch_001.yaml` |
 | 首页导航用例 | `suites/lst/home_search_back_001.yaml` |
+| 搜索输入用例 | `suites/lst/search_input_001.yaml`（输入/实时过滤/清空/取消） |
 | 首页 / 搜索页 override | `repository/overrides/{screens,elements}/LSTDynamic{HomeViewController,SearchView}.yaml` |
 | tab 导航用例 | `suites/lst/tab_switch_back_001.yaml` |
 | 畅行慧览用例 / override | `suites/lst/tab_journey_001.yaml`、`repository/overrides/screens/LSTDynamicNearServiceViewController.yaml` |

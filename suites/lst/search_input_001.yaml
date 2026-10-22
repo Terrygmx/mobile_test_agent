@@ -1,0 +1,96 @@
+# suites/lst/search_input_001.yaml — 首页 → 搜索页 → 输入关键词 → 实时过滤 → 清空 → 取消返回
+#
+# 真机探测（2026-10-22，uat 包 `5196852c`，probe_search10/11）：
+# - 搜索入口：首页 `home_search`（App 写死在搜索按钮内 UILabel 上的
+#   accessibilityIdentifier）；uat 包必须**强制重建**才有该锚点——
+#   旧产物是 anchor commit 之前的（见 docs/handover-lst-smoke.md）。
+# - 搜索页 marker：NavigationBar name `LSTDynamicSearchView`。
+# - 输入框 `search_input`：UITextField（navigationItem.titleView），
+#   **无 name/label/placeholderValue**，页内 TextField 唯一，用类型谓词。
+# - `Executor.input` = `clear(); send_keys(value)` 整串下发；真机实测整串
+#   与逐字符都能生效，输入后 `.text` 回读 `ETC`。
+# - 过滤是**纯客户端**的：`LSTDynamicSearchViewController` 的
+#   `shouldChangeCharactersInRange` 逐个字符过滤本地 menuArr，无网络请求。
+# - 空态判据：未输入时 `Table name="空列表"` 存在；输入后消失。
+# - 结果判据：输入 `ETC` 后出现 `ETC新办` 等 9 条结果（真机实测）。
+# - 「清除文本」按钮只在输入非空时出现（clearButtonMode=WhileEditing），
+#   点击后输入清空、结果消失、空列表恢复。
+# - 「取消」按钮回首页（与系统 `return` 是两条不同返回路径；本用例覆盖
+#   取消，home_search_back_001 覆盖 return）。
+#
+# ⚠️ `ETC新办` 是服务端菜单文案，运营改名会假红；与 `ETC发行`/`附近服务`
+# 同类临时判据。若只想验「过滤有产出」而不绑具体文案，可改为断言
+# `search_empty_list` not_exists（本用例两者都做）。
+schema_version: "0.2"
+id: lst_search_input_001
+name: 乐速通首页搜索输入与实时过滤
+suite: lst_smoke
+tags: [lst, smoke, search, input]
+precondition:
+  reset: RELAUNCH
+steps:
+  - action: launch_app
+  - wait_for:
+      target: update_dialog_cancel
+      condition: exists
+      timeout: 15
+    optional: true
+  - action: tap
+    target: update_dialog_cancel
+    optional: true
+  - wait_for:
+      target: screen:LSTDynamicHomeViewController
+      condition: active
+      timeout: 15
+  # --- 进入搜索页 ---
+  - action: tap
+    target: LSTDynamicHomeViewController.home_search
+  - wait_for:
+      target: screen:LSTDynamicSearchView
+      condition: active
+      timeout: 15
+  # 未输入时是空列表
+  - assertion:
+      target: search_empty_list
+      condition: exists
+      timeout: 5
+  # --- 输入关键词 → 实时过滤 ---
+  - action: input
+    target: search_input
+    value: "ETC"
+  # 输入生效的两个独立证据：清除按钮出现 + 空列表消失
+  - wait_for:
+      target: search_clear_text
+      condition: exists
+      timeout: 10
+  - wait_for:
+      target: search_empty_list
+      condition: not_exists
+      timeout: 10
+  # 过滤真的产出了结果（不只输入框有字）
+  - assertion:
+      target: search_result_etc
+      condition: exists
+      timeout: 10
+  # --- 清除文本 → 回到空态 ---
+  - action: tap
+    target: search_clear_text
+  - wait_for:
+      target: search_empty_list
+      condition: exists
+      timeout: 10
+  - assertion:
+      target: search_result_etc
+      condition: not_exists
+      timeout: 5
+  # --- 取消返回首页（与 return 不同的返回路径）---
+  - action: tap
+    target: search_cancel
+  - wait_for:
+      target: screen:LSTDynamicHomeViewController
+      condition: active
+      timeout: 15
+  - assertion:
+      target: LSTDynamicHomeViewController.home_search
+      condition: exists
+      timeout: 5

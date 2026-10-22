@@ -4,7 +4,20 @@
 # - 系统返回按钮 name/label 均为 `return`；
 # - 右上角「取消」按钮唯一，但页面同时存在一个无名的输入框清除按钮，
 #   所以不能用 accessibility id `取消`（会命中 2 个节点）；
-# - 搜索输入框本身没有独立节点，输入框内文字也未暴露，暂不做输入链路。
+# - 搜索输入框本身没有独立节点，输入框内文字也未暴露。
+#
+# 输入链路（2026-10-22，uat 包 `5196852c`，probe_search10/11）：
+# - 输入框是 `LSTDynamicSearchViewController.searchTF`（UITextField，
+#   放在 navigationItem.titleView 里）。它**没有** name/label/
+#   placeholderValue，唯一可用身份是类型 + 固定坐标（x=76 y=64 w=278
+#   h=34，导航栏 titleView 布局决定）；页内 `type == TextField` 本身
+#   就唯一，故 `search_input` 直接用类型谓词，不绑坐标（更耐布局微调）。
+# - `Executor.input` 是 `clear(); send_keys(value)` 整串下发；真机实测
+#   整串与逐字符都能生效，输入后 `.text`/`value` 均回读 `ETC`。
+# - 输入框为空时列表是 `Table name="空列表"`；输入后该节点消失、结果
+#   Cell 出现；点系统「清除文本」按钮后回到空列表。
+# - 「清除文本」只在输入非空时出现（clearButtonMode=WhileEditing），
+#   可直接作为「输入已生效」的旁证。
 #
 # 恢复演练目标登记（2026-10-18）：`lst_recovery_search_back` 是隔离故障
 # 目录里的漂移目标，正式 overrides 也登记同名元素，目的是让
@@ -46,6 +59,85 @@ type: button
 strategies:
   - {type: predicate,
      value: 'type == "XCUIElementTypeButton" AND name == "取消"',
+     origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+
+---
+# `search_input`：搜索页输入框（navigationItem.titleView 里的 UITextField）。
+#
+# 无 name/label/placeholderValue，页内 TextField 唯一，故只用类型谓词。
+# 真机 dump（2026-10-22，uat）：`x=76 y=64 w=278 h=34 index=1`；
+# `type == "XCUIElementTypeTextField"` 实测唯一命中。
+schema_version: "1.0"
+kind: element
+id: search_input
+screen: LSTDynamicSearchView
+type: textfield
+strategies:
+  - {type: predicate,
+     value: 'type == "XCUIElementTypeTextField"',
+     origin: manual}
+metadata:
+  risk: MEDIUM
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+
+---
+# `search_clear_text`：输入框右侧的系统「清除文本」按钮。
+#
+# 只在输入非空时出现（UITextField.clearButtonMode = WhileEditing），
+# 点击后清空输入并恢复空列表。name 是系统本地化文案「清除文本」，
+# ⚠️ 随系统语言变化（当前设备中文）；作为「输入已生效」的旁证使用。
+schema_version: "1.0"
+kind: element
+id: search_clear_text
+screen: LSTDynamicSearchView
+type: button
+strategies:
+  - {type: accessibility_id, value: '清除文本', origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+
+---
+# `search_empty_list`：未输入时的空态 Table。
+#
+# 输入为空时 `Table name="空列表"` 存在；输入后该节点消失（真机实测
+# initial/after_clear = 1，after_input = 0）。用它断言「清空后回到空态」
+# 比断言某条具体结果更稳——结果文案来自服务端菜单。
+schema_version: "1.0"
+kind: element
+id: search_empty_list
+screen: LSTDynamicSearchView
+type: other
+strategies:
+  - {type: predicate,
+     value: 'type == "XCUIElementTypeTable" AND name == "空列表"',
+     origin: manual}
+metadata:
+  risk: LOW
+  idempotency: IDEMPOTENT
+  data_class: PUBLIC
+
+---
+# `search_result_etc`：输入 `ETC` 后命中的结果项之一。
+#
+# 菜单数据来自服务端（`getMenu`），文案是运营可改的；这里选 `ETC新办`
+# 是因为它是 ETC 类目下的固定业务名，真机实测输入 ETC 后必然出现。
+# ⚠️ 与 `ETC发行`/`附近服务` 同类：服务端改文案会假红。用它是为了
+# 断言「过滤真的产出了结果」，而不只是「输入框里有字」。
+schema_version: "1.0"
+kind: element
+id: search_result_etc
+screen: LSTDynamicSearchView
+type: text
+strategies:
+  - {type: predicate,
+     value: 'type == "XCUIElementTypeStaticText" AND name == "ETC新办"',
      origin: manual}
 metadata:
   risk: LOW
